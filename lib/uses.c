@@ -1069,26 +1069,3 @@ family_of(relic_reduction_t *reduction, relic_pred_id_t pred,
 	return (NULL);
 }
 
-/*
- * Confirm that a plan may read `pred`'s rows: that it is not a source the
- * run reduces, or one it was to reduce whose producer was evaluated
- * instead.  The inventory saw every literal that reads rows and admitted
- * no source one of them reads, so a plan reading one is a broken
- * invariant, reported rather than allowed to find the source empty.
- */
-int
-relic_reduction_confirm_rows(relic_t *ctx, relic_pred_id_t pred,
-    const relic_location_t *where)
-{
-	const relic_reduced_source_t *source;
-	char name[RELIC_PRED_TEXT_MAX];
-
-	source = relic_reduction_source(ctx, pred);
-	if (source == NULL || source->state == RELIC_SOURCE_STORED)
-		return (0);
-
-	relic_diag_internal(ctx, where,
-	    "a plan reads the rows of %s, which its reduction does not store",
-	    relic_pred_identify(ctx, pred, name, sizeof(name)));
-	return (-1);
-}

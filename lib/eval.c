@@ -517,7 +517,6 @@ static void	 deliver_batch(relic_evaluation_t *eval,
 		    const relic_row_sink_t *sink, uint16_t arity);
 static int	 insert_batch(relic_evaluation_t *eval,
 		    relic_relation_t *relation);
-static const relic_relation_t *plan_head(const relic_plan_t *plan);
 static relic_pending_t *make_pending_room(relic_evaluation_t *eval);
 static int	 fit_scratch(relic_evaluation_t *eval,
 		    const relic_plan_t *plan);
@@ -2108,32 +2107,28 @@ make_pending_room(relic_evaluation_t *eval)
 }
 
 /*
- * The relation `plan` writes: the one its last operation, the EMIT, names.
- */
-static const relic_relation_t *
-plan_head(const relic_plan_t *plan)
-{
-	return (plan->ops[plan->op_count - 1].u.atom.relation);
-}
-
-/*
- * Pair a plan built for `rule` with `target`, the relation its EMIT names,
- * in *runningp.  Every plan an evaluation runs is made here, so this is
- * where it is confirmed to write the relation it is paired with and to fit
- * the evaluation's batch: the EMIT packs its tuples at the arity of the
- * relation it names and the batch is taken at the target's, and a head
- * wider than the batch's room would have its tuples written past the
- * batch.  The scratch's states are grown here to hold the plan's.
+ * Pair a plan built for `rule` with `target`, the relation its taker
+ * writes, in *runningp.  Every plan an evaluation runs is made here, so
+ * this is where the EMIT's head schema is confirmed against that relation
+ * and against the evaluation's batch: the EMIT packs its tuples at its
+ * own arity and the batch is taken at the target's, and a head wider than
+ * the batch's room would have its tuples written past the batch.  The
+ * plan does not name the relation.  The scratch's states are grown here
+ * to hold the plan's.
  */
 static int
 make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
     const relic_plan_t *plan, relic_relation_t *target,
     relic_running_plan_t **runningp)
 {
+	const relic_op_t *emit;
 	relic_running_plan_t *running;
 
 	*runningp = NULL;
-	if (plan_head(plan) != target) {
+	emit = plan->op_count == 0 ? NULL :
+	    &plan->ops[plan->op_count - 1];
+	if (emit == NULL || emit->kind != RELIC_OP_EMIT ||
+	    emit->u.emit.arity != target->arity) {
 		relic_diag_internal(eval->ctx, &rule->where,
 		    "a rule's plan writes other than the relation it was "
 		    "planned for");
@@ -4264,7 +4259,8 @@ run_query_rule(relic_t *ctx, const relic_rule_t *rule,
 		streams = choose_query_target(ctx, running, rows);
 		relic_explain_query(ctx, rule, answer);
 		explain_group_rules(ctx, groups);
-		relic_explain_query_plan(ctx, rule, &running->plan, streams);
+		relic_explain_query_plan(ctx, rule, &running->plan, answer,
+		    streams);
 		if (streams)
 			status = stream_query_plan(&eval, running);
 		else

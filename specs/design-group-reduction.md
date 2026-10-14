@@ -348,7 +348,11 @@ relation handle. The destination belongs to its taker: an insertion target,
 answer sink or reducer. Static analysis, including the distinctness proof,
 reads this output schema directly. This common representation avoids a
 dummy source relation and keeps row-read operations' relation handles
-mandatory.
+mandatory. `relic_relation_read()` is the only way a plan obtains a
+relation's rows. A source the active scope does not store, one it will
+reduce or one it has reduced, is refused there, and no empty row store is
+created for it. A source selected to materialize is stored through
+`relic_relation_written()`.
 
 It reads pending values directly from the current batch's representation.
 It does not add every emitted value to a worker dictionary retained for

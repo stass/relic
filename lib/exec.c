@@ -175,9 +175,9 @@ static enum relic_exec_status end_run(relic_scratch_t *scratch);
 static relic_dom_t emit_column(relic_scratch_t *scratch,
 		    const relic_plan_term_t *term);
 static enum relic_emit_end emit_head(relic_scratch_t *scratch,
-		    const relic_op_atom_t *atom);
+		    const relic_op_emit_t *emit);
 static size_t	 emit_pending_bytes(const relic_scratch_t *scratch,
-		    const relic_op_atom_t *atom);
+		    const relic_op_emit_t *emit);
 static void	 fold_group(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env,
 		    const relic_op_aggregate_t *aggregate,
@@ -2122,15 +2122,15 @@ step_aggregate(relic_scratch_t *scratch, const relic_exec_env_t *env,
  * assigned.
  */
 static size_t
-emit_pending_bytes(const relic_scratch_t *scratch, const relic_op_atom_t *atom)
+emit_pending_bytes(const relic_scratch_t *scratch, const relic_op_emit_t *emit)
 {
 	const relic_plan_term_t *term;
 	uint16_t column;
 	size_t bytes;
 
 	bytes = 0;
-	for (column = 0; column < atom->arity; column++) {
-		term = &atom->terms[column];
+	for (column = 0; column < emit->arity; column++) {
+		term = &emit->terms[column];
 		if (term->action == RELIC_PLAN_TEXT &&
 		    scratch->frame[term->u.slot] == 0)
 			bytes = relic_saturating_sum(bytes,
@@ -2196,7 +2196,7 @@ emit_column(relic_scratch_t *scratch, const relic_plan_term_t *term)
  * grow to hold them, so that a tuple is written once and whole.
  */
 static enum relic_emit_end
-emit_head(relic_scratch_t *scratch, const relic_op_atom_t *atom)
+emit_head(relic_scratch_t *scratch, const relic_op_emit_t *emit)
 {
 	relic_text_buffer_t *bytes;
 	relic_dom_t *tuple;
@@ -2204,12 +2204,12 @@ emit_head(relic_scratch_t *scratch, const relic_op_atom_t *atom)
 	uint16_t column;
 	size_t needed;
 
-	arity = atom->arity;
+	arity = emit->arity;
 	assert(arity <= scratch->arity_room);
 	assert(scratch->batch_count < RELIC_INSERT_BATCH);
 
 	bytes = &scratch->pending_bytes;
-	needed = emit_pending_bytes(scratch, atom);
+	needed = emit_pending_bytes(scratch, emit);
 	if (needed > bytes->capacity - bytes->used) {
 		if (scratch->batch_count > 0)
 			return (RELIC_EMIT_FULL);
@@ -2219,7 +2219,7 @@ emit_head(relic_scratch_t *scratch, const relic_op_atom_t *atom)
 
 	tuple = &scratch->batch[scratch->batch_count * arity];
 	for (column = 0; column < arity; column++)
-		tuple[column] = emit_column(scratch, &atom->terms[column]);
+		tuple[column] = emit_column(scratch, &emit->terms[column]);
 	scratch->batch_count++;
 
 	return (RELIC_EMIT_WRITTEN);
@@ -2704,7 +2704,7 @@ run_join(relic_scratch_t *scratch)
 		op = &plan->ops[level];
 
 		if (op->kind == RELIC_OP_EMIT) {
-			switch (emit_head(scratch, &op->u.atom)) {
+			switch (emit_head(scratch, &op->u.emit)) {
 			case RELIC_EMIT_WRITTEN:
 				break;
 			case RELIC_EMIT_FULL:

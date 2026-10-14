@@ -186,9 +186,9 @@ fixture_open(fixture_t *fixture, const char *scenario)
 	fixture->ops[0].u.atom.arity = 1;
 	fixture->ops[0].u.atom.view = RELIC_VIEW_ALL;
 	fixture->ops[1].kind = RELIC_OP_EMIT;
-	fixture->ops[1].u.atom.relation = fixture->emitted;
-	fixture->ops[1].u.atom.terms = &fixture->read;
-	fixture->ops[1].u.atom.arity = 1;
+	fixture->ops[1].u.emit.terms = &fixture->read;
+	fixture->ops[1].u.emit.arity = 1;
+	fixture->ops[1].u.emit.pred = RELIC_ID_NONE;
 	fixture->plan.ops = fixture->ops;
 	fixture->plan.op_count = 2;
 
@@ -457,7 +457,7 @@ a_plan_of_its_emit_alone_derives_its_head_once(void)
 
 	constant.action = RELIC_PLAN_CONSTANT;
 	constant.u.constant = value;
-	fixture.ops[1].u.atom.terms = &constant;
+	fixture.ops[1].u.emit.terms = &constant;
 	emit_only.ops = &fixture.ops[1];
 	emit_only.op_count = 1;
 
@@ -1063,7 +1063,7 @@ a_fold_that_pauses_emits_its_value_next_call(void)
 	count_term.action = RELIC_PLAN_NUMBER;
 	count_term.u.slot = 1;
 	ops[2] = fixture.ops[1];
-	ops[2].u.atom.terms = &count_term;
+	ops[2].u.emit.terms = &count_term;
 	plan.ops = ops;
 	plan.op_count = 3;
 

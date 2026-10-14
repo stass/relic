@@ -852,9 +852,6 @@ place_atom(relic_planner_t *planner, const relic_atom_t *atom,
 	uint32_t bound;
 	uint16_t i;
 
-	if (relic_reduction_confirm_rows(planner->ctx, atom->pred,
-	    &atom->where) != 0)
-		return (-1);
 	relation = relic_relation_read(planner->ctx, atom->pred);
 	if (relation == NULL)
 		return (-1);
@@ -974,9 +971,6 @@ place_negated(relic_planner_t *planner, const relic_atom_t *atom)
 {
 	relic_relation_t *relation;
 
-	if (relic_reduction_confirm_rows(planner->ctx, atom->pred,
-	    &atom->where) != 0)
-		return (-1);
 	relation = relic_relation_read(planner->ctx, atom->pred);
 	if (relation == NULL)
 		return (-1);
@@ -1951,8 +1945,11 @@ confirm_target_fits(const relic_planner_t *planner)
 }
 
 /*
- * Place the EMIT that ends every plan, reading the head's arguments into the
- * target relation, a number slot's as its integer.
+ * Place the EMIT that ends every plan.  It carries the head's terms and
+ * arity, and the predicate the head names, or none for a query.  The
+ * relation the tuples are written into belongs to the caller:
+ * confirm_target_fits() has required its arity to be the head's, and the
+ * operation does not hold the relation.
  */
 static int
 place_emit(relic_planner_t *planner)
@@ -1970,12 +1967,15 @@ place_emit(relic_planner_t *planner)
 	if (confirm_plan_complete(planner) != 0)
 		return (-1);
 
-	op = append_atom_op(planner, RELIC_OP_EMIT, planner->target);
-	if (op == NULL)
+	op = append_op(planner, RELIC_OP_EMIT);
+	op->u.emit.pred = rule->head;
+	op->u.emit.arity = rule->head_arity;
+	op->u.emit.terms = terms_alloc(planner, rule->head_arity);
+	if (rule->head_arity > 0 && op->u.emit.terms == NULL)
 		return (-1);
 
 	for (i = 0; i < rule->head_arity; i++) {
-		term = &op->u.atom.terms[i];
+		term = &op->u.emit.terms[i];
 		read_term(&rule->head_args[i], term);
 		if (term->action != RELIC_PLAN_BOUND)
 			continue;
@@ -2541,14 +2541,15 @@ relic_plan_order(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
 }
 
 /*
- * The slots the columns of an operation over a relation bind, and the ones
- * they read bound, into *bindsp and *readsp.  Returns false when a column
- * matches with `_`, which binds nothing, so that two tuples differing only
- * there both pass.  The switch names every action, so that one added later
- * must be classified here rather than be ignored.
+ * The slots `arity` terms bind, and the ones they read bound, into
+ * *bindsp and *readsp.  Returns false when a column matches with `_`,
+ * which binds nothing, so that two tuples differing only there both
+ * pass.  The switch names every action, so that one added later must be
+ * classified here rather than be ignored.
  */
 static bool
-atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp, uint64_t *readsp)
+term_slots(const relic_plan_term_t *terms, uint16_t arity, uint64_t *bindsp,
+    uint64_t *readsp)
 {
 	const relic_plan_term_t *term;
 	uint16_t column;
@@ -2558,8 +2559,8 @@ atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp, uint64_t *readsp)
 	*readsp = 0;
 	matches_all = true;
 
-	for (column = 0; column < atom->relation->arity; column++) {
-		term = &atom->terms[column];
+	for (column = 0; column < arity; column++) {
+		term = &terms[column];
 
 		switch (term->action) {
 		case RELIC_PLAN_CONSTANT:
@@ -2579,6 +2580,17 @@ atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp, uint64_t *readsp)
 	}
 
 	return (matches_all);
+}
+
+/*
+ * The slots the columns of an operation over a relation bind, and the ones
+ * they read bound.  The arity is the operation's, copied from the relation
+ * when it was planned.
+ */
+static bool
+atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp, uint64_t *readsp)
+{
+	return (term_slots(atom->terms, atom->arity, bindsp, readsp));
 }
 
 /*
@@ -2603,7 +2615,7 @@ atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp, uint64_t *readsp)
  * no other path derives.  A wildcard, or a slot the EMIT does not read,
  * would let two bindings that differ only there derive one tuple twice.
  *
- * The switch names every kind of operation, and atom_slots() every action a
+ * The switch names every kind of operation, and term_slots() every action a
  * column may have, so that a kind or an action added later must be decided
  * rather than be assumed to keep the property.
  */
@@ -2637,7 +2649,8 @@ relic_plan_derives_distinct(const relic_plan_t *plan)
 		case RELIC_OP_AGGREGATE:
 			break;
 		case RELIC_OP_EMIT:
-			(void)atom_slots(&op->u.atom, &binds, &reads);
+			(void)term_slots(op->u.emit.terms, op->u.emit.arity,
+			    &binds, &reads);
 			emitted |= reads;
 			break;
 		}
@@ -2760,8 +2773,8 @@ relic_op_atom(const relic_op_t *op)
 	case RELIC_OP_MEMBER:
 	case RELIC_OP_EXISTS:
 	case RELIC_OP_ANTI_MEMBER:
-	case RELIC_OP_EMIT:
 		return (&op->u.atom);
+	case RELIC_OP_EMIT:
 	case RELIC_OP_FILTER:
 	case RELIC_OP_ASSIGN:
 	case RELIC_OP_AGGREGATE:

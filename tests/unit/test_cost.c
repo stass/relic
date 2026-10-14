@@ -349,6 +349,10 @@ candidate_atom(candidate_t *built, enum relic_op_kind kind,
 	relic_op_t *op;
 
 	op = candidate_add(built, kind, cost);
+	if (kind == RELIC_OP_EMIT) {
+		op->u.emit.arity = rel == NULL ? 0 : relic_relation_arity(rel);
+		return;
+	}
 	op->u.atom.relation = rel;
 	op->u.atom.view = view;
 	op->u.atom.key_mask = key_mask;

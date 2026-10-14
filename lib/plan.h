@@ -35,6 +35,7 @@ typedef struct relic_op relic_op_t;
 typedef struct relic_op_aggregate relic_op_aggregate_t;
 typedef struct relic_op_assign relic_op_assign_t;
 typedef struct relic_op_atom relic_op_atom_t;
+typedef struct relic_op_emit relic_op_emit_t;
 typedef struct relic_op_filter relic_op_filter_t;
 typedef struct relic_plan relic_plan_t;
 typedef struct relic_plan_access relic_plan_access_t;
@@ -183,8 +184,9 @@ enum relic_view {
 };
 
 /*
- * An operation over a relation: SCAN, LOOKUP, MEMBER, EXISTS, ANTI_MEMBER or
- * EMIT.
+ * An operation over a relation: SCAN, LOOKUP, MEMBER, EXISTS or
+ * ANTI_MEMBER.  An EMIT is not one: it carries its own head schema and
+ * names no relation.
  * `terms` holds a term for each of the relation's `arity` columns and is
  * NULL when that arity is zero.  The arity is the relation's, copied when
  * the operation is planned, since it never changes and the executor reads
@@ -193,14 +195,14 @@ enum relic_view {
  * The relation is held directly rather than as a predicate identifier to
  * resolve on every step.  A relation never moves once created, so a plan may
  * keep the pointer for as long as the relation exists.  It is held
- * read-only: a plan reads relations, and the relation its EMIT names is
- * written by whoever takes the EMIT's tuples, through a pointer of its own.
+ * read-only: a plan reads relations.  Whoever takes an EMIT's tuples holds
+ * the relation it writes, through a pointer of its own.
  *
  * `view` is the view a SCAN, LOOKUP, MEMBER, EXISTS or ANTI_MEMBER reads
  * through, fixed by the planner; an ANTI_MEMBER's is always `all`.  The
  * range it denotes changes from one round to the next, and for `all` from
  * one plan to the next, so the evaluation resolves it when the plan
- * starts.  An EMIT writes past the end of every view of its relation.
+ * starts.
  *
  * `key_mask` and `index_position` are set on a LOOKUP, an EXISTS and an
  * ANTI_MEMBER: the columns it looks up by, bit c for column c, and the
@@ -220,6 +222,19 @@ struct relic_op_atom {
 	uint32_t		 key_mask;
 	uint32_t		 index_position;
 	enum relic_view		 view;
+	uint16_t		 arity;
+};
+
+/*
+ * The head an EMIT derives: a term per column, `arity` of them, and the
+ * predicate `pred` the head names, or RELIC_ID_NONE when the plan is a
+ * query's and the head names none.  The relation the tuples are written
+ * into belongs to the taker that runs the plan, not to the operation, so
+ * an EMIT cannot be read as a source.
+ */
+struct relic_op_emit {
+	relic_plan_term_t	*terms;
+	relic_pred_id_t		 pred;
 	uint16_t		 arity;
 };
 
@@ -388,6 +403,7 @@ struct relic_op_aggregate {
 struct relic_op {
 	union {
 		relic_op_atom_t		atom;	/* over a relation's tuple */
+		relic_op_emit_t		emit;	/* EMIT */
 		relic_op_filter_t	filter;	/* FILTER */
 		relic_op_assign_t	assign;	/* ASSIGN */
 		relic_op_aggregate_t	aggregate; /* AGGREGATE */

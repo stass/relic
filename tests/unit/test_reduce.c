@@ -59,6 +59,7 @@
 #define	SCENARIO_COMBINED	"combined parts keep the earlier occurrence"
 #define	SCENARIO_DRAIN		"a full partial drains and takes the rest"
 #define	SCENARIO_SHARED		"a shared producer answers as the reference"
+#define	SCENARIO_UNREADABLE	"a promised source has no row store"
 #define	SCENARIO_SERIAL_LIMIT	"a memory limit keeps reduction serial"
 #define	SCENARIO_PARTIAL_ROW	"a limited take does not apply a row twice"
 #define	SCENARIO_NOTE_INT	"a note interrupt fails a shared reduction"
@@ -197,6 +198,7 @@ static void	 a_fold_no_binding_reaches_is_not_summarized(void);
 static void	 a_limited_builder_leaves_an_oversized_row(void);
 static void	 combined_parts_keep_the_earlier_occurrence(void);
 static void	 a_shared_producer_answers_as_the_reference(void);
+static void	 a_promised_source_has_no_row_store(void);
 static void	 a_memory_limit_keeps_reduction_serial(void);
 static void	 a_limited_take_does_not_apply_a_row_twice(void);
 static void	 a_full_partial_drains_and_takes_the_rest(void);
@@ -1859,6 +1861,66 @@ fail_intern:
 }
 
 /*
+ * Once the scope has promised to reduce kind, asking for its rows is
+ * refused and creates no relation.  A base relation the same scope does
+ * not reduce is still created on the read.
+ */
+static void
+a_promised_source_has_no_row_store(void)
+{
+	relic_reduction_t reduction;
+	relic_magic_t magic;
+	relic_query_t *query;
+	relic_reduced_source_t *source;
+	relic_relation_t *file;
+	relic_relation_t *kind;
+	relic_pred_id_t kind_pred;
+	relic_pred_id_t file_pred;
+	relic_t *ctx;
+	bool ready;
+
+	ctx = context_flagged(PIPELINE, 0);
+	if (ctx == NULL)
+		return;
+
+	query = relic_query_prepare(ctx, NULL, "grouped(D, E, N)?");
+	if (query == NULL ||
+	    relic_pred_intern(ctx, "kind", 4, 3, NULL, &kind_pred) != 0 ||
+	    relic_pred_intern(ctx, "file", 4, 1, NULL, &file_pred) != 0) {
+		check(false, SCENARIO_UNREADABLE, "the query prepares");
+		relic_query_destroy(query);
+		relic_destroy(ctx);
+		return;
+	}
+
+	relic_magic_init(&magic, ctx);
+	relic_reduction_begin(&reduction, ctx);
+	ready = relic_magic_find_complete(&magic, query) == 0 &&
+	    relic_reduction_select(ctx, &magic, query) == 0;
+	if (!ready) {
+		checkf(false, SCENARIO_UNREADABLE,
+		    "the scope should admit kind: %s", relic_error(ctx));
+	} else {
+		source = relic_reduction_source(ctx, kind_pred);
+		file = relic_relation_read(ctx, file_pred);
+		check(source != NULL &&
+		    source->state == RELIC_SOURCE_PROMISED,
+		    SCENARIO_UNREADABLE, "kind is promised");
+		check(file != NULL, SCENARIO_UNREADABLE,
+		    "a base relation stays readable");
+		kind = relic_relation_read(ctx, kind_pred);
+		check(kind == NULL &&
+		    strstr(relic_error(ctx), "does not store") != NULL,
+		    SCENARIO_UNREADABLE,
+		    "reading kind creates no row store");
+	}
+	relic_magic_reset(&magic);
+	relic_reduction_end(&reduction, ctx);
+	relic_query_destroy(query);
+	relic_destroy(ctx);
+}
+
+/*
  * The file pipeline's producer is cuttable.  Under RELIC_F_PARALLEL_ALWAYS
  * it reduces through bounded partials, at one thread and at two, and
  * answers as the serial reference does.  The pipeline's groups fit in a
@@ -2119,6 +2181,7 @@ main(void)
 	a_limited_take_does_not_apply_a_row_twice();
 	combined_parts_keep_the_earlier_occurrence();
 	a_full_partial_drains_and_takes_the_rest();
+	a_promised_source_has_no_row_store();
 	a_shared_producer_answers_as_the_reference();
 	a_memory_limit_keeps_reduction_serial();
 	a_note_interrupt_fails_a_shared_reduction();

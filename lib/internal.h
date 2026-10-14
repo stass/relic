@@ -1508,10 +1508,11 @@ bool	 relic_plan_folds(const relic_plan_t *plan);
 
 /*
  * The atom of an operation over a relation's tuple -- a SCAN, a LOOKUP, a
- * MEMBER, an EXISTS, an ANTI_MEMBER or the EMIT -- or NULL for a FILTER, an
- * ASSIGN or an AGGREGATE, whose union holds no atom.  A question about the
- * relation an operation reads or writes asks this rather than the union, so
- * that an operation kind over no relation is answered by construction.
+ * MEMBER, an EXISTS or an ANTI_MEMBER -- or NULL for an EMIT, a FILTER, an
+ * ASSIGN or an AGGREGATE.  An EMIT carries its head schema and names no
+ * relation.  A question about the relation an operation reads asks this
+ * rather than the union, so that an operation kind over no relation is
+ * answered by construction.
  */
 const relic_op_atom_t *relic_op_atom(const relic_op_t *op);
 
@@ -1589,10 +1590,9 @@ int	 relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query);
  * for them, or a family's summary no longer describes its relation.
  * relic_reduction_family() is the family a fold of a stored relation
  * would read when summarized: one with no summary yet that holds the
- * fold's signature, or NULL.
- * relic_reduction_confirm_rows() is how it resolves every other read of a
- * relation's rows: 0, or -1 with an internal error at `where` when the
- * relation is a source the scope reduces.
+ * fold's signature, or NULL.  Every other read of a relation's rows goes
+ * through relic_relation_read(), which refuses a source the scope does
+ * not store.
  */
 void	 relic_reduction_begin(relic_reduction_t *reduction, relic_t *ctx);
 void	 relic_reduction_end(relic_reduction_t *reduction, relic_t *ctx);
@@ -1624,8 +1624,6 @@ int	 relic_summarize_drafts(relic_t *ctx, relic_arena_t *arena,
 	    const relic_plan_draft_t *drafts, size_t draft_count,
 	    const relic_exec_env_t *env, const relic_fold_family_t ***builtp,
 	    size_t *built_countp);
-int	 relic_reduction_confirm_rows(relic_t *ctx, relic_pred_id_t pred,
-	    const relic_location_t *where);
 
 /*
  * lib/eval.c
@@ -1796,7 +1794,8 @@ void	 relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
 void	 relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
 	    const relic_relation_t *answer);
 void	 relic_explain_query_plan(relic_t *ctx, const relic_rule_t *rule,
-	    const relic_plan_t *plan, bool streams);
+	    const relic_plan_t *plan, const relic_relation_t *answer,
+	    bool streams);
 void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
 	    const relic_relation_t *answer, const relic_magic_t *magic);
 void	 relic_explain_abandoned_rewrite(relic_t *ctx,
@@ -1888,7 +1887,8 @@ void	 relic_index_link_append(relic_index_t *index,
  * no caller decides whether a relation exists yet, and never moves, so a
  * caller may hold as many of them as it likes for as long as the relation
  * lives: a base store as long as the context, a derived relation until the
- * next discard.
+ * next discard.  A source the active scope does not store is refused
+ * instead, and no row store is created for it.
  *
  * relic_base_store() finds a predicate's base store without creating it,
  * and relic_base_count() and relic_base_total() count the facts one or

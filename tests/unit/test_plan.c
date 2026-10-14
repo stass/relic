@@ -186,7 +186,7 @@ static bool	 recipe_is(const relic_plan_candidate_t *candidate,
 		    const enum relic_cost_kind *expected, size_t count);
 static void	 a_textual_variant_keeps_its_written_order(void);
 static void	 estimates_never_discard_a_candidate(void);
-static void	 the_emit_writes_the_relation_it_is_given(void);
+static void	 the_emit_carries_the_head_schema(void);
 static void	 a_bodyless_rule_is_a_lone_emit_of_constants(void);
 static void	 a_fully_bound_literal_is_a_membership_test(void);
 static void	 a_literal_binding_nothing_read_is_a_check(void);
@@ -428,8 +428,12 @@ reads_in_order(const fixture_t *fixture, const char *const *expected,
 		if (op->kind == RELIC_OP_FILTER)
 			continue;
 
-		name = relic_pred_of(fixture->ctx,
-		    op->u.atom.relation->pred)->name.bytes;
+		if (op->kind == RELIC_OP_EMIT)
+			name = relic_pred_of(fixture->ctx,
+			    op->u.emit.pred)->name.bytes;
+		else
+			name = relic_pred_of(fixture->ctx,
+			    op->u.atom.relation->pred)->name.bytes;
 		if (matched == count || strcmp(name, expected[matched]) != 0)
 			return (false);
 		matched++;
@@ -515,7 +519,7 @@ a_scans_columns_bind_match_or_ignore(void)
 	check(terms[4].action == RELIC_PLAN_BIND && terms[4].u.slot == y,
 	    SCENARIO_TERMS, "Y binds its slot");
 
-	terms = fixture.plan.ops[1].u.atom.terms;
+	terms = fixture.plan.ops[1].u.emit.terms;
 	check(terms[0].action == RELIC_PLAN_BOUND && terms[0].u.slot == x &&
 	    terms[1].action == RELIC_PLAN_BOUND && terms[1].u.slot == y,
 	    SCENARIO_TERMS, "the EMIT reads X and Y");
@@ -948,7 +952,7 @@ an_assignment_binds_a_slot_of_its_kind(void)
 
 	if (fixture.plan.op_count == 7) {
 		for (i = 0; i < 4; i++)
-			emitted[i] = fixture.plan.ops[6].u.atom.terms[i].action;
+			emitted[i] = fixture.plan.ops[6].u.emit.terms[i].action;
 		check(emitted[0] == RELIC_PLAN_NUMBER &&
 		    emitted[1] == RELIC_PLAN_BOUND &&
 		    emitted[2] == RELIC_PLAN_BOUND &&
@@ -1533,14 +1537,15 @@ a_delta_literal_must_be_positive(void)
 }
 
 /*
- * The EMIT writes whatever relation the caller names, which is how a query's
- * rule derives into the query's own answer, and the relation must have a
- * column for each head argument: a rule planned into a relation of another
- * arity is an internal error rather than a plan that reads past its head or
- * leaves a column unwritten.
+ * The EMIT carries the head's terms and arity, and the predicate the head
+ * names, and no relation.  The relation the caller names is the taker's:
+ * it must have a column for each head argument, and a rule planned into a
+ * relation of another arity is an internal error rather than a plan that
+ * reads past its head or leaves a column unwritten.  The operation is not
+ * an atom, so nothing can read the head as a source.
  */
 static void
-the_emit_writes_the_relation_it_is_given(void)
+the_emit_carries_the_head_schema(void)
 {
 	fixture_t fixture;
 	relic_relation_t *answer;
@@ -1570,8 +1575,10 @@ the_emit_writes_the_relation_it_is_given(void)
 	    NULL, &fixture.plan) == 0,
 	    SCENARIO_EMIT_TARGET, "a relation of the head's arity is accepted");
 	emit = &fixture.plan.ops[fixture.plan.op_count - 1];
-	check(emit->kind == RELIC_OP_EMIT && emit->u.atom.relation == answer,
-	    SCENARIO_EMIT_TARGET, "the EMIT writes the relation given");
+	check(emit->kind == RELIC_OP_EMIT && relic_op_atom(emit) == NULL &&
+	    emit->u.emit.arity == 1 && emit->u.emit.terms != NULL &&
+	    emit->u.emit.pred == rule->head,
+	    SCENARIO_EMIT_TARGET, "the EMIT carries the head and no relation");
 
 	check(relic_plan_rule(fixture.ctx, &fixture.arena, rule, wide,
 	    NULL, &fixture.plan) != 0,
@@ -1630,7 +1637,7 @@ a_bodyless_rule_is_a_lone_emit_of_constants(void)
 	check(kinds_are(&fixture.plan, kinds, 1), SCENARIO_FACT,
 	    "the plan is one EMIT");
 
-	terms = fixture.plan.ops[0].u.atom.terms;
+	terms = fixture.plan.ops[0].u.emit.terms;
 	check(terms[0].action == RELIC_PLAN_CONSTANT &&
 	    terms[1].action == RELIC_PLAN_CONSTANT, SCENARIO_FACT,
 	    "both columns are constants");
@@ -3316,8 +3323,8 @@ each_operation_builds_its_strings_above_a_base(void)
 	    "a second text assignment builds above the first's string");
 	check(plan->ops[6].u.filter.text_base == 6, SCENARIO_TEXTS,
 	    "a filter after both builds above the second's string");
-	check(plan->ops[7].u.atom.terms[0].action == RELIC_PLAN_TEXT &&
-	    plan->ops[7].u.atom.terms[1].action == RELIC_PLAN_NUMBER,
+	check(plan->ops[7].u.emit.terms[0].action == RELIC_PLAN_TEXT &&
+	    plan->ops[7].u.emit.terms[1].action == RELIC_PLAN_NUMBER,
 	    SCENARIO_TEXTS, "the EMIT writes the text slot as a string");
 
 	fixture_release(&fixture);
@@ -3331,6 +3338,8 @@ draft_relation(const relic_plan_draft_t *draft, size_t op)
 {
 	if (draft->ops[op].kind == RELIC_OP_AGGREGATE)
 		return (draft->ops[op].u.aggregate.relation);
+	if (draft->ops[op].kind == RELIC_OP_EMIT)
+		return (NULL);
 
 	return (draft->ops[op].u.atom.relation);
 }
@@ -3471,8 +3480,11 @@ a_draft_names_its_indexes_and_builds_none(void)
 	draft = &family.candidates[0].draft;
 
 	indexes = 0;
-	for (i = 0; i < draft->op_count; i++)
-		indexes += draft_relation(draft, i)->index_count;
+	for (i = 0; i < draft->op_count; i++) {
+		relation = draft_relation(draft, i);
+		if (relation != NULL)
+			indexes += relation->index_count;
+	}
 	check(indexes == 0, SCENARIO_DRAFT, "planning the variant builds no "
 	    "index");
 	check(accesses_are(draft, first_readers, 5), SCENARIO_DRAFT,
@@ -3589,7 +3601,7 @@ main(void)
 	a_guard_of_any_size_keeps_the_input_first_plan();
 	estimates_never_discard_a_candidate();
 	a_delta_literal_must_be_positive();
-	the_emit_writes_the_relation_it_is_given();
+	the_emit_carries_the_head_schema();
 	a_bodyless_rule_is_a_lone_emit_of_constants();
 	a_negated_literal_is_placed_once_bound();
 	a_negated_literal_probes_by_its_named_columns();

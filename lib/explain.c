@@ -103,12 +103,15 @@ static void	 put_op_aggregate(const relic_t *ctx,
 		    const relic_op_aggregate_t *fold);
 static void	 put_op(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_op_t *op,
-		    bool streams);
+		    const relic_relation_t *answer, bool streams);
 static void	 put_op_atom(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_op_atom_t *atom);
+static void	 put_emit(const relic_t *ctx, relic_explain_line_t *line,
+		    const relic_rule_t *rule, const relic_op_emit_t *emit,
+		    const relic_relation_t *answer);
 static void	 put_ops(const relic_t *ctx, const relic_rule_t *rule,
 		    const relic_op_t *ops, size_t op_count, unsigned int depth,
-		    bool streams);
+		    const relic_relation_t *answer, bool streams);
 static void	 put_draft(const relic_t *ctx, const relic_rule_t *rule,
 		    const relic_plan_draft_t *draft, unsigned int depth);
 static void	 put_pred(const relic_t *ctx, relic_explain_line_t *line,
@@ -904,13 +907,45 @@ put_probe(const relic_t *ctx, relic_explain_line_t *line,
 }
 
 /*
+ * The head an EMIT derives.  A program rule names its predicate; a query
+ * names none, and is written as its answer relation is named.
+ */
+static void
+put_emit(const relic_t *ctx, relic_explain_line_t *line,
+    const relic_rule_t *rule, const relic_op_emit_t *emit,
+    const relic_relation_t *answer)
+{
+	uint16_t i;
+
+	if (emit->pred != RELIC_ID_NONE)
+		put_pred_name(ctx, line, emit->pred);
+	else if (answer != NULL)
+		put_relation_name(ctx, line, answer);
+	else
+		line_put(line, "?");
+
+	if (emit->arity == 0)
+		return;
+
+	line_put_byte(line, '(');
+	for (i = 0; i < emit->arity; i++) {
+		if (i > 0)
+			line_put(line, ", ");
+		put_term(ctx, line, rule, &emit->terms[i]);
+	}
+	line_put_byte(line, ')');
+}
+
+/*
  * One operation of a plan.  `streams` says that the plan's EMIT delivers
- * its tuples to the caller as a query's rows rather than writing the
- * relation it names, which its line shows as `stream`.
+ * its tuples to the caller as a query's rows rather than writing a
+ * relation, which its line shows as `stream`.  `answer` names a query's
+ * EMIT, which names no predicate of its own.
  */
 static void
 put_op(const relic_t *ctx, relic_explain_line_t *line,
-    const relic_rule_t *rule, const relic_op_t *op, bool streams)
+    const relic_rule_t *rule, const relic_op_t *op,
+    const relic_relation_t *answer, bool streams)
 {
 	switch (op->kind) {
 	case RELIC_OP_SCAN:
@@ -954,7 +989,7 @@ put_op(const relic_t *ctx, relic_explain_line_t *line,
 		return;
 	case RELIC_OP_EMIT:
 		line_put(line, streams ? "stream " : "emit ");
-		put_op_atom(ctx, line, rule, &op->u.atom);
+		put_emit(ctx, line, rule, &op->u.emit, answer);
 		return;
 	}
 
@@ -1013,19 +1048,21 @@ put_op_aggregate(const relic_t *ctx, relic_explain_line_t *line,
 
 /*
  * One line per operation of a plan or a draft, in plan order, indented by
- * `depth` levels, the EMIT shown as put_op() shows it for `streams`.  No
- * line reads an index position, which a draft's operations lack.
+ * `depth` levels, the EMIT shown as put_op() shows it for `streams` and
+ * `answer`.  No line reads an index position, which a draft's operations
+ * lack.
  */
 static void
 put_ops(const relic_t *ctx, const relic_rule_t *rule, const relic_op_t *ops,
-    size_t op_count, unsigned int depth, bool streams)
+    size_t op_count, unsigned int depth, const relic_relation_t *answer,
+    bool streams)
 {
 	relic_explain_line_t line;
 	size_t i;
 
 	for (i = 0; i < op_count; i++) {
 		line_begin(&line, depth);
-		put_op(ctx, &line, rule, &ops[i], streams);
+		put_op(ctx, &line, rule, &ops[i], answer, streams);
 		line_finish(ctx, &line);
 	}
 }
@@ -1107,7 +1144,7 @@ relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
 
 	if (plan != NULL)
 		put_ops(ctx, rule, plan->ops, plan->op_count, depth + 2,
-		    false);
+		    NULL, false);
 }
 
 /*
@@ -1220,7 +1257,7 @@ static void
 put_draft(const relic_t *ctx, const relic_rule_t *rule,
     const relic_plan_draft_t *draft, unsigned int depth)
 {
-	put_ops(ctx, rule, draft->ops, draft->op_count, depth, false);
+	put_ops(ctx, rule, draft->ops, draft->op_count, depth, NULL, false);
 }
 
 /*
@@ -1283,12 +1320,12 @@ relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
  */
 void
 relic_explain_query_plan(relic_t *ctx, const relic_rule_t *rule,
-    const relic_plan_t *plan, bool streams)
+    const relic_plan_t *plan, const relic_relation_t *answer, bool streams)
 {
 	if (!relic_explaining(ctx))
 		return;
 
-	put_ops(ctx, rule, plan->ops, plan->op_count, 1, streams);
+	put_ops(ctx, rule, plan->ops, plan->op_count, 1, answer, streams);
 }
 
 /*
