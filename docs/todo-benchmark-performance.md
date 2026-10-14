@@ -479,31 +479,31 @@ Use nearly unique keys, selective single-key demand, large keys, many
 signatures and tiny inputs as controls. Report retained base storage apart
 from eliminated intermediates and all charged reduction workspace.
 
-**Open.** Serial producer reduction and key projection are in place
-(`lib/uses.c`, `lib/reduce.c`) and enabled in the development tree, with
-`-X no-group-reduction` as the materialized reference; both run at every
-worker count, since physical selection must not depend on it. Bounded
-parallel partials block releasing reduction enabled by default: the
-serial reducer wins at one worker and loses at sixteen, where the
-reference partitions `kind`'s producer across the workers.
+**Open.** Serial producer reduction, key projection, stored-source
+summaries and bounded parallel partials are in place (`lib/uses.c`,
+`lib/reduce.c`, `lib/summarize.c`, `lib/eval.c`) and enabled in the
+development tree, with `-X no-group-reduction` as the materialized
+reference; both run at every worker count, since physical selection must
+not depend on it. A cuttable producer is reduced through a fixed partial
+budget and combined at wave barriers; a configured memory limit, a plan
+with no driver, an oversized row or a private refusal runs the same rows
+serially.
 
 `files-grouped` at scale 16 (4.8 million files), median of five
-interleaved runs, identical answers:
+interleaved runs, identical answers. The p620 measurement of the shared
+path is outstanding, the machine being saturated by unrelated work:
 
 | Machine | Threads | Reduced | Reference |
 |---|---|---|---|
-| p620, FreeBSD | 1 | 3.38 s, 401 MB | 3.98 s, 452 MB |
-| p620, FreeBSD | 16 | 2.38 s, 433 MB | 1.31 s, 787 MB |
-| M3 Max | 1 | 2.80 s, 306 MB | 3.17 s, 398 MB |
-| M3 Max | 16 | 1.61 s, 329 MB | 0.70 s, 718 MB |
+| M3 Max | 1 | 2.64 s, 308 MB | 3.10 s, 395 MB |
+| M3 Max | 16 | 1.07 s, 329 MB | 0.71 s, 721 MB |
 
-The p620 ran beside a light unrelated load. At scale 4 the ratios are
-the same. The tree before reduction matches the reference within noise,
-and `facts-join`, `degree-count`, `tc-cyclic`, `graph-reach` and `cspa`
-are unchanged. The memory saving supports landing the implementation; it
-does not establish parallel performance. Before enabling the completed
-feature by default, revalidate the serial gain, the parallel time and
-bounded memory on the p620 and the M3.
+The serial reducer still wins at one worker. At sixteen the shared path
+is 1.5 times the reference and holds half the memory. `facts-join`,
+`degree-count`, `tc-cyclic`, `graph-reach` and `cspa` are unchanged
+against the reference within noise. The 1.5-fold parallel gap is too
+large to release reduction enabled by default; revalidate the serial
+gain, the parallel time and bounded memory on the p620.
 
 Stored-source summaries are in place too (`lib/summarize.c`,
 `lib/reduce.c`): a component's drafts choose them by cost before its
@@ -525,8 +525,10 @@ are unchanged against the base within noise, and `files-grouped` holds
 6% less at one worker, its counts having no accumulator. The p620 was
 saturated by unrelated work, and its measurement is outstanding.
 
-Still to do, in order: bounded parallel partials, the default-enablement
-blocker; `EMIT` carrying an output schema rather than a relation handle,
+Still to do, in order: the default-enablement blocker, which waits on
+the p620 revalidation of serial gain, parallel time and bounded memory;
+stored-source parallel waves; `EMIT` carrying an output schema rather
+than a relation handle,
 as the design requires -- a reduced producer's `EMIT` still names the
 source's empty relation, kept unread only by the planner's row-read
 guard (`relic_reduction_confirm_rows()`); and reducing query-owned group

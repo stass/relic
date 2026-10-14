@@ -171,30 +171,56 @@ struct relic_reduction {
  * lib/reduce.c: the builder and the summary.
  *
  * relic_reducer_open() makes a builder for `source`, whose rows have
- * `arity` columns.  relic_reducer_take() reduces the rows of `batch` in
- * order, and sets *takenp to how many it reduced, every one unless it
- * refused the next.  relic_reducer_finish() makes the summary of every row
- * taken: it gives the values the groups retain that the context has not
+ * `arity` columns.  relic_reducer_open_limited() is the same with a
+ * charge of at most `budget` bytes: a row that would pass it is left
+ * untaken, relic_reducer_full() then true, and relic_reducer_oversized()
+ * true when the builder still holds no group.  A limited builder does
+ * not report a refusal; relic_reducer_failed() says one happened.
+ * relic_reducer_take() reduces the rows of `batch` in order, and sets
+ * *takenp to how many it reduced, every one unless it refused the next
+ * or a limited builder could not admit it.  relic_reducer_set_ordinal()
+ * sets the occurrence the next taken row will record.
+ * relic_reducer_quiet() says whether a refusal is reported.
+ * relic_reducer_combine() folds another builder's groups into this one
+ * as taking its rows after these would have.  relic_reducer_reset() and
+ * relic_reducer_clear() give the groups back and leave the builder
+ * empty.  relic_reducer_finish() makes the summary of every row taken:
+ * it gives the values the groups retain that the context has not
  * assigned their identifiers, the memory limit asked first as it is asked
  * about values derived into `relation`, the source's.
  * relic_reducer_close() releases a builder, finished or not, and
  * relic_summary_destroy() a summary.  Each fallible function returns 0, or
  * -1 having reported the refusal -- memory, the memory limit, a source of
  * more rows than a relation could hold, which no limit describes, or an
- * interrupt -- after which the builder may only be closed.  A refused
- * finish may leave values interned, as a refused insertion may, but no
- * summary.  Every byte either holds is charged to the context's account
- * while it does, and relic_reducer_peak() is the most bytes the builder
- * and the summary it finishes have held at once.
+ * interrupt -- after which the builder may only be closed, except a
+ * limited take that is only full, or a quiet builder whose caller
+ * retries the same rows.  A refused finish may leave values
+ * interned, as a refused insertion may, but no summary.  Every byte
+ * either holds is charged to the context's account while it does, and
+ * relic_reducer_peak() is the most bytes the builder and the summary it
+ * finishes have held at once.
  */
 int	 relic_reducer_open(relic_t *ctx, const relic_reduced_source_t *source,
 	    uint16_t arity, relic_reducer_t **reducerp);
+int	 relic_reducer_open_limited(relic_t *ctx,
+	    const relic_reduced_source_t *source, uint16_t arity, size_t budget,
+	    relic_reducer_t **reducerp);
 int	 relic_reducer_take(relic_t *ctx, relic_reducer_t *reducer,
 	    const relic_relation_t *relation, const relic_reduce_batch_t *batch,
 	    size_t *takenp);
+int	 relic_reducer_combine(relic_t *ctx, relic_reducer_t *dest,
+	    const relic_reducer_t *src);
+void	 relic_reducer_set_ordinal(relic_reducer_t *reducer, uint64_t ordinal);
+void	 relic_reducer_quiet(relic_reducer_t *reducer, bool report);
+void	 relic_reducer_reset(relic_t *ctx, relic_reducer_t *reducer);
+void	 relic_reducer_clear(relic_t *ctx, relic_reducer_t *reducer);
+bool	 relic_reducer_full(const relic_reducer_t *reducer);
+bool	 relic_reducer_oversized(const relic_reducer_t *reducer);
+bool	 relic_reducer_failed(const relic_reducer_t *reducer);
 int	 relic_reducer_finish(relic_t *ctx, relic_reducer_t *reducer,
 	    const relic_relation_t *relation, relic_summary_t **summaryp);
 size_t	 relic_reducer_peak(const relic_reducer_t *reducer);
+uint64_t relic_reducer_rows(const relic_reducer_t *reducer);
 void	 relic_reducer_close(relic_t *ctx, relic_reducer_t *reducer);
 void	 relic_summary_destroy(relic_t *ctx, relic_summary_t *summary);
 

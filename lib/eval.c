@@ -474,6 +474,12 @@ static int	 reduce_source(relic_evaluation_t *eval,
 static int	 run_reduction(relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans,
 		    relic_reducer_t *reducer, relic_summary_t **summaryp);
+static int	 run_reduction_serial(relic_evaluation_t *eval,
+		    const relic_component_plans_t *plans,
+		    relic_reducer_t *reducer, relic_summary_t **summaryp);
+static int	 run_reduction_shared(relic_evaluation_t *eval,
+		    const relic_component_plans_t *plans,
+		    relic_reducer_t *reducer, relic_summary_t **summaryp);
 static int	 project_keys(relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule, size_t position,
 		    const relic_key_projection_t *projection,
@@ -3303,13 +3309,120 @@ reduce_source(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 }
 
 /*
- * Run a certified producer's plan into `reducer`, serially, and make the
- * summary of what it derived.  The texts a plan's calls need are begun
- * around it, as a round's are.
+ * The most bytes every lane's partial maps may hold together, and the
+ * least a lane is given.  Both are independent of the source and of
+ * how many workers the context has (specs/design-group-reduction.md).
+ */
+#define	RELIC_REDUCE_PARTIAL_BUDGET	((size_t)4 * 1024 * 1024)
+#define	RELIC_REDUCE_LANE_MIN		((size_t)4096)
+
+typedef struct relic_reduce_lane relic_reduce_lane_t;
+typedef struct relic_reduce_job relic_reduce_job_t;
+
+/*
+ * One lane of a shared reduction: the scratch that runs its slice, the
+ * bounded partial it reduces into, the slice itself, how many of the
+ * last batch remain to take, and the occurrence of its first row.
+ */
+struct relic_reduce_lane {
+	relic_scratch_t		 scratch;
+	relic_reducer_t		*partial;
+	relic_tuple_range_t	 slice;
+	size_t			 leftover;
+	uint64_t		 ordinal;	/* next occurrence to assign */
+	bool			 started;	/* start_slice has run */
+	bool			 finished;	/* the executor returned */
+	bool			 done;		/* finished and no leftover */
+	bool			 failed;
+};
+
+/*
+ * What every lane of a wave reads: the plan, its views, the relation
+ * named only to describe refusals, and the calling context.  A worker
+ * writes only `lanes[part]`; charging a limited partial uses the
+ * account's round total, which workers may update together.
+ */
+struct relic_reduce_job {
+	relic_reduce_lane_t	*lanes;
+	void			*block;
+	const relic_plan_t	*plan;
+	const relic_exec_env_t	*env;
+	const relic_relation_t	*relation;
+	relic_t			*ctx;
+	size_t			 charged;
+	size_t			 count;
+	uint16_t		 arity;
+};
+
+static bool	 reduction_may_be_shared(const relic_t *ctx);
+static size_t	 shared_lane_count(size_t workers, uint64_t visits);
+static size_t	 layout_reduce_lanes(char *memory, size_t count,
+		    const relic_scratch_t *model, bool computes,
+		    relic_reduce_lane_t **lanesp);
+static int	 open_reduce_lanes(relic_evaluation_t *eval,
+		    const relic_reduced_source_t *source, size_t count,
+		    size_t budget, relic_reduce_job_t *job);
+static void	 close_reduce_lanes(relic_reduce_job_t *job);
+static void	 advance_lane(void *argument, size_t part, size_t worker);
+static int	 take_lane_batch(relic_reduce_job_t *job,
+		    relic_reduce_lane_t *lane, bool leftover);
+static void	 report_shared_notes(relic_evaluation_t *eval,
+		    const relic_rule_t *rule, relic_reduce_job_t *job,
+		    const relic_prepared_item_t *prepared);
+static void	 record_shared_counts(relic_evaluation_t *eval,
+		    relic_reduce_job_t *job, const relic_prepared_item_t *prepared,
+		    uint64_t waves);
+static int	 finish_reduction(relic_evaluation_t *eval,
+		    relic_reducer_t *reducer, const relic_relation_t *relation,
+		    relic_summary_t **summaryp);
+
+/*
+ * Run a certified producer's plan into `reducer` and make the summary of
+ * what it derived.  When no memory limit is set and the context shares
+ * rounds, the plan's driver is cut into lanes that reduce into bounded
+ * partials and drain them into `reducer` at each wave; a plan with no
+ * driver, a prefix that does not reach it, a row no empty partial can
+ * hold, or a private refusal leaves `reducer` empty and runs the same
+ * plan serially, which is the reference.
  */
 static int
 run_reduction(relic_evaluation_t *eval, const relic_component_plans_t *plans,
     relic_reducer_t *reducer, relic_summary_t **summaryp)
+{
+	int status;
+
+	if (reduction_may_be_shared(eval->ctx)) {
+		status = run_reduction_shared(eval, plans, reducer, summaryp);
+		if (status <= 0)
+			return (status);
+	}
+
+	relic_reducer_quiet(reducer, true);
+	relic_reducer_reset(eval->ctx, reducer);
+	if (relic_refuse_interrupted(eval->ctx, "deriving",
+	    plans->members[0]) != 0)
+		return (-1);
+	return (run_reduction_serial(eval, plans, reducer, summaryp));
+}
+
+static bool
+reduction_may_be_shared(const relic_t *ctx)
+{
+	if (relic_limit_set(ctx->config.max_memory))
+		return (false);
+
+	return (rounds_may_be_deferred(ctx));
+}
+
+/*
+ * Run a certified producer's plan into `reducer` serially, and make the
+ * summary of what it derived.  The texts a plan's calls need are begun
+ * around it, as a round's are.
+ */
+static int
+run_reduction_serial(relic_evaluation_t *eval,
+    const relic_component_plans_t *plans, relic_reducer_t *reducer,
+    relic_summary_t **summaryp)
 {
 	const relic_rule_plans_t *rule_plans;
 	enum relic_exec_failure failure;
@@ -3333,8 +3446,451 @@ run_reduction(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 	if (status != 0)
 		return (-1);
 
-	return (relic_reducer_finish(eval->ctx, reducer, target.relation,
-	    summaryp));
+	return (finish_reduction(eval, reducer, target.relation, summaryp));
+}
+
+static int
+finish_reduction(relic_evaluation_t *eval, relic_reducer_t *reducer,
+    const relic_relation_t *relation, relic_summary_t **summaryp)
+{
+	return (relic_reducer_finish(eval->ctx, reducer, relation, summaryp));
+}
+
+/*
+ * How many lanes a shared reduction opens: one per worker, and no more
+ * than the driver's visits or the budget's least tables.
+ */
+static size_t
+shared_lane_count(size_t workers, uint64_t visits)
+{
+	size_t lanes;
+	size_t budgeted;
+
+	if (workers == 0 || visits == 0 ||
+	    RELIC_REDUCE_PARTIAL_BUDGET < RELIC_REDUCE_LANE_MIN)
+		return (0);
+
+	lanes = workers;
+	if (visits < lanes)
+		lanes = (size_t)visits;
+	budgeted = RELIC_REDUCE_PARTIAL_BUDGET / RELIC_REDUCE_LANE_MIN;
+	if (budgeted < lanes)
+		lanes = budgeted;
+
+	return (lanes);
+}
+
+/*
+ * Lay out `count` lanes and each lane's scratch arrays in `memory`, or
+ * only measure them when `memory` is NULL, and return their bytes.
+ */
+static size_t
+layout_reduce_lanes(char *memory, size_t count, const relic_scratch_t *model,
+    bool computes, relic_reduce_lane_t **lanesp)
+{
+	relic_reduce_lane_t *lanes;
+	relic_op_state_t *states;
+	relic_pending_t *pending;
+	relic_dom_t *batch;
+	char *cursor;
+	size_t columns;
+	size_t bytes;
+	size_t i;
+
+	cursor = memory;
+	bytes = 0;
+	columns = (size_t)RELIC_INSERT_BATCH * model->arity_room;
+	lanes = relic_block_piece(&cursor, &bytes, count, sizeof(*lanes));
+	for (i = 0; i < count; i++) {
+		states = relic_block_piece(&cursor, &bytes, model->op_room,
+		    sizeof(*states));
+		batch = relic_block_piece(&cursor, &bytes, columns,
+		    sizeof(*batch));
+		pending = NULL;
+		if (computes)
+			pending = relic_block_piece(&cursor, &bytes, columns,
+			    sizeof(*pending));
+		if (memory != NULL)
+			relic_scratch_init(&lanes[i].scratch, states,
+			    model->op_room, batch, pending, model->arity_room);
+	}
+	if (lanesp != NULL)
+		*lanesp = lanes;
+
+	return (bytes);
+}
+
+/*
+ * Open `count` lanes, each with its own scratch and a partial of `budget`
+ * bytes.  Returns 0, or 1 when the lanes or a partial could not be had,
+ * so the caller can run the same rows serially.
+ */
+static int
+open_reduce_lanes(relic_evaluation_t *eval,
+    const relic_reduced_source_t *source, size_t count, size_t budget,
+    relic_reduce_job_t *job)
+{
+	relic_reduce_lane_t *lanes;
+	size_t bytes;
+	size_t i;
+	bool computes;
+
+	computes = relic_plan_computes(job->plan);
+	bytes = layout_reduce_lanes(NULL, count, &eval->scratch, computes,
+	    NULL);
+	if (bytes == 0 || bytes == SIZE_MAX ||
+	    !relic_account_charge_round(&eval->ctx->account, bytes))
+		return (1);
+
+	job->block = malloc(bytes);
+	if (job->block == NULL) {
+		relic_account_release_round(&eval->ctx->account, bytes);
+		return (1);
+	}
+	job->charged = bytes;
+	job->count = count;
+	bzero(job->block, bytes);
+	layout_reduce_lanes(job->block, count, &eval->scratch, computes,
+	    &lanes);
+	job->lanes = lanes;
+
+	for (i = 0; i < count; i++) {
+		if (relic_reducer_open_limited(eval->ctx, source, job->arity,
+		    budget, &lanes[i].partial) != 0) {
+			close_reduce_lanes(job);
+			return (1);
+		}
+		lanes[i].ordinal = (uint64_t)i << 32;
+		relic_reducer_set_ordinal(lanes[i].partial, lanes[i].ordinal);
+	}
+
+	return (0);
+}
+
+static void
+close_reduce_lanes(relic_reduce_job_t *job)
+{
+	relic_reduce_lane_t *lane;
+	size_t i;
+
+	if (job->lanes != NULL) {
+		for (i = 0; i < job->count; i++) {
+			lane = &job->lanes[i];
+			relic_scratch_end_texts(&lane->scratch);
+			if (lane->partial != NULL)
+				relic_reducer_close(job->ctx, lane->partial);
+		}
+	}
+	free(job->block);
+	if (job->charged > 0)
+		relic_account_release_round(&job->ctx->account, job->charged);
+	job->lanes = NULL;
+	job->block = NULL;
+	job->charged = 0;
+	job->count = 0;
+}
+
+/*
+ * Advance one lane by one quantum, or until its partial is full.  A
+ * leftover of the last batch is taken first, so the executor does not
+ * overwrite it.  Nothing is reported: a failure is the lane's, and the
+ * caller runs the same rows serially.
+ */
+static void
+advance_lane(void *argument, size_t part, size_t worker RELIC_UNUSED)
+{
+	relic_reduce_job_t *job;
+	relic_reduce_lane_t *lane;
+	enum relic_exec_status status;
+
+	job = argument;
+	lane = &job->lanes[part];
+	if (lane->done || lane->failed)
+		return;
+	if (relic_signal_flag_raised(&job->ctx->interrupted)) {
+		lane->failed = true;
+		return;
+	}
+
+	if (lane->leftover > 0) {
+		if (take_lane_batch(job, lane, true) != 0) {
+			lane->failed = true;
+			return;
+		}
+		if (lane->leftover > 0)
+			return;
+		if (lane->finished) {
+			lane->done = true;
+			return;
+		}
+	}
+
+	if (!lane->started) {
+		relic_exec_start_slice(&lane->scratch, job->env, job->plan,
+		    lane->slice);
+		lane->started = true;
+	}
+
+	status = relic_exec_run(&lane->scratch);
+	if (lane->scratch.error.failed ||
+	    relic_signal_flag_raised(&job->ctx->interrupted)) {
+		lane->failed = true;
+		return;
+	}
+	if (status != RELIC_EXEC_PAUSED)
+		lane->finished = true;
+	if (take_lane_batch(job, lane, false) != 0) {
+		lane->failed = true;
+		return;
+	}
+	if (lane->finished && lane->leftover == 0)
+		lane->done = true;
+}
+
+/*
+ * Reduce a lane's current batch, or the rows of it that the last take
+ * left, into its partial.  The leftover stays in the scratch's batch so
+ * the next wave can take it once the partial has been cleared.
+ */
+static int
+take_lane_batch(relic_reduce_job_t *job, relic_reduce_lane_t *lane,
+    bool leftover)
+{
+	relic_reduce_batch_t batch;
+	relic_scratch_t *scratch;
+	size_t offset;
+	size_t taken;
+
+	scratch = &lane->scratch;
+	if (scratch->batch_count == 0) {
+		lane->leftover = 0;
+		return (0);
+	}
+
+	offset = leftover ? scratch->batch_count - lane->leftover : 0;
+	bzero(&batch, sizeof(batch));
+	batch.rows = scratch->batch + offset * job->arity;
+	batch.count = leftover ? lane->leftover : scratch->batch_count;
+	batch.pending = scratch->pending;
+	batch.pending_count = scratch->pending_count;
+	batch.bytes = scratch->pending_bytes.bytes;
+	batch.byte_count = scratch->pending_bytes.used;
+	if (relic_reducer_take(job->ctx, lane->partial, job->relation, &batch,
+	    &taken) != 0)
+		return (-1);
+
+	lane->ordinal += taken;
+	if (taken < batch.count) {
+		lane->leftover = batch.count - taken;
+		return (0);
+	}
+
+	lane->leftover = 0;
+	scratch->batch_count = 0;
+	scratch->pending_count = 0;
+	scratch->pending_bytes.used = 0;
+
+	return (0);
+}
+
+/*
+ * Report the mixed-type notes a shared reduction recorded, in visit
+ * order: the prefix once, then each lane.  A diagnostic callback may
+ * interrupt; the caller looks for that before it publishes.
+ */
+static void
+report_shared_notes(relic_evaluation_t *eval, const relic_rule_t *rule,
+    relic_reduce_job_t *job, const relic_prepared_item_t *prepared)
+{
+	relic_mixed_note_t note;
+	size_t i;
+
+	note = prepared->note;
+	relic_report_mixed_note(eval->ctx, rule, &note);
+	for (i = 0; i < job->count; i++)
+		relic_report_mixed_note(eval->ctx, rule,
+		    &job->lanes[i].scratch.note);
+}
+
+/*
+ * Commit the work a successful shared reduction read, after its summary
+ * is made: the prefix once, then each lane, and the one shared pass.
+ */
+static void
+record_shared_counts(relic_evaluation_t *eval, relic_reduce_job_t *job,
+    const relic_prepared_item_t *prepared, uint64_t waves)
+{
+	size_t i;
+
+	relic_exec_counters_add(&eval->ctx->counters.read,
+	    &prepared->prefix_reads);
+	for (i = 0; i < job->count; i++)
+		relic_exec_counters_add(&eval->ctx->counters.read,
+		    &job->lanes[i].scratch.counters);
+	eval->ctx->counters.reductions_shared++;
+	eval->ctx->counters.reduction_waves += waves;
+	if (relic_pool_workers(eval->ctx->pool) > 1)
+		eval->ctx->counters.parallel_rounds++;
+}
+
+/*
+ * Cut a certified producer's driver into lanes, reduce each slice into a
+ * bounded partial, and drain the partials into `reducer` at every wave.
+ * Returns 0 when the summary is made, 1 when the same plan should run
+ * serially, or -1 when a refusal has already been reported.
+ */
+static int
+run_reduction_shared(relic_evaluation_t *eval,
+    const relic_component_plans_t *plans, relic_reducer_t *reducer,
+    relic_summary_t **summaryp)
+{
+	relic_prepared_item_t prepared;
+	relic_round_task_t *tasks;
+	relic_reduce_job_t job;
+	relic_reduce_lane_t *lane;
+	const relic_rule_plans_t *rule_plans;
+	const relic_reduced_source_t *source;
+	const relic_plan_t *plan;
+	const relic_relation_t *relation;
+	enum relic_exec_failure failure;
+	uint64_t links;
+	uint64_t waves;
+	uint64_t rows;
+	size_t held;
+	size_t lanes;
+	size_t budget;
+	size_t workers;
+	size_t i;
+	bool done;
+	int status;
+
+	rule_plans = &plans->planned[0];
+	plan = &rule_plans->base->plan;
+	relation = plans->members[0];
+	source = relic_reduction_source(eval->ctx, relation->pred);
+	if (source == NULL || relic_plan_driver(plan) == RELIC_PLAN_NO_DRIVER)
+		return (1);
+	if (fit_scratch(eval, plan) != 0)
+		return (-1);
+	if (relic_plan_calls(plan) &&
+	    relic_scratch_begin_texts(&eval->scratch, &eval->ctx->account,
+	    &failure) != 0)
+		return (1);
+	status = relic_slice_prepare(&prepared, &eval->scratch, &eval->env,
+	    plan, &eval->ctx->interrupted);
+	relic_scratch_end_texts(&eval->scratch);
+	if (status != 0)
+		return (1);
+	if (prepared.form != RELIC_TASK_SLICE || prepared.visits == 0)
+		return (1);
+
+	if (eval->ctx->pool == NULL &&
+	    relic_pool_create(&eval->ctx->pool, eval->ctx->config.threads,
+	    eval->ctx->hash_seed) != 0)
+		return (1);
+	workers = relic_pool_workers(eval->ctx->pool);
+	lanes = shared_lane_count(workers, prepared.visits);
+	if (lanes == 0)
+		return (1);
+
+	bzero(&job, sizeof(job));
+	job.plan = plan;
+	job.env = &eval->env;
+	job.relation = relation;
+	job.ctx = eval->ctx;
+	job.arity = relation->arity;
+	budget = RELIC_REDUCE_PARTIAL_BUDGET / lanes;
+	relic_reducer_quiet(reducer, false);
+	status = open_reduce_lanes(eval, source, lanes, budget, &job);
+	if (status != 0)
+		return (status);
+
+	tasks = calloc(lanes, sizeof(*tasks));
+	if (tasks == NULL) {
+		close_reduce_lanes(&job);
+		return (1);
+	}
+	prepared.pieces = lanes;
+	links = 0;
+	if (relic_slice_cut(&prepared, plan, tasks, &eval->ctx->interrupted,
+	    &links) != 0) {
+		free(tasks);
+		close_reduce_lanes(&job);
+		return (1);
+	}
+	for (i = 0; i < lanes; i++)
+		job.lanes[i].slice = tasks[i].slice;
+	free(tasks);
+
+	if (relic_plan_calls(plan)) {
+		for (i = 0; i < lanes; i++) {
+			if (relic_scratch_begin_texts(&job.lanes[i].scratch,
+			    &eval->ctx->account, &failure) != 0) {
+				close_reduce_lanes(&job);
+				return (1);
+			}
+		}
+	}
+
+	waves = 0;
+	for (;;) {
+		relic_pool_for(eval->ctx->pool, lanes, advance_lane, &job);
+		waves++;
+		done = true;
+		for (i = 0; i < lanes; i++) {
+			lane = &job.lanes[i];
+			if (relic_reducer_oversized(lane->partial) ||
+			    relic_reducer_failed(lane->partial) ||
+			    lane->failed) {
+				close_reduce_lanes(&job);
+				return (1);
+			}
+			if (relic_reducer_combine(eval->ctx, reducer,
+			    lane->partial) != 0) {
+				close_reduce_lanes(&job);
+				return (relic_reducer_failed(reducer) ? 1 : -1);
+			}
+			relic_reducer_clear(eval->ctx, lane->partial);
+			relic_reducer_set_ordinal(lane->partial, lane->ordinal);
+			if (!lane->done)
+				done = false;
+		}
+		if (done)
+			break;
+		if (relic_signal_flag_raised(&eval->ctx->interrupted)) {
+			close_reduce_lanes(&job);
+			return (1);
+		}
+	}
+
+	report_shared_notes(eval, rule_plans->rule, &job, &prepared);
+	if (relic_signal_flag_raised(&eval->ctx->interrupted)) {
+		close_reduce_lanes(&job);
+		return (1);
+	}
+
+	held = relic_reducer_peak(reducer) + job.charged;
+	for (i = 0; i < job.count; i++)
+		held += relic_reducer_peak(job.lanes[i].partial);
+	relic_reducer_quiet(reducer, true);
+	rows = relic_reducer_rows(reducer);
+	if (finish_reduction(eval, reducer, relation, summaryp) != 0) {
+		close_reduce_lanes(&job);
+		return (-1);
+	}
+	if (relic_signal_flag_raised(&eval->ctx->interrupted)) {
+		relic_summary_destroy(eval->ctx, *summaryp);
+		*summaryp = NULL;
+		close_reduce_lanes(&job);
+		return (1);
+	}
+	if (held > eval->ctx->counters.reduction_peak)
+		eval->ctx->counters.reduction_peak = held;
+	record_shared_counts(eval, &job, &prepared, waves);
+	close_reduce_lanes(&job);
+	eval->ctx->counters.derivations += rows;
+
+	return (0);
 }
 
 /*

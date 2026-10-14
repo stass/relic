@@ -141,8 +141,14 @@ struct relic_retained {
  * `key_columns` the source columns of its key in increasing order, and
  * `table` finds a group by its key's hash, holding group positions plus
  * one.  `charged` is what it holds of the account now, `peak` the most it
- * has, and `rows_seen` the rows it has taken, each the ordinal of the
- * next.
+ * has, and `rows_seen` the rows it has taken.  `next_ordinal` is the
+ * occurrence of the next row, which a serial run leaves equal to
+ * `rows_seen` and a lane sets to its slice's place in visit order.
+ * `budget` is the most it may charge, SIZE_MAX when it is the global
+ * builder and has none.  A row that would pass the budget leaves `full`,
+ * and `oversized` when the builder still holds no group, which is a row
+ * no empty partial can admit.  `failed` is a refusal a limited builder
+ * does not report, for the caller to run the same rows serially.
  */
 struct relic_reducer {
 	const relic_reduce_signature_t	*signatures;
@@ -158,11 +164,17 @@ struct relic_reducer {
 	size_t				 key_bytes_capacity;
 	size_t				 charged;
 	size_t				 peak;
+	size_t				 budget;
 	uint64_t			 rows_seen;
+	uint64_t			 next_ordinal;
 	uint64_t			 hash_seed;
 	uint16_t			 key_columns[RELIC_MAX_ARITY];
 	uint16_t			 key_count;
 	uint16_t			 arity;
+	bool				 full;
+	bool				 oversized;
+	bool				 failed;
+	bool				 report;
 };
 
 /*
@@ -219,6 +231,12 @@ struct relic_stored_builder {
 
 static bool	 charge(relic_t *ctx, relic_reducer_t *reducer, size_t bytes);
 static void	 release(relic_t *ctx, relic_reducer_t *reducer, size_t bytes);
+static void	 report_no_memory(relic_t *ctx, relic_reducer_t *reducer);
+static void	 release_groups(relic_t *ctx, relic_reducer_t *reducer);
+static void	 see_held(const relic_t *ctx, const char *bytes,
+		    const relic_held_t *held, relic_seen_t *seen);
+static int	 copy_extreme(relic_t *ctx, relic_reducer_t *reducer,
+		    relic_extreme_t *dst, const relic_extreme_t *src);
 static size_t	 lay_out_groups(const relic_reducer_t *reducer,
 		    size_t capacity, void *memory, relic_groups_t *groups);
 static int	 grow_groups(relic_t *ctx, relic_reducer_t *reducer);
@@ -278,7 +296,7 @@ static int	 open_summary(relic_t *ctx, relic_reducer_t *reducer,
 		    relic_summary_t **summaryp);
 static void	 discard_summary(relic_t *ctx, relic_reducer_t *reducer,
 		    relic_summary_t *summary);
-static int	 fill_summary(relic_t *ctx, const relic_reducer_t *reducer,
+static int	 fill_summary(relic_t *ctx, relic_reducer_t *reducer,
 		    const relic_relation_t *relation,
 		    relic_summary_t *summary);
 static void	 stored_open(relic_t *ctx, relic_stored_builder_t *builder,
@@ -305,15 +323,29 @@ static void	 discard_stored(relic_t *ctx, relic_stored_builder_t *builder,
 static void	 close_stored(relic_t *ctx, relic_stored_builder_t *builder);
 
 /*
- * Charge `bytes` more to the account for the builder, reporting the
- * refusal: the memory limit's, which the account records, as every
- * charged arena's is reported.
+ * Charge `bytes` more for the builder.  An ordinary builder uses the
+ * arena account, on the calling thread.  A limited one uses the round
+ * account, which workers may charge together, so a wave's partials do
+ * not race on the arena total.
  */
 static bool
 charge(relic_t *ctx, relic_reducer_t *reducer, size_t bytes)
 {
-	if (!relic_account_charge(&ctx->account, bytes)) {
-		relic_diag_no_memory(ctx);
+	if (reducer->budget != SIZE_MAX &&
+	    (reducer->charged >= reducer->budget ||
+	    bytes > reducer->budget - reducer->charged)) {
+		if (reducer->group_count == 0)
+			reducer->oversized = true;
+		reducer->full = true;
+		return (false);
+	}
+	if (reducer->budget != SIZE_MAX) {
+		if (!relic_account_charge_round(&ctx->account, bytes)) {
+			reducer->failed = true;
+			return (false);
+		}
+	} else if (!relic_account_charge(&ctx->account, bytes)) {
+		report_no_memory(ctx, reducer);
 		return (false);
 	}
 
@@ -324,36 +356,66 @@ charge(relic_t *ctx, relic_reducer_t *reducer, size_t bytes)
 	return (true);
 }
 
+/*
+ * A limited builder does not report: its caller abandons the parallel
+ * attempt and runs the same rows serially, where the refusal is said.
+ */
+static void
+report_no_memory(relic_t *ctx, relic_reducer_t *reducer)
+{
+	if (reducer->report)
+		relic_diag_no_memory(ctx);
+	else
+		reducer->failed = true;
+}
+
 static void
 release(relic_t *ctx, relic_reducer_t *reducer, size_t bytes)
 {
 	assert(bytes <= reducer->charged);
-	relic_account_release(&ctx->account, bytes);
+	if (reducer->budget != SIZE_MAX)
+		relic_account_release_round(&ctx->account, bytes);
+	else
+		relic_account_release(&ctx->account, bytes);
 	reducer->charged -= bytes;
 }
+
+static int	 open_reducer(relic_t *ctx, const relic_reduced_source_t *source,
+		    uint16_t arity, bool report, relic_reducer_t **reducerp);
 
 int
 relic_reducer_open(relic_t *ctx, const relic_reduced_source_t *source,
     uint16_t arity, relic_reducer_t **reducerp)
+{
+	return (open_reducer(ctx, source, arity, true, reducerp));
+}
+
+static int
+open_reducer(relic_t *ctx, const relic_reduced_source_t *source,
+    uint16_t arity, bool report, relic_reducer_t **reducerp)
 {
 	relic_reducer_t *reducer;
 	uint16_t column;
 
 	*reducerp = NULL;
 	if (!relic_account_charge(&ctx->account, sizeof(*reducer))) {
-		relic_diag_no_memory(ctx);
+		if (report)
+			relic_diag_no_memory(ctx);
 		return (-1);
 	}
 
 	reducer = calloc(1, sizeof(*reducer));
 	if (reducer == NULL) {
 		relic_account_release(&ctx->account, sizeof(*reducer));
-		relic_diag_no_memory(ctx);
+		if (report)
+			relic_diag_no_memory(ctx);
 		return (-1);
 	}
 
 	reducer->charged = sizeof(*reducer);
 	reducer->peak = reducer->charged;
+	reducer->budget = SIZE_MAX;
+	reducer->report = report;
 	reducer->signatures = source->signatures;
 	reducer->signature_count = source->signature_count;
 	reducer->hash_seed = ctx->hash_seed;
@@ -376,11 +438,24 @@ relic_reducer_open(relic_t *ctx, const relic_reduced_source_t *source,
 void
 relic_reducer_close(relic_t *ctx, relic_reducer_t *reducer)
 {
-	size_t extremes;
-	size_t i;
-
 	if (reducer == NULL)
 		return;
+
+	release_groups(ctx, reducer);
+	assert(reducer->charged == sizeof(*reducer));
+	relic_account_release(&ctx->account, sizeof(*reducer));
+	free(reducer);
+}
+
+/*
+ * Give back the groups, their table, their key bytes and every extreme's
+ * buffer, leaving the builder as relic_reducer_open() made it.
+ */
+static void
+release_groups(relic_t *ctx, relic_reducer_t *reducer)
+{
+	size_t extremes;
+	size_t i;
 
 	extremes = reducer->group_count * reducer->signature_count;
 	for (i = 0; i < extremes; i++) {
@@ -395,15 +470,198 @@ relic_reducer_close(relic_t *ctx, relic_reducer_t *reducer)
 	free(reducer->block);
 	release(ctx, reducer, reducer->block_bytes);
 
-	assert(reducer->charged == sizeof(*reducer));
-	relic_account_release(&ctx->account, sizeof(*reducer));
-	free(reducer);
+	bzero(&reducer->groups, sizeof(reducer->groups));
+	reducer->block = NULL;
+	reducer->key_bytes = NULL;
+	reducer->group_count = 0;
+	reducer->group_capacity = 0;
+	reducer->block_bytes = 0;
+	reducer->key_bytes_used = 0;
+	reducer->key_bytes_capacity = 0;
+	reducer->rows_seen = 0;
+	reducer->next_ordinal = 0;
+	reducer->full = false;
+	reducer->oversized = false;
+	reducer->failed = false;
+}
+
+int
+relic_reducer_open_limited(relic_t *ctx, const relic_reduced_source_t *source,
+    uint16_t arity, size_t budget, relic_reducer_t **reducerp)
+{
+	if (open_reducer(ctx, source, arity, false, reducerp) != 0)
+		return (-1);
+	(*reducerp)->budget = budget;
+
+	return (0);
+}
+
+void
+relic_reducer_quiet(relic_reducer_t *reducer, bool report)
+{
+	reducer->report = report;
+}
+
+void
+relic_reducer_reset(relic_t *ctx, relic_reducer_t *reducer)
+{
+	release_groups(ctx, reducer);
+	relic_idtab_init(&reducer->table, true);
+}
+
+void
+relic_reducer_clear(relic_t *ctx, relic_reducer_t *reducer)
+{
+	release_groups(ctx, reducer);
+	relic_idtab_init(&reducer->table, true);
+}
+
+void
+relic_reducer_set_ordinal(relic_reducer_t *reducer, uint64_t ordinal)
+{
+	reducer->next_ordinal = ordinal;
+}
+
+bool
+relic_reducer_full(const relic_reducer_t *reducer)
+{
+	return (reducer->full);
+}
+
+bool
+relic_reducer_oversized(const relic_reducer_t *reducer)
+{
+	return (reducer->oversized);
+}
+
+bool
+relic_reducer_failed(const relic_reducer_t *reducer)
+{
+	return (reducer->failed);
 }
 
 size_t
 relic_reducer_peak(const relic_reducer_t *reducer)
 {
 	return (reducer->peak);
+}
+
+uint64_t
+relic_reducer_rows(const relic_reducer_t *reducer)
+{
+	return (reducer->rows_seen);
+}
+
+/*
+ * Fold `src`'s groups into `dest`, as taking `src`'s rows after `dest`'s
+ * would have, the earlier occurrence keeping a group's first row and a
+ * tied extreme.  The parts must be of the same signatures and key.  A
+ * combined row count past the source ceiling is a refusal dest does not
+ * report, so the caller can run the same rows serially.
+ */
+int
+relic_reducer_combine(relic_t *ctx, relic_reducer_t *dest,
+    const relic_reducer_t *src)
+{
+	relic_seen_t key[RELIC_MAX_ARITY];
+	relic_value_view_t dest_view;
+	relic_value_view_t src_view;
+	relic_extreme_t *dst_ex;
+	const relic_extreme_t *src_ex;
+	relic_fold_state_t *dst_state;
+	const relic_held_t *held;
+	uint64_t dest_rows;
+	uint32_t hash;
+	size_t group;
+	size_t at;
+	size_t g;
+	size_t s;
+	uint16_t k;
+
+	assert(dest->signature_count == src->signature_count &&
+	    dest->key_count == src->key_count && dest->arity == src->arity);
+
+	if (src->rows_seen > RELIC_REDUCE_ROWS_MAX - dest->rows_seen) {
+		dest->failed = true;
+		return (-1);
+	}
+
+	for (g = 0; g < src->group_count; g++) {
+		held = &src->groups.keys[g * src->key_count];
+		for (k = 0; k < src->key_count; k++)
+			see_held(ctx, src->key_bytes, &held[k], &key[k]);
+		hash = src->groups.hashes[g];
+		group = find_group(ctx, dest, hash, key);
+		if (group == SIZE_MAX &&
+		    add_group(ctx, dest, hash, key, &group) != 0)
+			return (-1);
+
+		dest_rows = dest->groups.rows[group];
+		if (dest_rows == 0 ||
+		    src->groups.first[g] < dest->groups.first[group])
+			dest->groups.first[group] = src->groups.first[g];
+
+		for (s = 0; s < dest->signature_count; s++) {
+			at = group * dest->signature_count + s;
+			dst_state = &dest->groups.states[at];
+			dst_ex = &dest->groups.extremes[at];
+			src_ex = &src->groups.extremes[g *
+			    src->signature_count + s];
+			held_view(ctx, dst_ex->bytes, &dst_ex->value,
+			    &dest_view);
+			held_view(ctx, src_ex->bytes, &src_ex->value,
+			    &src_view);
+			switch (relic_fold_combine(dest->signatures[s].fn,
+			    dst_state, dest_rows, &dest_view,
+			    &src->groups.states[g * src->signature_count + s],
+			    src->groups.rows[g], &src_view)) {
+			case RELIC_FOLD_REPLACED:
+				if (copy_extreme(ctx, dest, dst_ex, src_ex) != 0)
+					return (-1);
+				break;
+			case RELIC_FOLD_TIED:
+				if (src_ex->ordinal < dst_ex->ordinal &&
+				    copy_extreme(ctx, dest, dst_ex, src_ex) != 0)
+					return (-1);
+				break;
+			case RELIC_FOLD_KEPT:
+			case RELIC_FOLD_INVALIDATED:
+				break;
+			}
+		}
+		dest->groups.rows[group] = dest_rows + src->groups.rows[g];
+	}
+	dest->rows_seen += src->rows_seen;
+
+	return (0);
+}
+
+/*
+ * The value a builder holds, as take_row() sees a row's.
+ */
+static void
+see_held(const relic_t *ctx, const char *bytes, const relic_held_t *held,
+    relic_seen_t *seen)
+{
+	held_view(ctx, bytes, held, &seen->view);
+	seen->dom = held->assigned ? held->u.dom : 0;
+}
+
+/*
+ * Make `src`'s extreme `dst`'s, the text copied into `dst`'s buffer.
+ */
+static int
+copy_extreme(relic_t *ctx, relic_reducer_t *reducer, relic_extreme_t *dst,
+    const relic_extreme_t *src)
+{
+	relic_seen_t seen;
+
+	see_held(ctx, src->bytes, &src->value, &seen);
+	if (retain_extreme(ctx, reducer, dst, &seen) != 0)
+		return (-1);
+	dst->ordinal = src->ordinal;
+
+	return (0);
 }
 
 /*
@@ -461,7 +719,7 @@ grow_groups(relic_t *ctx, relic_reducer_t *reducer)
 	bytes = capacity == 0 ? SIZE_MAX :
 	    lay_out_groups(reducer, capacity, NULL, &grown);
 	if (bytes == SIZE_MAX) {
-		relic_diag_no_memory(ctx);
+		report_no_memory(ctx, reducer);
 		return (-1);
 	}
 	if (!charge(ctx, reducer, bytes))
@@ -470,7 +728,7 @@ grow_groups(relic_t *ctx, relic_reducer_t *reducer)
 	block = malloc(bytes);
 	if (block == NULL) {
 		release(ctx, reducer, bytes);
-		relic_diag_no_memory(ctx);
+		report_no_memory(ctx, reducer);
 		return (-1);
 	}
 	(void)lay_out_groups(reducer, capacity, block, &grown);
@@ -519,7 +777,7 @@ reserve_key_bytes(relic_t *ctx, relic_reducer_t *reducer, size_t length)
 	capacity = needed == SIZE_MAX ? 0 :
 	    relic_grow_array_capacity(reducer->key_bytes_capacity, needed);
 	if (capacity == 0) {
-		relic_diag_no_memory(ctx);
+		report_no_memory(ctx, reducer);
 		return (-1);
 	}
 	if (!charge(ctx, reducer, capacity - reducer->key_bytes_capacity))
@@ -528,7 +786,7 @@ reserve_key_bytes(relic_t *ctx, relic_reducer_t *reducer, size_t length)
 	bytes = realloc(reducer->key_bytes, capacity);
 	if (bytes == NULL) {
 		release(ctx, reducer, capacity - reducer->key_bytes_capacity);
-		relic_diag_no_memory(ctx);
+		report_no_memory(ctx, reducer);
 		return (-1);
 	}
 
@@ -753,16 +1011,27 @@ add_group(relic_t *ctx, relic_reducer_t *reducer, uint32_t hash,
 		return (-1);
 
 	if (!relic_idtab_has_room(&reducer->table, 1)) {
+		size_t old_bytes;
+
+		old_bytes = relic_idtab_bytes(&reducer->table);
 		table_growth = relic_idtab_bytes_after_reserve(&reducer->table,
-		    1) - relic_idtab_bytes(&reducer->table);
-		if (!charge(ctx, reducer, table_growth))
+		    1) - old_bytes;
+		if (reducer->budget != SIZE_MAX) {
+			if (!charge(ctx, reducer,
+			    relic_saturating_sum(table_growth, old_bytes)))
+				return (-1);
+		} else if (!charge(ctx, reducer, table_growth))
 			return (-1);
 		if (relic_idtab_reserve(&reducer->table, 1, rehash_group,
 		    reducer) != 0) {
-			release(ctx, reducer, table_growth);
-			relic_diag_no_memory(ctx);
+			release(ctx, reducer, reducer->budget != SIZE_MAX ?
+			    relic_saturating_sum(table_growth, old_bytes) :
+			    table_growth);
+			report_no_memory(ctx, reducer);
 			return (-1);
 		}
+		if (reducer->budget != SIZE_MAX)
+			release(ctx, reducer, old_bytes);
 	}
 
 	text = 0;
@@ -784,7 +1053,7 @@ add_group(relic_t *ctx, relic_reducer_t *reducer, uint32_t hash,
 		}
 	}
 	reducer->groups.rows[group] = 0;
-	reducer->groups.first[group] = reducer->rows_seen;
+	reducer->groups.first[group] = reducer->next_ordinal;
 	reducer->groups.hashes[group] = hash;
 	for (s = 0; s < reducer->signature_count; s++) {
 		relic_fold_init(&reducer->groups.states[
@@ -818,7 +1087,7 @@ retain_extreme(relic_t *ctx, relic_reducer_t *reducer,
 		capacity = relic_grow_array_capacity(extreme->capacity,
 		    seen->view.length);
 		if (capacity == 0) {
-			relic_diag_no_memory(ctx);
+			report_no_memory(ctx, reducer);
 			return (-1);
 		}
 		if (!charge(ctx, reducer, capacity - extreme->capacity))
@@ -826,7 +1095,7 @@ retain_extreme(relic_t *ctx, relic_reducer_t *reducer,
 		bytes = realloc(extreme->bytes, capacity);
 		if (bytes == NULL) {
 			release(ctx, reducer, capacity - extreme->capacity);
-			relic_diag_no_memory(ctx);
+			report_no_memory(ctx, reducer);
 			return (-1);
 		}
 		extreme->bytes = bytes;
@@ -836,7 +1105,7 @@ retain_extreme(relic_t *ctx, relic_reducer_t *reducer,
 	hold(&extreme->value, seen, 0);
 	if (seen->dom == 0 && seen->view.length > 0)
 		bcopy(seen->view.bytes, extreme->bytes, seen->view.length);
-	extreme->ordinal = reducer->rows_seen;
+	extreme->ordinal = reducer->next_ordinal;
 
 	return (0);
 }
@@ -863,15 +1132,22 @@ relic_reducer_take(relic_t *ctx, relic_reducer_t *reducer,
 {
 	size_t i;
 
+	reducer->full = false;
 	for (i = 0; i < batch->count; i++) {
 		*takenp = i;
 		if (reducer->rows_seen >= RELIC_REDUCE_ROWS_MAX) {
-			refuse_rows(ctx, relation);
+			if (reducer->budget == SIZE_MAX)
+				refuse_rows(ctx, relation);
+			else
+				reducer->failed = true;
 			return (-1);
 		}
 		if (take_row(ctx, reducer, batch,
-		    &batch->rows[i * reducer->arity]) != 0)
+		    &batch->rows[i * reducer->arity]) != 0) {
+			if (reducer->full && !reducer->failed)
+				return (0);
 			return (-1);
+		}
 	}
 	*takenp = batch->count;
 
@@ -920,8 +1196,18 @@ take_row(relic_t *ctx, relic_reducer_t *reducer,
 		switch (relic_fold_add(signature->fn, state, rows,
 		    &extreme_view, &value.view)) {
 		case RELIC_FOLD_REPLACED:
-			if (retain_extreme(ctx, reducer, extreme, &value) != 0)
+			if (retain_extreme(ctx, reducer, extreme, &value) != 0) {
+				/*
+				 * The accumulator has already changed.  A
+				 * limited builder cannot leave the row
+				 * for another wave: that would add it
+				 * twice.  The caller runs the rows
+				 * serially instead.
+				 */
+				if (reducer->budget != SIZE_MAX)
+					reducer->failed = true;
 				return (-1);
+			}
 			break;
 		case RELIC_FOLD_KEPT:
 		case RELIC_FOLD_TIED:
@@ -931,6 +1217,7 @@ take_row(relic_t *ctx, relic_reducer_t *reducer,
 	}
 
 	reducer->groups.rows[group] = rows + 1;
+	reducer->next_ordinal++;
 	reducer->rows_seen++;
 
 	return (0);
@@ -1218,46 +1505,122 @@ relic_summary_destroy(relic_t *ctx, relic_summary_t *summary)
 	free(summary);
 }
 
+typedef struct relic_group_order relic_group_order_t;
+
+struct relic_group_order {
+	uint64_t	first;
+	size_t		group;
+};
+
+static int
+compare_group_order(const void *left, const void *right)
+{
+	const relic_group_order_t *a = left;
+	const relic_group_order_t *b = right;
+
+	if (a->first < b->first)
+		return (-1);
+	if (a->first > b->first)
+		return (1);
+	if (a->group < b->group)
+		return (-1);
+	if (a->group > b->group)
+		return (1);
+
+	return (0);
+}
+
 /*
- * Copy the builder's groups into the summary, every value they retain
- * holding its identifier by now, and place each group in the key table.
+ * Copy the builder's groups into the summary in first-occurrence order,
+ * every value they retain holding its identifier by now, and place each
+ * group in the key table.
  */
 static int
-fill_summary(relic_t *ctx, const relic_reducer_t *reducer,
+fill_summary(relic_t *ctx, relic_reducer_t *reducer,
     const relic_relation_t *relation, relic_summary_t *summary)
 {
+	relic_group_order_t *order;
+	relic_group_order_t next;
 	const relic_extreme_t *extreme;
 	const relic_held_t *held;
 	relic_dom_t *key;
 	uint32_t hash;
 	size_t at;
+	size_t bytes;
 	size_t g;
+	size_t i;
+	size_t j;
 	size_t s;
 	uint16_t k;
 
-	for (g = 0; g < reducer->group_count; g++) {
-		if (poll_walk(ctx, relation, g) != 0)
+	bytes = relic_saturating_product(reducer->group_count, sizeof(*order));
+	order = NULL;
+	if (bytes != 0) {
+		if (bytes == SIZE_MAX || !charge(ctx, reducer, bytes)) {
+			if (bytes == SIZE_MAX)
+				relic_diag_no_memory(ctx);
 			return (-1);
-		key = &summary->keys[g * summary->key_count];
+		}
+		order = malloc(bytes);
+		if (order == NULL) {
+			release(ctx, reducer, bytes);
+			relic_diag_no_memory(ctx);
+			return (-1);
+		}
+		for (g = 0; g < reducer->group_count; g++) {
+			order[g].first = reducer->groups.first[g];
+			order[g].group = g;
+		}
+		for (i = 1; i < reducer->group_count; i++) {
+			if (poll_walk(ctx, relation, i) != 0) {
+				free(order);
+				release(ctx, reducer, bytes);
+				return (-1);
+			}
+			next = order[i];
+			j = i;
+			while (j > 0 &&
+			    compare_group_order(&order[j - 1], &next) > 0) {
+				order[j] = order[j - 1];
+				j--;
+			}
+			order[j] = next;
+		}
+	}
+
+	for (i = 0; i < reducer->group_count; i++) {
+		g = order[i].group;
+		if (poll_walk(ctx, relation, i) != 0) {
+			free(order);
+			release(ctx, reducer, bytes);
+			return (-1);
+		}
+		key = &summary->keys[i * summary->key_count];
 		held = &reducer->groups.keys[g * reducer->key_count];
 		for (k = 0; k < reducer->key_count; k++) {
 			assert(held[k].assigned);
 			key[k] = held[k].u.dom;
 		}
-		summary->rows[g] = reducer->groups.rows[g];
+		summary->rows[i] = reducer->groups.rows[g];
 
 		for (s = 0; s < reducer->signature_count; s++) {
-			at = g * reducer->signature_count + s;
-			extreme = &reducer->groups.extremes[at];
-			summary->states[at] = reducer->groups.states[at];
+			extreme = &reducer->groups.extremes[
+			    g * reducer->signature_count + s];
+			at = i * summary->signature_count + s;
+			summary->states[at] = reducer->groups.states[
+			    g * reducer->signature_count + s];
 			summary->extremes[at] = extreme->value.assigned ?
 			    extreme->value.u.dom : 0;
 		}
 
 		hash = relic_hash_words(summary->hash_seed, key,
 		    summary->key_count);
-		relic_idtab_place(&summary->table, hash, (uint32_t)(g + 1));
+		relic_idtab_place(&summary->table, hash, (uint32_t)(i + 1));
 	}
+
+	free(order);
+	if (bytes != 0)
+		release(ctx, reducer, bytes);
 
 	return (0);
 }

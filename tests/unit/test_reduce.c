@@ -55,6 +55,13 @@
 #define	SCENARIO_BUILT_INDEX	"an index built already is no saving"
 #define	SCENARIO_DELTA_INDEX	"an index a delta plan reads is no saving"
 #define	SCENARIO_UNREACHED	"a fold no binding reaches is not summarized"
+#define	SCENARIO_LIMITED_TAKE	"a limited builder leaves an oversized row"
+#define	SCENARIO_COMBINED	"combined parts keep the earlier occurrence"
+#define	SCENARIO_DRAIN		"a full partial drains and takes the rest"
+#define	SCENARIO_SHARED		"a shared producer answers as the reference"
+#define	SCENARIO_SERIAL_LIMIT	"a memory limit keeps reduction serial"
+#define	SCENARIO_PARTIAL_ROW	"a limited take does not apply a row twice"
+#define	SCENARIO_NOTE_INT	"a note interrupt fails a shared reduction"
 
 /*
  * The memory limits a_memory_limit_refuses_a_reduction_cleanly() tries:
@@ -133,6 +140,7 @@ struct outcome {
 	size_t		source_tuples;
 	size_t		source_indexes;
 	uint64_t	sources_reduced;
+	uint64_t	reductions_shared;
 	uint64_t	reduced_rows;
 	uint64_t	reduced_groups;
 	uint64_t	derivations;
@@ -146,6 +154,8 @@ static int	 render_row(void *callback_ctx, const relic_value_t *values,
 static int	 compare_rows(const void *left, const void *right);
 static void	 sort_rows(char *text);
 static relic_t	*context_flagged(const char *program, unsigned int flags);
+static relic_t	*context_configured(const char *program, unsigned int flags,
+		    size_t threads, size_t max_memory);
 static int	 run_query(relic_t *ctx, const char *text, char *answer);
 static relic_relation_t *relation_named(relic_t *ctx, const char *name,
 		    uint16_t arity);
@@ -184,6 +194,13 @@ static void	 stored_accumulators_answer_as_rows_do(void);
 static void	 an_index_built_already_is_no_saving(void);
 static void	 an_index_a_delta_plan_reads_is_no_saving(void);
 static void	 a_fold_no_binding_reaches_is_not_summarized(void);
+static void	 a_limited_builder_leaves_an_oversized_row(void);
+static void	 combined_parts_keep_the_earlier_occurrence(void);
+static void	 a_shared_producer_answers_as_the_reference(void);
+static void	 a_memory_limit_keeps_reduction_serial(void);
+static void	 a_limited_take_does_not_apply_a_row_twice(void);
+static void	 a_full_partial_drains_and_takes_the_rest(void);
+static void	 a_note_interrupt_fails_a_shared_reduction(void);
 
 static void
 append_text(rendering_t *rendering, const char *text, size_t length)
@@ -279,11 +296,24 @@ sort_rows(char *text)
 static relic_t *
 context_flagged(const char *program, unsigned int flags)
 {
+	return (context_configured(program, flags, 0, 0));
+}
+
+/*
+ * A context created with `flags`, `threads` and `max_memory`, holding a
+ * loaded program, or NULL having recorded the failure.
+ */
+static relic_t *
+context_configured(const char *program, unsigned int flags, size_t threads,
+    size_t max_memory)
+{
 	relic_config_t config;
 	relic_t *ctx;
 
 	bzero(&config, sizeof(config));
 	config.flags = flags;
+	config.threads = threads;
+	config.max_memory = max_memory;
 
 	ctx = relic_create_config(&config);
 	if (ctx == NULL) {
@@ -369,6 +399,7 @@ run_outcome(const char *program, unsigned int flags, const char *query,
 		outcome->source_indexes = source->index_count;
 	}
 	outcome->sources_reduced = ctx->counters.sources_reduced;
+	outcome->reductions_shared = ctx->counters.reductions_shared;
 	outcome->reduced_rows = ctx->counters.reduced_rows;
 	outcome->reduced_groups = ctx->counters.reduced_groups;
 	outcome->derivations = ctx->counters.derivations;
@@ -476,11 +507,13 @@ the_file_pipeline_stores_no_source_rows(void)
 	    "%zu tuples and %zu indexes", reduced.source_tuples,
 	    reduced.source_indexes);
 	checkf(reduced.sources_reduced == 1 && reduced.reduced_rows == FILES &&
-	    reduced.reduced_groups == GROUPS, SCENARIO_REDUCED,
-	    "one source of %u rows should be reduced into %u groups, not %"
-	    PRIu64 " of %" PRIu64 " rows into %" PRIu64, FILES, GROUPS,
-	    reduced.sources_reduced, reduced.reduced_rows,
-	    reduced.reduced_groups);
+	    reduced.reduced_groups == GROUPS &&
+	    reduced.reductions_shared == 0, SCENARIO_REDUCED,
+	    "one source of %u rows should be reduced serially into %u groups, "
+	    "not %" PRIu64 " of %" PRIu64 " rows into %" PRIu64 " shared=%"
+	    PRIu64, FILES, GROUPS, reduced.sources_reduced,
+	    reduced.reduced_rows, reduced.reduced_groups,
+	    reduced.reductions_shared);
 	checkf(reference.source_tuples == FILES &&
 	    reference.sources_reduced == 0, SCENARIO_REDUCED,
 	    "the reference should store kind's %u rows, not %zu", FILES,
@@ -1388,6 +1421,594 @@ a_fold_no_binding_reaches_is_not_summarized(void)
 	    RELIC_F_NO_REORDER | RELIC_F_NO_MAGIC, "reach(X)?", 0);
 }
 
+/*
+ * A builder given fewer bytes than one group takes leaves the row, marks
+ * itself oversized, and reports nothing, so the caller can run the same
+ * rows on an ordinary builder.
+ */
+static void
+a_limited_builder_leaves_an_oversized_row(void)
+{
+	relic_dom_t row[3];
+	relic_reduced_source_t source;
+	relic_reduce_batch_t batch;
+	relic_relation_t *relation;
+	relic_reducer_t *reducer;
+	relic_t *ctx;
+	size_t taken;
+
+	ctx = context_flagged(PIPELINE, 0);
+	if (ctx == NULL)
+		return;
+	relation = relation_named(ctx, "kind", 3);
+	if (relation == NULL || intern_file_row(ctx, 0, row) != 0) {
+		check(false, SCENARIO_LIMITED_TAKE,
+		    "a row of kind should be interned");
+		relic_destroy(ctx);
+		return;
+	}
+
+	bzero(&source, sizeof(source));
+	source.counts = true;
+	source.key_mask = UINT32_C(1) << 1;
+	bzero(&batch, sizeof(batch));
+	batch.rows = row;
+	batch.count = 1;
+
+	if (relic_reducer_open_limited(ctx, &source, 3, 1, &reducer) != 0) {
+		checkf(false, SCENARIO_LIMITED_TAKE,
+		    "a limited builder should open: %s", relic_error(ctx));
+		relic_destroy(ctx);
+		return;
+	}
+
+	taken = SIZE_MAX;
+	checkf(relic_reducer_take(ctx, reducer, relation, &batch,
+	    &taken) == 0 && taken == 0 && relic_reducer_oversized(reducer) &&
+	    relic_reducer_full(reducer) && !relic_reducer_failed(reducer),
+	    SCENARIO_LIMITED_TAKE, "one oversized row should be left, not "
+	    "taken=%zu full=%d oversized=%d failed=%d", taken,
+	    relic_reducer_full(reducer), relic_reducer_oversized(reducer),
+	    relic_reducer_failed(reducer));
+
+	relic_reducer_close(ctx, reducer);
+	relic_destroy(ctx);
+}
+
+/*
+ * A row that updates a sum and then cannot retain a longer maximum must
+ * not be left for another take: the sum has already changed.  The limited
+ * builder fails instead, so the caller runs the rows serially.
+ */
+static void
+a_limited_take_does_not_apply_a_row_twice(void)
+{
+	relic_reduce_signature_t signatures[2];
+	relic_pending_t pending[2];
+	relic_dom_t rows[6];
+	relic_reduced_source_t source;
+	relic_reduce_batch_t batch;
+	relic_relation_t *relation;
+	relic_reducer_t *reducer;
+	relic_t *ctx;
+	char short_text[64];
+	char long_text[4096];
+	char both[64 + 4096];
+	size_t taken;
+	size_t fitted;
+
+	ctx = context_flagged(PIPELINE, 0);
+	if (ctx == NULL)
+		return;
+	relation = relation_named(ctx, "kind", 3);
+	if (relation == NULL ||
+	    relic_value_intern_integer(ctx, 1, &rows[0]) != 0 ||
+	    relic_value_intern_integer(ctx, 0, &rows[1]) != 0 ||
+	    relic_value_intern_integer(ctx, 2, &rows[3]) != 0) {
+		check(false, SCENARIO_PARTIAL_ROW, "the integers should intern");
+		relic_destroy(ctx);
+		return;
+	}
+	rows[4] = rows[1];
+	rows[2] = 1;
+	rows[5] = 2;
+	memset(short_text, 'a', sizeof(short_text));
+	memset(long_text, 'b', sizeof(long_text));
+	bzero(pending, sizeof(pending));
+	pending[0].kind = RELIC_PENDING_TEXT;
+	pending[0].u.text.length = sizeof(short_text);
+	pending[1].kind = RELIC_PENDING_TEXT;
+	pending[1].u.text.offset = sizeof(short_text);
+	pending[1].u.text.length = sizeof(long_text);
+
+	bzero(signatures, sizeof(signatures));
+	signatures[0].fn = RELIC_AGG_SUM;
+	signatures[0].column = 0;
+	signatures[1].fn = RELIC_AGG_MAX;
+	signatures[1].column = 2;
+	bzero(&source, sizeof(source));
+	source.signatures = signatures;
+	source.signature_count = 2;
+	source.counts = true;
+	source.key_mask = UINT32_C(1) << 1;
+	bzero(&batch, sizeof(batch));
+	batch.rows = rows;
+	batch.count = 1;
+	batch.pending = pending;
+	batch.pending_count = 2;
+	batch.bytes = short_text;
+	batch.byte_count = sizeof(short_text);
+
+	if (relic_reducer_open(ctx, &source, 3, &reducer) != 0 ||
+	    relic_reducer_take(ctx, reducer, relation, &batch, &taken) != 0) {
+		checkf(false, SCENARIO_PARTIAL_ROW, "the first row should "
+		    "fit: %s", relic_error(ctx));
+		relic_reducer_close(ctx, reducer);
+		relic_destroy(ctx);
+		return;
+	}
+	fitted = relic_reducer_peak(reducer);
+	relic_reducer_close(ctx, reducer);
+
+	if (relic_reducer_open_limited(ctx, &source, 3, fitted + 32,
+	    &reducer) != 0) {
+		checkf(false, SCENARIO_PARTIAL_ROW, "the limited builder "
+		    "should open: %s", relic_error(ctx));
+		relic_destroy(ctx);
+		return;
+	}
+	batch.count = 2;
+	bcopy(short_text, both, sizeof(short_text));
+	bcopy(long_text, both + sizeof(short_text), sizeof(long_text));
+	batch.bytes = both;
+	batch.byte_count = sizeof(both);
+	taken = SIZE_MAX;
+	checkf(relic_reducer_take(ctx, reducer, relation, &batch, &taken) != 0 &&
+	    relic_reducer_failed(reducer) && taken == 1 &&
+	    relic_reducer_rows(reducer) == 1, SCENARIO_PARTIAL_ROW,
+	    "the second row should fail after one taken, not taken=%zu "
+	    "rows=%" PRIu64 " failed=%d", taken, relic_reducer_rows(reducer),
+	    relic_reducer_failed(reducer));
+
+	relic_reducer_close(ctx, reducer);
+	relic_destroy(ctx);
+}
+
+/*
+ * Two parts of one source, combined, keep first-occurrence order in the
+ * summary: dest meets key 1 at 100, the other part meets key 0 at 5.
+ * The summary enumerates key 0 first.
+ */
+static void
+combined_parts_keep_the_earlier_occurrence(void)
+{
+	relic_reduce_signature_t signature;
+	relic_dom_t dest_row[3];
+	relic_dom_t src_rows[6];
+	relic_dom_t extreme;
+	relic_reduced_source_t source;
+	relic_reduce_batch_t batch;
+	relic_relation_t *relation;
+	relic_reducer_t *dest;
+	relic_reducer_t *src;
+	relic_summary_t *summary;
+	relic_t *ctx;
+	size_t taken;
+
+	dest = NULL;
+	src = NULL;
+	summary = NULL;
+
+	ctx = context_flagged(PIPELINE, 0);
+	if (ctx == NULL)
+		return;
+	relation = relation_named(ctx, "kind", 3);
+	if (relation == NULL || intern_file_row(ctx, 1, dest_row) != 0 ||
+	    intern_file_row(ctx, 0, &src_rows[0]) != 0) {
+		check(false, SCENARIO_COMBINED, "the rows should be interned");
+		relic_destroy(ctx);
+		return;
+	}
+	if (relic_value_intern_integer(ctx, 5, &dest_row[0]) != 0 ||
+	    relic_value_intern_integer(ctx, 10, &src_rows[0]) != 0) {
+		check(false, SCENARIO_COMBINED, "the maxima should be interned");
+		relic_destroy(ctx);
+		return;
+	}
+
+	bzero(&signature, sizeof(signature));
+	signature.fn = RELIC_AGG_MAX;
+	signature.column = 0;
+	bzero(&source, sizeof(source));
+	source.signatures = &signature;
+	source.signature_count = 1;
+	source.counts = true;
+	source.key_mask = UINT32_C(1) << 1;
+
+	if (relic_reducer_open(ctx, &source, 3, &dest) != 0 ||
+	    relic_reducer_open_limited(ctx, &source, 3, 64 * 1024,
+	    &src) != 0) {
+		checkf(false, SCENARIO_COMBINED, "the parts should open: %s",
+		    relic_error(ctx));
+		relic_reducer_close(ctx, dest);
+		relic_reducer_close(ctx, src);
+		relic_destroy(ctx);
+		return;
+	}
+
+	relic_reducer_set_ordinal(dest, 100);
+	bzero(&batch, sizeof(batch));
+	batch.rows = dest_row;
+	batch.count = 1;
+	if (relic_reducer_take(ctx, dest, relation, &batch, &taken) != 0) {
+		checkf(false, SCENARIO_COMBINED, "dest should take its row: %s",
+		    relic_error(ctx));
+		relic_reducer_close(ctx, dest);
+		relic_reducer_close(ctx, src);
+		relic_destroy(ctx);
+		return;
+	}
+
+	relic_reducer_set_ordinal(src, 5);
+	batch.rows = src_rows;
+	batch.count = 1;
+	if (relic_reducer_take(ctx, src, relation, &batch, &taken) != 0 ||
+	    relic_reducer_combine(ctx, dest, src) != 0 ||
+	    relic_reducer_finish(ctx, dest, relation, &summary) != 0) {
+		checkf(false, SCENARIO_COMBINED, "the parts should combine: %s",
+		    relic_error(ctx));
+		relic_reducer_close(ctx, dest);
+		relic_reducer_close(ctx, src);
+		relic_destroy(ctx);
+		return;
+	}
+
+	checkf(relic_summary_groups(summary) == 2 &&
+	    relic_summary_key(summary, 0)[0] == src_rows[1] &&
+	    relic_summary_rows(summary, 0) == 1 &&
+	    relic_summary_key(summary, 1)[0] == dest_row[1] &&
+	    relic_summary_rows(summary, 1) == 1, SCENARIO_COMBINED,
+	    "the earlier key should come first after combine, not %zu groups",
+	    relic_summary_groups(summary));
+	(void)relic_summary_state(summary, 0, 0, &extreme);
+	checkf(extreme == src_rows[0], SCENARIO_COMBINED,
+	    "the earlier part's max should be kept");
+
+	relic_reducer_close(ctx, dest);
+	relic_reducer_close(ctx, src);
+	relic_summary_destroy(ctx, summary);
+	relic_destroy(ctx);
+}
+
+/*
+ * A limited builder sized to its first allocation leaves the row that
+ * would grow it.  Combined and cleared, that leftover is taken once and
+ * the summary holds every key in first-occurrence order.  That is one
+ * drain of a wave.  The keys are the file numbers, unique, so filling
+ * the first block takes more than one group.
+ */
+static void
+a_full_partial_drains_and_takes_the_rest(void)
+{
+	relic_dom_t rows[3 * 32];
+	relic_reduced_source_t source;
+	relic_reduce_batch_t batch;
+	relic_relation_t *relation;
+	relic_reducer_t *dest;
+	relic_reducer_t *part;
+	relic_reducer_t *probe;
+	relic_summary_t *summary;
+	relic_t *ctx;
+	size_t budget;
+	size_t fitted;
+	size_t i;
+	size_t taken;
+	const size_t keys = 32;
+
+	dest = NULL;
+	part = NULL;
+	probe = NULL;
+	summary = NULL;
+
+	ctx = context_flagged(PIPELINE, 0);
+	if (ctx == NULL)
+		return;
+	relation = relation_named(ctx, "kind", 3);
+	if (relation == NULL)
+		goto fail_intern;
+	for (i = 0; i < keys; i++) {
+		if (intern_file_row(ctx, (unsigned int)i, &rows[3 * i]) != 0)
+			goto fail_intern;
+	}
+
+	bzero(&source, sizeof(source));
+	source.counts = true;
+	source.key_mask = UINT32_C(1) << 0;
+	bzero(&batch, sizeof(batch));
+	batch.rows = rows;
+	batch.count = 1;
+
+	if (relic_reducer_open(ctx, &source, 3, &probe) != 0 ||
+	    relic_reducer_take(ctx, probe, relation, &batch, &taken) != 0) {
+		checkf(false, SCENARIO_DRAIN, "the probe should take one: %s",
+		    relic_error(ctx));
+		relic_reducer_close(ctx, probe);
+		relic_destroy(ctx);
+		return;
+	}
+	budget = relic_reducer_peak(probe);
+	fitted = 1;
+	for (i = 1; i < keys; i++) {
+		batch.rows = &rows[3 * i];
+		if (relic_reducer_take(ctx, probe, relation, &batch,
+		    &taken) != 0) {
+			checkf(false, SCENARIO_DRAIN, "the probe should take "
+			    "key %zu: %s", i, relic_error(ctx));
+			relic_reducer_close(ctx, probe);
+			relic_destroy(ctx);
+			return;
+		}
+		if (relic_reducer_peak(probe) > budget)
+			break;
+		fitted++;
+	}
+	relic_reducer_close(ctx, probe);
+	checkf(fitted < keys, SCENARIO_DRAIN,
+	    "the probe should grow past its first peak within %zu keys", keys);
+
+	if (relic_reducer_open(ctx, &source, 3, &dest) != 0 ||
+	    relic_reducer_open_limited(ctx, &source, 3, budget, &part) != 0) {
+		checkf(false, SCENARIO_DRAIN, "the builders should open: %s",
+		    relic_error(ctx));
+		relic_reducer_close(ctx, dest);
+		relic_reducer_close(ctx, part);
+		relic_destroy(ctx);
+		return;
+	}
+
+	relic_reducer_set_ordinal(part, 0);
+	batch.rows = rows;
+	batch.count = fitted + 1;
+	taken = SIZE_MAX;
+	checkf(relic_reducer_take(ctx, part, relation, &batch, &taken) == 0 &&
+	    taken == fitted && relic_reducer_full(part) &&
+	    !relic_reducer_failed(part) && relic_reducer_rows(part) == fitted,
+	    SCENARIO_DRAIN, "the first allocation should fill after %zu "
+	    "keys, not taken=%zu rows=%" PRIu64 " full=%d failed=%d", fitted,
+	    taken, relic_reducer_rows(part), relic_reducer_full(part),
+	    relic_reducer_failed(part));
+
+	if (relic_reducer_combine(ctx, dest, part) != 0) {
+		checkf(false, SCENARIO_DRAIN, "the first groups should combine: "
+		    "%s", relic_error(ctx));
+		relic_reducer_close(ctx, dest);
+		relic_reducer_close(ctx, part);
+		relic_destroy(ctx);
+		return;
+	}
+	relic_reducer_clear(ctx, part);
+	relic_reducer_set_ordinal(part, fitted);
+	batch.rows = &rows[3 * fitted];
+	batch.count = 1;
+	if (relic_reducer_take(ctx, part, relation, &batch, &taken) != 0 ||
+	    relic_reducer_combine(ctx, dest, part) != 0 ||
+	    relic_reducer_finish(ctx, dest, relation, &summary) != 0) {
+		checkf(false, SCENARIO_DRAIN, "the leftover should drain: %s",
+		    relic_error(ctx));
+		relic_reducer_close(ctx, dest);
+		relic_reducer_close(ctx, part);
+		relic_destroy(ctx);
+		return;
+	}
+
+	checkf(relic_summary_groups(summary) == fitted + 1 &&
+	    relic_summary_key(summary, 0)[0] == rows[0] &&
+	    relic_summary_key(summary, fitted)[0] == rows[3 * fitted] &&
+	    relic_summary_rows(summary, 0) == 1 &&
+	    relic_summary_rows(summary, fitted) == 1, SCENARIO_DRAIN,
+	    "every key should appear once, key 0 first, not %zu groups",
+	    relic_summary_groups(summary));
+
+	relic_reducer_close(ctx, dest);
+	relic_reducer_close(ctx, part);
+	relic_summary_destroy(ctx, summary);
+	relic_destroy(ctx);
+	return;
+
+fail_intern:
+	check(false, SCENARIO_DRAIN, "the rows should be interned");
+	relic_destroy(ctx);
+}
+
+/*
+ * The file pipeline's producer is cuttable.  Under RELIC_F_PARALLEL_ALWAYS
+ * it reduces through bounded partials, at one thread and at two, and
+ * answers as the serial reference does: one source, the same groups, and
+ * a wave count.  A memory limit on the same switch keeps the serial path.
+ */
+static void
+a_shared_producer_answers_as_the_reference(void)
+{
+	static char program[PROGRAM_MAX];
+	static char expected[RENDERED_MAX];
+	static char answer[RENDERED_MAX];
+	static const size_t threads[] = { 1, 2, 4 };
+	relic_t *ctx;
+	size_t t;
+	int status;
+
+	write_files(program, sizeof(program), PIPELINE);
+	expected_groups(expected, sizeof(expected));
+
+	ctx = context_flagged(program, RELIC_F_NO_GROUP_REDUCTION);
+	if (ctx == NULL)
+		return;
+	check(run_query(ctx, "grouped(D, E, N)?", answer) == 0,
+	    SCENARIO_SHARED, "the reference should answer");
+	checkf(strcmp(answer, expected) == 0, SCENARIO_SHARED,
+	    "the reference should count every pair: \"%.200s\"", answer);
+	relic_destroy(ctx);
+
+	for (t = 0; t < sizeof(threads) / sizeof(threads[0]); t++) {
+		ctx = context_configured(program, RELIC_F_PARALLEL_ALWAYS,
+		    threads[t], 0);
+		if (ctx == NULL)
+			continue;
+		status = run_query(ctx, "grouped(D, E, N)?", answer);
+		checkf(status == 0 && strcmp(answer, expected) == 0,
+		    SCENARIO_SHARED, "at %zu thread(s) the shared producer "
+		    "should answer as the reference: \"%.200s\" (%s)",
+		    threads[t], answer, relic_error(ctx));
+		checkf(ctx->counters.sources_reduced == 1 &&
+		    ctx->counters.reductions_shared == 1 &&
+		    ctx->counters.reduction_waves >= 1 &&
+		    ctx->counters.reduced_rows == FILES &&
+		    ctx->counters.reduced_groups == GROUPS, SCENARIO_SHARED,
+		    "at %zu thread(s) one source should be shared in %"
+		    PRIu64 " waves, not reduced=%" PRIu64 " shared=%" PRIu64
+		    " waves=%" PRIu64 " rows=%" PRIu64 " groups=%" PRIu64,
+		    threads[t], ctx->counters.reduction_waves,
+		    ctx->counters.sources_reduced,
+		    ctx->counters.reductions_shared,
+		    ctx->counters.reduction_waves,
+		    ctx->counters.reduced_rows,
+		    ctx->counters.reduced_groups);
+		relic_destroy(ctx);
+	}
+
+	write_files(program, sizeof(program),
+	    "stem(P, D, B, L) :- file(P),\n"
+	    "    match(P, \"/test_[0-9]+[.]\") < 0, D = substr(P, 0, 2),\n"
+	    "    B = substr(P, 3, 40), L = length(P).\n"
+	    "dirs(D) :- stem(_, D, _, _).\n"
+	    "edge(D, LO, HI, SHORT, LONG, S) :- dirs(D),\n"
+	    "    LO = min(B1) { stem(P1, D, B1, L1) },\n"
+	    "    HI = max(B2) { stem(P2, D, B2, L2) },\n"
+	    "    SHORT = min(L3) { stem(P3, D, B3, L3) },\n"
+	    "    LONG = max(L4) { stem(P4, D, B4, L4) },\n"
+	    "    S = sum(L5) { stem(P5, D, B5, L5) }.\n");
+	ctx = context_flagged(program, RELIC_F_NO_GROUP_REDUCTION);
+	if (ctx == NULL)
+		return;
+	check(run_query(ctx, "edge(D, LO, HI, SHORT, LONG, S)?", expected) == 0,
+	    SCENARIO_SHARED, "the extremes' reference should answer");
+	relic_destroy(ctx);
+
+	ctx = context_configured(program, RELIC_F_PARALLEL_ALWAYS, 2, 0);
+	if (ctx == NULL)
+		return;
+	status = run_query(ctx, "edge(D, LO, HI, SHORT, LONG, S)?", answer);
+	checkf(status == 0 && strcmp(answer, expected) == 0 &&
+	    ctx->counters.reductions_shared == 1, SCENARIO_SHARED,
+	    "shared extremes should match the reference: \"%.200s\" against "
+	    "\"%.200s\" shared=%" PRIu64 " (%s)", answer, expected,
+	    ctx->counters.reductions_shared, relic_error(ctx));
+	relic_destroy(ctx);
+}
+
+/*
+ * A configured memory limit builds the same reduction serially, even
+ * under RELIC_F_PARALLEL_ALWAYS: the answers match and nothing is shared.
+ */
+static void
+a_memory_limit_keeps_reduction_serial(void)
+{
+	static char program[PROGRAM_MAX];
+	static char expected[RENDERED_MAX];
+	static char answer[RENDERED_MAX];
+	relic_t *ctx;
+	size_t loaded;
+	int status;
+
+	write_files(program, sizeof(program), PIPELINE);
+	ctx = context_flagged(program, 0);
+	if (ctx == NULL)
+		return;
+	check(run_query(ctx, "grouped(D, E, N)?", expected) == 0,
+	    SCENARIO_SERIAL_LIMIT, "the pipeline should answer without a limit");
+	loaded = ctx->account.store_bytes + ctx->account.value_bytes +
+	    ctx->account.pool_bytes + ctx->account.predtab_bytes;
+	relic_destroy(ctx);
+
+	ctx = context_configured(program,
+	    RELIC_F_PARALLEL_ALWAYS, 2, loaded + LIMIT_SPAN);
+	if (ctx == NULL)
+		return;
+	status = run_query(ctx, "grouped(D, E, N)?", answer);
+	checkf(status == 0 && strcmp(answer, expected) == 0,
+	    SCENARIO_SERIAL_LIMIT, "under a memory limit the producer should "
+	    "answer as it does without one: \"%.200s\" (%s)", answer,
+	    relic_error(ctx));
+	checkf(ctx->counters.sources_reduced == 1 &&
+	    ctx->counters.reductions_shared == 0 &&
+	    ctx->counters.reduction_waves == 0, SCENARIO_SERIAL_LIMIT,
+	    "a memory limit should keep the serial path, not shared=%"
+	    PRIu64 " waves=%" PRIu64, ctx->counters.reductions_shared,
+	    ctx->counters.reduction_waves);
+	relic_destroy(ctx);
+}
+
+/*
+ * A mixed-type comparison in a cuttable producer reports a note.  An
+ * interrupt from that note must fail the query before the shared path
+ * publishes a summary or counts a successful pass.
+ */
+static void
+interrupt_on_note(void *callback_ctx, enum relic_diag_level level,
+    const relic_location_t *where, const char *message)
+{
+	(void)where;
+	(void)message;
+	if (level == RELIC_NOTE)
+		relic_interrupt(callback_ctx);
+}
+
+static void
+a_note_interrupt_fails_a_shared_reduction(void)
+{
+	static char program[PROGRAM_MAX];
+	static char answer[RENDERED_MAX];
+	relic_t *ctx;
+	int status;
+
+	write_files(program, sizeof(program),
+	    "kind(P, D, E) :- file(P), match(P, \"/test_[0-9]+[.]\") < 0,\n"
+	    "    D = substr(P, 0, 2), E = substr(P, index(P, \".\") + 1),\n"
+	    "    length(P) < \"z\".\n"
+	    GROUP_RULE GROUPED_RULE);
+
+	ctx = context_configured(program,
+	    RELIC_F_NOTE_MIXED | RELIC_F_PARALLEL_ALWAYS, 2, 0);
+	if (ctx == NULL)
+		return;
+	status = run_query(ctx, "grouped(D, E, N)?", answer);
+	checkf(status == 0 && ctx->counters.sources_reduced == 1,
+	    SCENARIO_NOTE_INT, "the mixed producer should reduce: status=%d "
+	    "sources=%" PRIu64 " (%s)", status, ctx->counters.sources_reduced,
+	    relic_error(ctx));
+	checkf(ctx->counters.reductions_shared == 1, SCENARIO_NOTE_INT,
+	    "the mixed producer should share: shared=%" PRIu64 " waves=%"
+	    PRIu64, ctx->counters.reductions_shared,
+	    ctx->counters.reduction_waves);
+	relic_destroy(ctx);
+
+	ctx = context_configured(program,
+	    RELIC_F_NOTE_MIXED | RELIC_F_PARALLEL_ALWAYS, 2, 0);
+	if (ctx == NULL)
+		return;
+	relic_diag_set(ctx, interrupt_on_note, ctx);
+	status = run_query(ctx, "grouped(D, E, N)?", answer);
+	checkf(status != 0 &&
+	    relic_error_class(ctx) == RELIC_ERROR_INTERRUPTED &&
+	    ctx->counters.reductions_shared == 0 &&
+	    ctx->counters.parallel_rounds == 0 &&
+	    ctx->counters.sources_reduced == 0, SCENARIO_NOTE_INT,
+	    "a note during a shared reduction should fail as interrupted, "
+	    "not status=%d shared=%" PRIu64 " error=%s", status,
+	    ctx->counters.reductions_shared, relic_error(ctx));
+	relic_destroy(ctx);
+}
+
 #ifdef RELIC_REDUCE_ROWS_MAX
 /*
  * A reduced source has no store, but keeps the ceiling on its rows that a
@@ -1454,6 +2075,13 @@ main(void)
 	an_index_built_already_is_no_saving();
 	an_index_a_delta_plan_reads_is_no_saving();
 	a_fold_no_binding_reaches_is_not_summarized();
+	a_limited_builder_leaves_an_oversized_row();
+	a_limited_take_does_not_apply_a_row_twice();
+	combined_parts_keep_the_earlier_occurrence();
+	a_full_partial_drains_and_takes_the_rest();
+	a_shared_producer_answers_as_the_reference();
+	a_memory_limit_keeps_reduction_serial();
+	a_note_interrupt_fails_a_shared_reduction();
 #ifdef RELIC_REDUCE_ROWS_MAX
 	the_row_ceiling_outlives_the_store();
 #endif

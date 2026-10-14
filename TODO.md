@@ -20,12 +20,13 @@ of which `contrib/` holds only the homebrew formula, so
 [release procedure](specs/design-release.md#the-release-procedure).
 
 **Direct grouped reduction is enabled but not releasable as the default.**
-[High, component: `lib/reduce.c`, `lib/eval.c`] The serial reducer makes
-`files-grouped` 12 to 15 per cent faster at one worker, with 11 to 23 per
-cent less memory, but makes it 1.8 to 2.3 times slower at `-j 16`, where the
-materialized reference partitions the producer. A release enables it by
-default only once bounded parallel partials land and the serial gain, the
-parallel time and bounded memory are revalidated on the p620 and the M3;
+[High, component: `lib/reduce.c`, `lib/eval.c`] `files-grouped` is 15 per
+cent faster at one worker, with 22 per cent less memory. At `-j 16` on
+the M3 the shared path is 1.5 times the reference (1.07 s and 329 MB
+against 0.71 s and 721 MB), which is still too large to ship as the
+default. A release enables it by default only once
+the serial gain, the parallel time and bounded memory are revalidated on
+the p620 as well;
 [step 6 of the plan](docs/todo-benchmark-performance.md#6-reduce-eligible-grouped-pipelines-directly)
 has the measurements and the remaining work.
 

@@ -211,6 +211,9 @@ struct relic_valtab {
  * for their folds, whose rows a build visits count as scanned.
  * `reduction_peak` is the most bytes one reduction held at once: its
  * builder, and the summary and scratch of its finishing.
+ * `reductions_shared` counts the sources whose producer ran through
+ * bounded parallel partials, and `reduction_waves` the waves those
+ * runs drained.
  *
  * relic_stats() reports none of these; they show the tests which way an
  * import, a commit or a grouped source went.
@@ -232,6 +235,8 @@ struct relic_counters {
 	uint64_t		reduced_rows;
 	uint64_t		reduced_groups;
 	uint64_t		summaries_built;
+	uint64_t		reductions_shared;
+	uint64_t		reduction_waves;
 	size_t			reduction_peak;
 };
 

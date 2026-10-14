@@ -977,8 +977,9 @@ typedef struct relic_stats relic_stats_t;
  *			tuples read while looking up relations through an
  *			index on the bound arguments of a literal
  *	parallel_rounds	rounds of evaluation shared among more than one
- *			thread, the one counter that depends on the number
- *			of threads
+ *			thread, and a grouped source whose producer ran
+ *			that way, the one counter that depends on the
+ *			number of threads
  *
  * The rest describe the context when the counters are read: the tuples held
  * across every relation -- answers are transient, so only a row callback finds
