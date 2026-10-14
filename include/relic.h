@@ -301,8 +301,9 @@ struct relic_config {
  * derives except as they stood when it began, which is every round but a
  * pass of the naive fixed point: what its rules derive is gathered while
  * they run and inserted when the last has finished, in the order it would
- * have been inserted as it was derived, and each rule's eligible first scan
- * or lookup is cut into pieces run one after another.  That is how a round
+ * have been inserted as it was derived.  A plan beginning with a scan is
+ * cut into pieces of that scan, run one after another; other plans run
+ * whole.  That is how a round
  * runs on several threads.  The switch uses that path however little work
  * a round holds, so every program exercises it.  It also reads every
  * eligible regular-file table a window of records at a time, whatever the

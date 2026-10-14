@@ -12,7 +12,7 @@ Related: [architecture](architecture.md#magic-sets),
 [Magic Sets](design-magic.md), [planning](design-planning.md),
 [evaluation](design-eval.md#the-semi-naive-fixed-point),
 [storage](design-storage.md), [testing](design-testing.md),
-[implementation plan](../docs/todo-benchmark-performance.md#3-factor-eligible-bound-recursion).
+[implementation plan](../docs/todo-benchmark-performance.md#characterize-the-reference).
 
 ## Model
 
@@ -579,7 +579,7 @@ changes to shared execution paths. LSan and MSan run where supported.
 
 Benchmark `chain-right`, `tc-acyclic-bf` and `tc-cyclic-bf` at scales 1, 2,
 4 and 8 with one and sixteen threads under the
-[measurement rules](../docs/todo-benchmark-performance.md#measurement-and-acceptance-rules).
+[measurement rules](../docs/todo-performance-measurements.md).
 Record derivations, generated relation sizes, persistent index storage,
 rewrite/planning time, evaluation time, wall time and peak RSS. Include
 different `R` and `B`, multiple origins and ineligible programs as controls.

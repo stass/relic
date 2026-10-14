@@ -19,20 +19,18 @@ of which `contrib/` holds only the homebrew formula, so
 `contrib/pkgsrc/devel/relic/` are to write; and the
 [release procedure](specs/design-release.md#the-release-procedure).
 
-**Select small performance follow-ups.** [Medium, component:
-`bench/compare/`, `lib/eval.c`, `lib/import.c`, `lib/merge.c`]
-Choose whether to release expired worker screens for better memory-limit
-admission and use existing tags for faster derived membership, with the
-measured additional storage and remaining adoption checks explicit. The
-[performance plan](docs/todo-benchmark-performance.md) separates measured
-benefits from memory costs and noisy timings. Re-evaluate driver slicing's
-benefit relative to its reach before expanding it; the
-[complexity audit](bench/compare/recorded/complexity/README.md) attributes
-about 69% of retained source growth to importing and slicing. Import
-ownership is measured, and neither a cached/grouped membership module,
-candidate routing nor a replacement summary framework is queued.
-Symbol publication remains a separate speed/complexity decision supported
-by the isolated import comparisons.
+**Improve performance with a smaller execution model.** [Medium, component:
+`lib/exec.c`, `lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/import.c`,
+`lib/relation.c`, `bench/compare/`]
+Use the validated scan-only reference to rank remaining command costs.
+Evaluate existing derived tags and earlier screen release as separate local
+changes, then address candidate-memory growth and the import-publication
+tradeoff through bounded measurements and focused designs where needed.
+The [performance plan](docs/todo-benchmark-performance.md) defines this
+sequence and its stopping rules; the
+[measurement protocol](docs/todo-performance-measurements.md) keeps source,
+answers, resources and uncertainty tied to each decision. No general
+reduction, routing or replacement membership framework is committed.
 
 **Parallel evaluation misses its speed-up targets.** [Medium, component:
 `lib/round.c`, `docs/todo-parallel.md`] With the pool, `tc-cyclic` should
@@ -116,7 +114,7 @@ supported machines and toolchains before setting a default; keep alignment
 a separately measured choice.
 Preserve equal argument lengths, multiple layouts, and guarded and
 ordinary-Magic references. Repeat these controls after bulk loading and
-indexed driver slicing; steps 4-5 of the benchmark plan cover those paths.
+the scan-only trim under the performance plan's measurement protocol.
 
 **Compare output sinks and validate scaling on a second platform.**
 [Medium, component: `bench/compare/`]
@@ -133,35 +131,17 @@ answers of `tc-cyclic-bf`, which the unfactored rewrite reaches after
 3,191,837,759 derivations. [Bound query factoring](specs/design-query-factoring.md)
 answers it with 805,760 derivations in about 0.1 s in a local run. Measure
 `chain-right`, `tc-acyclic-bf` and `tc-cyclic-bf` against the rival engines
-under the [ordered plan](docs/todo-benchmark-performance.md#3-factor-eligible-bound-recursion).
+under the [performance plan](docs/todo-benchmark-performance.md#characterize-the-reference).
 
-**relic's evaluation costs several times Souffle's interpreter per derivation
-on the analyses.** [Medium, component: `lib/eval.c`, `bench/compare/andersen`]
-On a busy machine `andersen` took relic 1.9 s against 0.7 s for the Souffle
-interpreter, and the gap widens on denser inputs: a denser
-`dataset_andersen` took 248 s of user time against 17 s, and `tc-nonlinear`
-over `sparse-cyclic` ran past 600 s against 117 s. Semi-naive evaluation
-does not repeat work here, so the gap is the cost of a derivation and its
-lookups, not their number. Profiles of `tc-cyclic` and `sg-cyclic` put 59
-and 49 per cent of the time in the duplicate check of relation insertion;
-92 to 96 per cent of those checks find a duplicate, each a cache miss on
-the slot array and another on the tuple that confirms it. Souffle's B-tree,
-inserted with the outer loop fixed on the head's first column, lands
-consecutive inserts in the same leaf. A hash stored beside each identifier
-was measured without batching, median user time of five interleaved runs
-on the macOS Xeon: `tc-cyclic` 4.75 s with four-byte slots against 4.36 s
-with eight, `sg-cyclic` 3.42 against 3.56 s, at peaks of 81-82 against
-90-116 MB and 56-69 against 77-102 MB, so it was set aside. Worth measuring
-next: the stored hash again with batched insertion in place, and whether a
-successful search visits enough slots past the first to make prefetching
-them pay.
-
-An M3 Max scale-2 `tc-cyclic` evaluation-window profile places 1,739 of
-2,542 samples in the insertion path; it is retained with the diagnostic
-evidence. Batched hashing and prefetching are already present. Measure
-probe lengths, tuple reads and cache locality before selecting a different
-canonical index layout; a wider slot must justify its memory cost on
-both dense closures and sparse analyses.
+**Attribute the remaining per-derivation cost on program analyses.**
+[Medium, component: `lib/eval.c`, `bench/compare/andersen`]
+Busy-host observations show a substantial gap against Souffle's interpreter
+on Andersen and nonlinear reachability. Profile representative analyses on
+the simplified reference before selecting an intervention. The
+[membership study](bench/compare/recorded/focused-investigations.md) supports
+existing tags on closures, not a new cached-hash container or more prefetching.
+Use the [performance plan's cost map](docs/todo-benchmark-performance.md#characterize-the-reference)
+to distinguish remaining tuple comparison, lookup, expression and growth work.
 
 **A growth's slack and transient keep the peak above the live heap.**
 [Medium, component: `lib/util.c`] `chain-closure`'s peak footprint runs

@@ -376,7 +376,6 @@ relic_pool_free(relic_pool_t *pool)
 
 	free(pool->workers);
 	free(pool->tasks);
-	free(pool->prepared);
 	free(pool);
 }
 

@@ -516,21 +516,16 @@ rule succ_edge(X, Z) :- n(X), Y = X + 1, edge(Y, Z).
     emit succ_edge(X, Z)
 ```
 
-### Driving cursors
+### Parallel task boundaries
 
-A prepared plan records whether its first generator follows only tests
-that bind nothing. This structural certificate names the driver position
-for [ordered cursor slicing](design-driver-slicing.md#finding-the-driver).
-The scheduler can divide that scan's view or that lookup's matching chain
-without changing operation order, access masks or view assignments. An
-assignment or aggregate before the generator leaves the plan unsliced;
-it does not cause reordering to obtain a different driver.
+The scheduler can partition a prepared plan only when its first operation
+is a scan, by dividing that operation's fixed identifier range. Other
+plans run whole. Eligibility follows directly from the first operation;
+it adds no plan metadata, cursor preparation or prefix execution.
 
-This metadata is derived for each prepared plan and belongs to its charged
-storage. Match counts, boundaries and prefix results belong to one frozen
-round. They are absent from candidate selection, static Magic planning
-and explain's operation sequence. A lookup remains indexed whether it
-runs as one task or many.
+Task boundaries do not change operation order, access masks or candidate
+selection. A plan beginning with a lookup keeps that indexed access, and
+the planner does not substitute a scan to obtain more parallel tasks.
 
 ### Probe shapes
 

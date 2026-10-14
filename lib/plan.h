@@ -426,24 +426,6 @@ struct relic_plan {
 };
 
 /*
- * A plan's driver: the position of its first SCAN or LOOKUP when only
- * MEMBER, EXISTS, ANTI_MEMBER and FILTER come before it, or
- * RELIC_PLAN_NO_DRIVER when an ASSIGN, an AGGREGATE or the EMIT comes
- * first.  The operations before the driver, its prefix, are
- * tests with nothing bound before them, so by the invariants above they
- * read only constants, bind nothing and succeed at most once: the join
- * reaches the driver once or never, with an empty frame, and every key
- * column of a LOOKUP driver is a constant.  That is what lets a round run
- * the prefix once and divide the driver's visits among tasks that each
- * start at the driver and never backtrack above it.  It is derived from
- * the operations each time it is asked, so no plan can hold a driver its
- * operations contradict.
- */
-#define	RELIC_PLAN_NO_DRIVER	SIZE_MAX
-
-size_t	 relic_plan_driver(const relic_plan_t *plan);
-
-/*
  * A secondary index a plan's operations read: the one of `relation` keyed
  * on the columns of `key_mask`.  It names the index whether or not the
  * relation has built it.

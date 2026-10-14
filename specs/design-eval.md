@@ -148,22 +148,19 @@ identifiers increase along a chain, so nothing before it is skipped. Tuples
 inserted meanwhile are not lost: the next plan to read the relation sees
 them. A plan's work is thus bounded by the relations' sizes when it started.
 
-### Starting at a driving cursor
+### Partitioning a leading scan
 
-A deferred round can run an eligible plan's binding-free prefix once and
-divide its first generator into [ordered slices](design-driver-slicing.md).
-Prefix preparation stops before that generator using the same operation
-dispatcher. Slice execution initializes the generator's cursor directly
-and makes its level the lowest runnable level; exhausting it ends the task
-instead of backtracking into the prefix. Whole-plan execution uses level
-zero as its lower boundary.
+A deferred round can divide a plan whose first operation is a `SCAN` into
+ordered pieces of that scan's fixed identifier range. Each piece starts
+the ordinary executor at level zero, with only the first operation's view
+narrowed. Term matching, all later views, quantum pauses and batch returns
+follow the whole-plan path. An empty piece derives nothing.
 
-Every return and resume preserves this boundary and the prepared cursor.
-Residual term matching and all lower operations run normally, with their
-original resolved views. An indexed slice never uses its own start as a
-delta start or advances a frontier to it. Prefix counters and notes belong
-to the prepared item; suffix counters and candidates belong to tasks, so
-the successful merge accounts for each part of the serial execution once.
+A plan beginning with any other operation runs whole. Leading tests are
+ordinary operations and keep their counters, notes and errors in the same
+scratch as the rest of the plan. Every task starts at level zero, and
+exhausting that level ends it; there is no separately prepared cursor or
+lower execution boundary to preserve across returns.
 
 ### The executor does not insert
 

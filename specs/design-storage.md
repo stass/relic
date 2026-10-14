@@ -357,23 +357,6 @@ A lookup holds no pointer into the relation or the index across the
 operations below it, only the next identifier and the end, so an insertion
 below that grows `next`, the stripes or the column array invalidates nothing.
 
-### Frozen driving slices
-
-[Ordered driving cursors](design-driver-slicing.md#constructing-slices)
-divide a lookup's visits by match ordinal. During a frozen round,
-storage-owned helpers count the chain inside its view and locate a bounded
-number of starting identifiers in a second forward walk. They expose
-identifiers and progress through `lib/frozen.h`, keep no per-match array,
-and add no per-key length or navigation metadata to insertion.
-
-Each slice starts directly at its prepared identifier and stops before
-the next slice's start, or before the original view end for the last slice.
-The worker still uses ordinary tuple matching. A slice's starting
-identifier is not a new delta start: boundary walks never move a frontier,
-and workers do not seek to their starts through the delta-positioning API.
-The index and relation remain frozen from preparation through the task
-barrier, and prepared cursors expire before the merge mutates storage.
-
 ### Lookup of a delta
 
 A lookup through a delta view visits the key's tuples in the delta

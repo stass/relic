@@ -14,7 +14,7 @@ Related: [architecture: storage](architecture.md#storage),
 [memory](design-memory.md#the-memory-limit),
 [bulk loading](design-bulk-load.md),
 [benchmarks](design-bench.md), [testing](design-testing.md),
-[implementation plan](../docs/todo-benchmark-performance.md#next-investigations).
+[implementation plan](../docs/todo-benchmark-performance.md#use-existing-mechanisms-first).
 
 ## Model
 
@@ -78,9 +78,9 @@ The design gives no layout a performance win by assumption.
 
 ## Establishing the remaining cost
 
-The measurement baseline is the retained engine: bounded recursive plan
-selection, ordinary materialized aggregates, current loading and indexed
-driver slicing. Every experiment names its exact source and build so that
+The measurement baseline uses bounded recursive plan selection, ordinary
+materialized aggregates, current loading and leading-scan partitioning.
+Every experiment names its exact source and build so that
 a result on one baseline does not establish a default for another.
 
 Worker-local screens remove repeated candidates within each worker, but
@@ -518,29 +518,30 @@ other candidates, while cached hashes additionally remove growth reads.
 
 Controls include sparse reachability, Andersen/CSPA analyses, `facts-join`
 loading, `files-grouped`, `degree-count`, startup/small relations, and
-synthetic high-arity relations. The reductions can leave membership with
+synthetic high-arity relations. Query factoring can leave membership with
 little work; such a case is a useful control for an unconditional storage
 or construction tax. Separate uniformly distributed and stripe-skewed
 inputs and synthetic collision traces. Collision fixtures establish
 correctness and tail costs; they are not a substitute for production
 hash distributions.
 
-Use the implementation plan's scales 1/2/4/8 and 1/16 workers, adding
-4/8/12 for bandwidth-sensitive comparisons. Keep binaries, data, compiler
-options, harness and output sink immutable. Each targeted cell has at
-least ten interleaved samples with raw spread, wall and summed user CPU,
-peak RSS, charged steady/peak storage and exact answer evidence. Large
-runs that cannot finish remain failed/limited statuses. Diagnostic
-counter, sampling and timed-production cohorts are separate artifacts.
+Choose a target and controls from these families under the
+[measurement protocol](../docs/todo-performance-measurements.md).
+Begin at one representative size and one/sixteen workers; add sizes or
+worker counts only to resolve a specific storage or scaling question.
+Keep binaries, data, compiler options, harness and output sink immutable.
+Each decisive cell has at least ten interleaved AB/BA pairs with raw spread,
+wall and summed user CPU, peak RSS, charged steady/peak storage and exact
+answer evidence. Large runs that cannot finish remain failed/limited
+statuses. Diagnostic counter, sampling and timed-production cohorts are
+separate artifacts.
 
-Compare the ordinary production link layout first. Small hot-loop
-changes can alter surrounding code placement, so repeat close results
-under several predetermined diagnostic link layouts where tooling
-supports that experiment. Use the same permutations for reference and
-candidates and retain every result; select neither the luckiest binary
-nor a favorable sample subset. Keep compiler, LTO and alignment policy
-fixed across a representation comparison. If a gain disappears under
-reasonable layout controls, attribution remains unresolved.
+Compare the ordinary production link layout first. Small hot-loop changes
+can alter surrounding code placement. A close result may justify one
+predetermined layout control using the same transformation for reference
+and candidate. Retain every result and close an unresolved comparison as
+inconclusive. Keep compiler, LTO and alignment policy fixed across a
+representation comparison; selecting a build policy is a separate decision.
 
 Production runs retain ordinary random context seeds. Controlled seeds
 belong only to synthetic diagnostic fixtures, which can isolate collision

@@ -1,9 +1,9 @@
 # Parallel evaluation: gaps and ideas
 
 `specs/design-parallel.md` designs parallel evaluation. Shared rounds, the
-pool and the parallel merge are built, and output, counters and storage
-bytes are the same at every thread count. The speed-up targets below are
-missed, and components side by side are not built.
+pool and the parallel merge are built. Successful evaluations have the same
+output, ordinary counters and storage bytes at every thread count. The
+speed-up targets below are missed, and components side by side are not built.
 This page records what is missing and what to try, in the order worth
 trying it. Times are from a macOS Xeon, loaded unless another platform is
 named. M3 observations refer to the
@@ -70,13 +70,13 @@ gain is not measured at sixteen threads.
 successor as facts, `dist(X, Z, D1) :- dist(X, Y, D), par(Y, Z), D < 3,
 succ(D, D1)`, over the `tc-cyclic` data: the planner starts the recursive
 rule with `scan succ(D, D1)`, two tuples, and a plan is cut into at most as
-many pieces as its driver visits tuples, so the round's 45 million
+many pieces as that first scan visits tuples, so the round's 45 million
 derivations fall in two tasks. On sixteen threads it takes 5.7 to 5.9 s
 against 3.6 to 3.7 s on one, the fastest of five runs on a loaded machine;
 with `-X no-reorder`, which starts it at the delta, 1.43 s against 4.95 s.
-Measure driver skew and useful suffix work before proposing second-driver
-slicing or making the planner choose orders for parallelism. Validate the
-existing first-driver path before extending its state machine.
+Measure scan skew and useful work below the scan before proposing deeper
+partitioning or making the planner choose orders for parallelism. A change
+to the scan-only execution boundary needs a separate design decision.
 
 ## Rounds that insert what they derive
 
@@ -140,70 +140,6 @@ still slower with four stripes growing, and faster from twelve (8.8 against
 19.9 ms). Measure whether the existing immediate-growth path is preferable for
 small appends before adding a stripe-count threshold. Keep this inquiry
 confined to relation appends; the symbol pool has one ordinary index.
-
-## Driver slicing is not validated beyond its target
-
-[Medium, component: `lib/slice.c`, `lib/round.c`] A round's drivers are
-cut and its prefixes run once by worker 0 before the round is shared
-(`relic_slice_prepare()`, `relic_slice_cut()`); `facts-join` is the
-workload measured. Still to do:
-
-* Tune `RELIC_PARALLEL_STARTUP_WORK` and `RELIC_PREPARATION_SHARE`, set by
-  reasoning alone, on rounds with cheap suffixes, on shrinking rounds and
-  on declined preparations, counting the links a declined round followed.
-* Test `relic_slice_prepare()` and `relic_slice_cut()` directly against an
-  independent list of the driver's visits, for every piece count up to
-  the visits: the pieces partition the visits in order, a chain shorter
-  than its count declines, and an item's preparation follows at most the
-  F + 2M links the slicing design allows at every worker count, with no
-  positioning walk repeated per worker. Assert `preparation_links` and
-  `preparation_declines` in `test_round`.
-* Extend `test_round` and `test_exec` to drivers with repeated or
-  anonymous terms, lookup drivers over OLD and CURRENT views, a slice
-  whose join rejects for longer than a quantum, a chain skewed toward one
-  end, identifiers near `RELIC_TUPLE_MAX`, a prefix that computes a
-  string when worker 0 then runs no task, refusal of the prepared-item and
-  task arrays, and history taken from a shared round against the serial
-  one.
-* Give a LOOKUP driver's walk one definition. `lookup_start()` in
-  `lib/exec.c` and `find_chain()` with `driver_probe()` in `lib/slice.c`
-  each decide that a delta seeks from its frontier and every other view
-  starts at the chain's head, and `driver_index()` repeats
-  `lookup_index()`; were they to disagree, the slices would partition a
-  walk other than the one a serial run makes. One helper that opens the
-  driver's seek for its view, which a whole run walks to its end, removes
-  the second copy.
-* Hold a run's form, whole, prefix alone or slice, in one enum rather than
-  `prefix_only`, `reached`, `base` and `reach_driver()`'s `sliced`, from
-  which `base` follows.
-* A slice outside its driver's view, a slice started on a plan with no
-  driver and `relic_index_seek_walk()` given no links are asserted, not
-  refused, so a release build trusts `relic_slice_cut()` and its callers.
-  Decide whether those calls should refuse, finishing the scratch empty,
-  as cheap insurance for a store that is otherwise checked on every read.
-* Split `a_lookups_slices_derive_what_the_whole_does()` in `test_exec` into
-  one scenario each for the whole run's counts, the prefix's two outcomes
-  and the slices' partition.
-* Raise an interrupt inside the delta seek, the count and the cut. Each
-  walk looks for one every `RELIC_SLICE_LINKS` links and an interrupted
-  round is abandoned whatever its tasks saw, but no test can yet raise the
-  flag at a chosen link; that needs an injection point like the
-  allocator's.
-
-## An interrupt from a note stops a shared round late
-
-[Medium, component: `lib/round.c`] A shared round reports its notes once
-it has merged (`report_notes()`), so a note callback that raises the
-interrupt fails the round after every task has run, and the round's
-counters are then transferred and its histories recorded all the same.
-Run serially, the first note is reported at the pause that met it and the
-evaluation stops there. Both fail, but the counters a failed evaluation
-leaves differ, and the callback reads the counters before the round's
-reads are added, where a serial callback reads them with every call's
-reads already added. Either report notes in a form that lets the round
-stop where serial evaluation would, or state that the counters of a
-failed evaluation depend on its thread count. `test_interrupt` checks
-the status alone.
 
 ## Components side by side are not built
 

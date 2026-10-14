@@ -302,6 +302,8 @@ static int	 confirm_delta_literal(relic_t *ctx, const relic_rule_t *rule,
 static int	 confirm_order_complete(const relic_planner_t *planner);
 static int	 confirm_plan_complete(const relic_planner_t *planner);
 static int	 confirm_target_fits(const relic_planner_t *planner);
+static enum relic_cost_kind cost_kind(const relic_op_t *op);
+static enum relic_cost_kind fold_cost_kind(const relic_op_aggregate_t *fold);
 static uint64_t	 dead_slots(const relic_t *ctx, const relic_rule_t *rule);
 static int	 decide_order(relic_planner_t *planner);
 static size_t	 divide_rounding_up(size_t dividend, size_t divisor);
@@ -2196,6 +2198,54 @@ orders_equal(const relic_planner_t *left, const relic_planner_t *right)
 }
 
 /*
+ * How the work estimator counts an operation (plan.h): by its kind and, for
+ * an AGGREGATE, by how it reaches its group's rows.  Each switch names
+ * every value of its enum, so that one added later must be classified here
+ * rather than be counted as free.
+ */
+static enum relic_cost_kind
+cost_kind(const relic_op_t *op)
+{
+	switch (op->kind) {
+	case RELIC_OP_SCAN:
+		return (RELIC_COST_SCAN);
+	case RELIC_OP_LOOKUP:
+		return (RELIC_COST_LOOKUP);
+	case RELIC_OP_MEMBER:
+	case RELIC_OP_EXISTS:
+		return (RELIC_COST_PROBE);
+	case RELIC_OP_ANTI_MEMBER:
+		return (RELIC_COST_ANTI_PROBE);
+	case RELIC_OP_FILTER:
+	case RELIC_OP_ASSIGN:
+		return (RELIC_COST_OPERATION);
+	case RELIC_OP_EMIT:
+		return (RELIC_COST_EMIT);
+	case RELIC_OP_AGGREGATE:
+		break;
+	}
+
+	return (fold_cost_kind(&op->u.aggregate));
+}
+
+static enum relic_cost_kind
+fold_cost_kind(const relic_op_aggregate_t *fold)
+{
+	switch (fold->access) {
+	case RELIC_FOLD_SCAN:
+		return (RELIC_COST_FOLD_SCAN);
+	case RELIC_FOLD_LOOKUP:
+		return (RELIC_COST_FOLD_LOOKUP);
+	case RELIC_FOLD_CARDINALITY:
+		return (RELIC_COST_OPERATION);
+	case RELIC_FOLD_PROBE:
+		break;
+	}
+
+	return (RELIC_COST_FOLD_PROBE);
+}
+
+/*
  * Compile the work recipe of an emitted draft into *recipe: a step per
  * operation, in plan order.  Returns -1 when the arena refused, which the
  * caller's boundary reports.
@@ -2214,7 +2264,7 @@ compile_recipe(relic_arena_t *arena, const relic_plan_draft_t *draft,
 	for (i = 0; i < draft->op_count; i++) {
 		bzero(&steps[i], sizeof(steps[i]));
 		steps[i].op = &draft->ops[i];
-		steps[i].kind = relic_cost_kind_of(&draft->ops[i]);
+		steps[i].kind = cost_kind(&draft->ops[i]);
 	}
 
 	recipe->steps = steps;
@@ -2681,36 +2731,6 @@ relic_plan_calls(const relic_plan_t *plan)
 	}
 
 	return (false);
-}
-
-/*
- * Each kind is named, so a new one does not compile until it is placed in
- * the prefix, as the driver, or as the end of recognition.
- */
-size_t
-relic_plan_driver(const relic_plan_t *plan)
-{
-	size_t i;
-
-	for (i = 0; i < plan->op_count; i++) {
-		switch (plan->ops[i].kind) {
-		case RELIC_OP_SCAN:
-		case RELIC_OP_LOOKUP:
-			return (i);
-		case RELIC_OP_MEMBER:
-		case RELIC_OP_EXISTS:
-		case RELIC_OP_ANTI_MEMBER:
-		case RELIC_OP_FILTER:
-			continue;
-		case RELIC_OP_ASSIGN:
-		case RELIC_OP_AGGREGATE:
-		case RELIC_OP_EMIT:
-			break;
-		}
-		break;
-	}
-
-	return (RELIC_PLAN_NO_DRIVER);
 }
 
 const relic_op_atom_t *

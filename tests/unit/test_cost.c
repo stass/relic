@@ -36,7 +36,6 @@
 #define	SCENARIO_EMPTY		"an empty view ends the bindings, not the work"
 #define	SCENARIO_EXAMPLE	"the worked example costs what it says"
 #define	SCENARIO_FOLDS		"a fold counts its group's rows by its access"
-#define	SCENARIO_PREPARED	"a prepared plan is walked as its recipe is"
 #define	SCENARIO_SATURATED	"saturated work ties, and ties go delta-first"
 #define	SCENARIO_STATISTICS	"key counts are read from the index as it is"
 
@@ -134,7 +133,6 @@ static void	 key_counts_are_read_from_the_index_as_it_is(void);
 static void	 a_derived_relation_and_its_base_store_count_apart(void);
 static void	 a_missing_index_is_charged_for_building_it(void);
 static void	 chain_distances_keep_delta_first(void);
-static void	 a_prepared_plan_is_walked_as_its_recipe_is(void);
 
 /*
  * The relation of a new predicate with this name and arity, made a derived
@@ -600,7 +598,6 @@ a_fold_counts_its_groups_rows_by_its_access(void)
 	candidate_t built;
 	example_t example;
 	relic_op_t *fold;
-	relic_plan_t plan;
 	uint64_t cost;
 	uint64_t expected;
 
@@ -651,11 +648,8 @@ a_fold_counts_its_groups_rows_by_its_access(void)
 	fold->u.aggregate.access = RELIC_FOLD_CARDINALITY;
 	fold->u.aggregate.key_mask = 0;
 	built.steps[1].kind = RELIC_COST_OPERATION;
-	bzero(&plan, sizeof(plan));
-	plan.ops = built.ops;
-	plan.op_count = built.candidate.draft.op_count;
-	cost = relic_cost_plan(&plan, &example.env);
-	checkf(cost == 3 * GUARDS && estimate(&built, &example) == cost,
+	cost = estimate(&built, &example);
+	checkf(cost == 3 * GUARDS,
 	    SCENARIO_FOLDS, "a cardinality fold costs one operation per "
 	    "binding and visits no row, %u, not %llu", 3 * GUARDS,
 	    (unsigned long long)cost);
@@ -1136,102 +1130,6 @@ chain_distances_keep_delta_first(void)
 	relic_destroy(ctx);
 }
 
-/*
- * A prepared plan is walked by the rules its candidate's recipe was, over
- * its own operations.  Over the worked example's two orders, with every
- * index built, a plan's walk from its first operation is its candidate's
- * estimate, 32 delta-first and 204020 input-first for a one-tuple delta;
- * and walked from its driver's visits, the first operation here, it is
- * the same when the visits are the driver's view and scales with them
- * otherwise.  Delta-first over five visits is 32 * 5; input-first over
- * 1000 of the guard's is the guard's 1000, 1000 + 50000 for the edges
- * from them, 50000 + 5 for r's delta of one tuple over 10000 keys, and 5
- * emitted, 102010.  A driver after a test does not count the test, and
- * the most visits there are saturate.
- */
-static void
-a_prepared_plan_is_walked_as_its_recipe_is(void)
-{
-	relic_plan_t delta_plan;
-	relic_plan_t input_plan;
-	relic_plan_t tested_plan;
-	candidate_t delta_first;
-	candidate_t input_first;
-	candidate_t tested;
-	example_t example;
-
-	if (!example_build(&example)) {
-		check(false, SCENARIO_PREPARED, "the example is built");
-		example_release(&example);
-		return;
-	}
-
-	candidate_init(&delta_first);
-	candidate_atom(&delta_first, RELIC_OP_SCAN, RELIC_COST_SCAN, example.r,
-	    RELIC_VIEW_DELTA, 0);
-	candidate_atom(&delta_first, RELIC_OP_LOOKUP, RELIC_COST_LOOKUP,
-	    example.edge, RELIC_VIEW_ALL, BY_SECOND);
-	candidate_atom(&delta_first, RELIC_OP_MEMBER, RELIC_COST_PROBE,
-	    example.guard, RELIC_VIEW_ALL, 0);
-	candidate_atom(&delta_first, RELIC_OP_EMIT, RELIC_COST_EMIT, example.r,
-	    RELIC_VIEW_ALL, 0);
-	candidate_init(&input_first);
-	candidate_atom(&input_first, RELIC_OP_SCAN, RELIC_COST_SCAN,
-	    example.guard, RELIC_VIEW_ALL, 0);
-	candidate_atom(&input_first, RELIC_OP_LOOKUP, RELIC_COST_LOOKUP,
-	    example.edge, RELIC_VIEW_ALL, BY_FIRST);
-	candidate_atom(&input_first, RELIC_OP_LOOKUP, RELIC_COST_LOOKUP,
-	    example.r, RELIC_VIEW_DELTA, BY_FIRST);
-	candidate_atom(&input_first, RELIC_OP_EMIT, RELIC_COST_EMIT, example.r,
-	    RELIC_VIEW_ALL, 0);
-	candidate_init(&tested);
-	candidate_atom(&tested, RELIC_OP_MEMBER, RELIC_COST_PROBE,
-	    example.guard, RELIC_VIEW_ALL, 0);
-	candidate_atom(&tested, RELIC_OP_SCAN, RELIC_COST_SCAN, example.r,
-	    RELIC_VIEW_DELTA, 0);
-	candidate_atom(&tested, RELIC_OP_EMIT, RELIC_COST_EMIT, example.r,
-	    RELIC_VIEW_ALL, 0);
-
-	bzero(&delta_plan, sizeof(delta_plan));
-	delta_plan.ops = delta_first.ops;
-	delta_plan.op_count = delta_first.candidate.draft.op_count;
-	bzero(&input_plan, sizeof(input_plan));
-	input_plan.ops = input_first.ops;
-	input_plan.op_count = input_first.candidate.draft.op_count;
-	bzero(&tested_plan, sizeof(tested_plan));
-	tested_plan.ops = tested.ops;
-	tested_plan.op_count = tested.candidate.draft.op_count;
-
-	set_r_delta(&example, R_KEYS, R_KEYS + 1);
-	check(relic_cost_plan(&delta_plan, &example.env) == 32 &&
-	    relic_cost_plan(&delta_plan, &example.env) ==
-	    estimate(&delta_first, &example) &&
-	    relic_cost_plan(&input_plan, &example.env) == 204020 &&
-	    relic_cost_plan(&input_plan, &example.env) ==
-	    estimate(&input_first, &example), SCENARIO_PREPARED,
-	    "a plan walked from its first operation is its estimate");
-	check(relic_cost_driven(&delta_plan, 0, 1, &example.env) == 32 &&
-	    relic_cost_driven(&input_plan, 0, GUARDS, &example.env) ==
-	    204020, SCENARIO_PREPARED,
-	    "a plan driven over its driver's view is walked from its start");
-	checkf(relic_cost_driven(&delta_plan, 0, 5, &example.env) == 32 * 5 &&
-	    relic_cost_driven(&input_plan, 0, 1000, &example.env) == 102010,
-	    SCENARIO_PREPARED, "driven over fewer visits, 160 and 102010, "
-	    "not %llu and %llu", (unsigned long long)relic_cost_driven(
-	    &delta_plan, 0, 5, &example.env),
-	    (unsigned long long)relic_cost_driven(&input_plan, 0, 1000,
-	    &example.env));
-	check(relic_plan_driver(&tested_plan) == 1 &&
-	    relic_cost_plan(&tested_plan, &example.env) == 3 &&
-	    relic_cost_driven(&tested_plan, 1, 7, &example.env) == 14,
-	    SCENARIO_PREPARED, "a driver after a test counts its visits and "
-	    "what follows, not the test");
-	check(relic_cost_driven(&input_plan, 0, UINT64_MAX, &example.env) ==
-	    UINT64_MAX, SCENARIO_PREPARED, "the most visits saturate");
-
-	example_release(&example);
-}
-
 int
 main(void)
 {
@@ -1244,7 +1142,6 @@ main(void)
 	a_derived_relation_and_its_base_store_count_apart();
 	a_missing_index_is_charged_for_building_it();
 	chain_distances_keep_delta_first();
-	a_prepared_plan_is_walked_as_its_recipe_is();
 
 	return (check_summary("test_cost"));
 }

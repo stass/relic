@@ -13,7 +13,7 @@ Related: [architecture](architecture.md#facts), [facts](design-facts.md),
 [storage](design-storage.md), [memory](design-memory.md#the-memory-limit),
 [parallel loading](design-parallel.md#loading-in-parallel),
 [pending values](design-pending-values.md), [testing](design-testing.md),
-[implementation plan](../docs/todo-benchmark-performance.md#4-build-and-load-base-relations-in-bulk).
+[implementation plan](../docs/todo-benchmark-performance.md#decide-the-parallel-import-tradeoff).
 
 ## Model
 
@@ -979,7 +979,7 @@ and retained pointer validity are required alongside leak checks.
 Benchmark serial ownership transfer first, then serial batching, then
 multiple workers. Target `facts-join`, `files-grouped`, `cspa-linux`, grid
 and tree inputs under the
-[measurement rules](../docs/todo-benchmark-performance.md#measurement-and-acceptance-rules).
+[measurement rules](../docs/todo-performance-measurements.md).
 Separate input/framing, decoding, dictionary lookup, ordered numbering,
 value reservation/publication, tuple construction and final commit. Record
 wall time, user CPU, peak RSS, live staging and final accounted capacity.

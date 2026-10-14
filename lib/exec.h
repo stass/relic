@@ -81,7 +81,6 @@
 #define	RELIC_TEXT_STACK_INITIAL	4096u
 #define	RELIC_PENDING_BYTES		(1024u * 1024u)
 
-typedef struct relic_driver_reads relic_driver_reads_t;
 typedef struct relic_exec_counters relic_exec_counters_t;
 typedef struct relic_exec_env relic_exec_env_t;
 typedef struct relic_exec_error relic_exec_error_t;
@@ -201,19 +200,6 @@ relic_exec_work(uint64_t derivations, const relic_exec_counters_t *read)
 {
 	return (derivations + read->tuples_scanned + read->tuples_looked_up);
 }
-
-/*
- * What the running plan has read at its driver (plan.h) and before it since
- * it started, as of the executor's last return: `prefix`, the tuples the
- * tests before the driver read, and `visits`, the tuples the driver read,
- * matched or not.  A plan with no driver counts neither.  Both are reads
- * the scratch's counters count as well, picked out rather than added to
- * them, and a round predicts the plan's next run from them (lib/round.c).
- */
-struct relic_driver_reads {
-	uint64_t	prefix;
-	uint64_t	visits;
-};
 
 /*
  * What made a comparison, an assignment or an aggregate false only because
@@ -414,34 +400,16 @@ void	 relic_pending_find(const relic_t *ctx,
  *
  * `level` and `resume` are where the join was when the executor paused:
  * the operation to ask next and whether to ask it for its next match
- * rather than a first.
- *
- * A plan with a driver, at `driver`, runs in two phases.  Its prefix's
- * tests are asked first, in order, from `level`; once every one has held,
- * the join has reached the driver, `reached`, and runs from it, `base`,
- * the lowest level it runs at, never backtracking into the tests, which
- * have nothing more.  A plan with no driver is all join, from `base`
- * zero.  The plan is finished once the operation at `base` has nothing
- * more, or a test rejects, and a run of the prefix alone, `prefix_only`,
- * once it reaches the driver.
- *
- * `driver_reads` is taken from the counters and the driver's cursor, not
- * counted by the steps.  The prefix's reads are what the counters read
- * while the tests are asked, which each call adds for itself, so that the
- * caller may take the counters between calls.  The driver reads one tuple
- * of its view, the slice in a slice, for each place its cursor moves past,
- * so its visits are taken from the cursor as every call returns, counting
- * from `driver_from`, where the cursor was at the previous return.
- *
- * `reads_left` is how many more tuples the scans and lookups may reject,
- * and the folds read, in the call under way, and `paused` is set by a step
- * that has spent them: a scan or lookup that stopped, its cursor where the
- * next call resumes, or a fold that read its whole walk regardless.  A
- * batch is full when it holds RELIC_INSERT_BATCH tuples, or when the next
- * tuple's pending strings would not fit its pending bytes, and then the
- * EMIT is asked again.  `finished` is set once the plan has derived
- * everything it will; a scratch no plan has started on is finished too,
- * so that running it derives nothing.
+ * rather than a first.  `reads_left` is how many more tuples the scans and
+ * lookups may reject, and the folds read, in the call under way, and
+ * `paused` is set by a step that has spent them: a scan or lookup that
+ * stopped, its cursor where the next call resumes, or a fold that read its
+ * whole walk regardless.  A batch is full when it holds
+ * RELIC_INSERT_BATCH tuples, or when the next tuple's pending strings would
+ * not fit its pending bytes, and then the EMIT is asked again.  `finished`
+ * is set once the first operation has nothing more, after which the plan
+ * has derived everything it will; a scratch no plan has started on is
+ * finished too, so that running it derives nothing.
  *
  * `counters`, `note` and `error` are what the plans run on the scratch have
  * counted and met since the caller last took them.  The counters accumulate
@@ -468,20 +436,14 @@ struct relic_scratch {
 	size_t			 batch_count;
 	size_t			 pending_count;
 	size_t			 level;
-	size_t			 base;
-	size_t			 driver;
-	relic_tuple_id_t	 driver_from;
 	uint64_t		 reads_left;
 	relic_exec_counters_t	 counters;
-	relic_driver_reads_t	 driver_reads;
 	relic_mixed_note_t	 note;
 	relic_exec_error_t	 error;
 	uint16_t		 arity_room;
 	bool			 resume;
 	bool			 paused;
 	bool			 finished;
-	bool			 reached;
-	bool			 prefix_only;
 };
 
 /*
@@ -493,19 +455,6 @@ struct relic_scratch {
 enum relic_exec_status {
 	RELIC_EXEC_PAUSED,
 	RELIC_EXEC_FINISHED
-};
-
-/*
- * Why relic_exec_run_prefix() returned: a quantum of work is done and the
- * prefix has more tests to run, a test rejected the empty binding, so the
- * plan derives nothing, every test held, so the driver is reached, or a
- * test recorded a failure.
- */
-enum relic_prefix_status {
-	RELIC_PREFIX_PAUSED,
-	RELIC_PREFIX_REJECTED,
-	RELIC_PREFIX_REACHED,
-	RELIC_PREFIX_FAILED
 };
 
 /*
@@ -544,30 +493,13 @@ enum relic_prefix_status {
  * appended to and nothing else, as the executor's description above says.
  *
  * relic_exec_view() gives the range of identifiers an operation's view
- * covers under `env`.
- *
- * A plan with a driver (plan.h) can be run in two parts, the way a round
- * divides it among tasks (round.h).
- * relic_exec_start_prefix() readies the scratch to run only the plan's
- * prefix, the tests before its driver, as relic_exec_start() readies it to
- * run the whole plan, and relic_exec_run_prefix() runs those tests, a
- * quantum at a time, through the steps a whole run takes.  It derives
- * nothing and never enters the driver; it counts what the tests read and
- * records their note or failure as a whole run would, and leaves the
- * scratch finished once it has rejected, reached the driver or failed.
- *
- * relic_exec_start_slice() readies the scratch to run the plan from its
- * driver, as though the prefix had just reached it, with the driver's
- * cursor at `slice`: for a SCAN a range of its view, and for a LOOKUP a
- * tuple on its key's chain inside its view and the fence the lookup stops
- * before, at or before the view's end.  The slice must not be empty.  The
- * driver is then asked for its next match from the cursor, and the plan
- * finishes when the driver has nothing more, never backtracking above it.
- * Every operation below the driver reads only the binding it makes and its
- * own view, so the slice derives exactly what the whole plan derives while
- * the driver's cursor is inside the slice, in the same order, and a driver's
- * visits cut into slices run one after another derive what the whole plan
- * does, the prefix's reads excepted.
+ * covers under `env`.  relic_exec_start_piece() starts a plan whose first
+ * operation is a SCAN as relic_exec_start() does, except that the scan
+ * visits only `piece`, which must lie within its view.  Everything below the
+ * first operation reads only the binding it makes and the relations, so the
+ * plan then derives exactly what the whole plan derives while its first
+ * cursor is inside the piece, in the same order, and a view cut into pieces
+ * run one after another derives what the whole plan does.
  */
 void	 relic_scratch_init(relic_scratch_t *scratch, relic_op_state_t *states,
 	    size_t op_room, relic_dom_t *batch, relic_pending_t *pending,
@@ -580,14 +512,11 @@ void	 relic_text_capacity_raise(relic_text_capacity_t *peaks,
 size_t	 relic_text_capacity_bytes(const relic_text_capacity_t *peaks);
 void	 relic_exec_start(relic_scratch_t *scratch,
 	    const relic_exec_env_t *env, const relic_plan_t *plan);
+void	 relic_exec_start_piece(relic_scratch_t *scratch,
+	    const relic_exec_env_t *env, const relic_plan_t *plan,
+	    relic_tuple_range_t piece);
 enum relic_exec_status relic_exec_run(relic_scratch_t *scratch);
 relic_tuple_range_t relic_exec_view(const relic_exec_env_t *env,
 	    const relic_op_atom_t *atom);
-void	 relic_exec_start_prefix(relic_scratch_t *scratch,
-	    const relic_exec_env_t *env, const relic_plan_t *plan);
-enum relic_prefix_status relic_exec_run_prefix(relic_scratch_t *scratch);
-void	 relic_exec_start_slice(relic_scratch_t *scratch,
-	    const relic_exec_env_t *env, const relic_plan_t *plan,
-	    relic_tuple_range_t slice);
 
 #endif /* RELIC_EXEC_H */

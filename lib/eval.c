@@ -1186,7 +1186,6 @@ run_item(relic_evaluation_t *eval, const relic_round_t *round,
     relic_round_item_t *item)
 {
 	relic_emit_target_t target;
-	relic_driver_reads_t reads;
 	uint64_t inserted_before;
 	uint64_t work_before;
 	int status;
@@ -1197,17 +1196,14 @@ run_item(relic_evaluation_t *eval, const relic_round_t *round,
 	inserted_before = eval->ctx->counters.tuples_inserted;
 
 	eval->derived = false;
-	bzero(&reads, sizeof(reads));
-	if (item->plan == NULL) {
+	if (item->plan == NULL)
 		status = insert_seed(eval, item->rule, target.relation);
-	} else {
+	else
 		status = execute_plan(eval, item->plan, item->rule, &target);
-		reads = eval->scratch.driver_reads;
-	}
 	item->gained = eval->derived;
 
-	relic_round_record(item, counted_work(eval->ctx) - work_before,
-	    &reads, eval->ctx->counters.tuples_inserted - inserted_before);
+	relic_round_record(round, item, counted_work(eval->ctx) - work_before,
+	    eval->ctx->counters.tuples_inserted - inserted_before);
 
 	return (status);
 }

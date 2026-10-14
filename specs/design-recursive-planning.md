@@ -402,10 +402,11 @@ Execution-work history remains per candidate for deciding whether a round
 is worth sharing. Inserted-tuple history remains per variant, shared by
 its candidates, because both derive the same set into the same target.
 Timing and work history do not feed the cost selector.
-[Driver slicing](design-driver-slicing.md#scheduling-by-useful-work) uses
-actual driver visits and separate prefix/suffix work for scheduling after
-selection. Its link walks, worker count and prepared task boundaries
-cannot influence candidate choice or build an unselected access path.
+The scheduler scales a plan's work history by its leading scan's range
+when there is one. Task boundaries and worker count cannot influence
+candidate choice or build an unselected access path. A selected plan
+beginning with a lookup runs whole; parallelism does not override its
+indexed access.
 
 ### Preparing selected plans
 
@@ -537,8 +538,8 @@ line-buffer contracts.
 The independent references are textual-order semi-naive evaluation,
 no-index execution, and naive whole-program evaluation on small inputs.
 The regression suite first exercises the missing-candidate path on the
-unfixed implementation. Stage completion follows the
-[implementation plan's review and sanitizer gates](../docs/todo-benchmark-performance.md#review-tests-and-delivery).
+unfixed implementation. Validation follows the
+[review and sanitizer gates](../docs/todo-performance-measurements.md#review-and-deliver).
 
 | Concern | Required evidence |
 | --- | --- |

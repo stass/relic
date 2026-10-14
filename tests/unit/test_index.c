@@ -23,7 +23,6 @@
 
 #include "config.h"
 
-#include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -50,7 +49,6 @@
 #define	SCENARIO_LIMIT		"the memory limit refuses a build whole"
 #define	SCENARIO_LIMIT_SWEEP	"the memory limit holds as indexes grow"
 #define	SCENARIO_MASK		"an index is keyed on columns the relation has"
-#define	SCENARIO_SEEK		"a seek in steps finds what a walk does"
 #define	SCENARIO_WALK		"a lookup walking while its key grows"
 
 /*
@@ -125,10 +123,6 @@ static bool	 delta_lookups_agree(relic_t *ctx, relic_relation_t *rel,
 		    uint32_t position, relic_tuple_id_t since);
 static bool	 frontiers_rest_at(const relic_relation_t *rel,
 		    uint32_t position, relic_tuple_id_t since);
-static bool	 stepped_seeks_agree(relic_t *ctx, relic_relation_t *rel,
-		    uint32_t position, relic_tuple_id_t since,
-		    uint64_t *walkedp);
-static void	 a_seek_in_steps_finds_what_a_walk_does(void);
 static size_t	 distinct_by_hand(const relic_relation_t *rel, uint16_t column);
 static size_t	 storage_by_hand(const relic_t *ctx);
 static size_t	 charged_bytes(const relic_t *ctx);
@@ -833,134 +827,6 @@ a_delta_lookup_starts_where_its_delta_does(void)
 	relic_destroy(ctx);
 }
 
-/*
- * Seek every key from `since` a link at a time, after abandoning a seek of
- * each part way, and say whether each finds what a scan finds, the walk
- * abandoned leaving the key's frontier as it was.  The links the seeks
- * followed are added to *walkedp.
- */
-static bool
-stepped_seeks_agree(relic_t *ctx, relic_relation_t *rel, uint32_t position,
-    relic_tuple_id_t since, uint64_t *walkedp)
-{
-	relic_index_seek_t seek;
-	relic_tuple_id_t expected;
-	relic_tuple_id_t before;
-	relic_index_t *index;
-	relic_dom_t probe[3];
-	uint64_t ignored;
-	unsigned int key;
-
-	index = &rel->indexes[position];
-	bzero(probe, sizeof(probe));
-
-	for (key = 0; key <= SWEEP_VALUES; key++) {
-		probe[0] = value(ctx, key == SWEEP_VALUES ? 999999u : key);
-		expected = first_since_by_scan(rel, index->key_mask, probe,
-		    since);
-
-		relic_index_seek_begin(index, rel, probe, since, &seek);
-		if (key == SWEEP_VALUES) {
-			if (!seek.stopped ||
-			    relic_index_seek_found(&seek) != RELIC_ID_NONE) {
-				check(false, SCENARIO_SEEK, "a key the index "
-				    "lacks has stopped before it began");
-				return (false);
-			}
-			continue;
-		}
-		before = index->stripes[seek.stripe].frontiers[seek.key_id -
-		    1];
-		ignored = 0;
-		(void)relic_index_seek_walk(index, &seek, 1, &ignored);
-		if (index->stripes[seek.stripe].frontiers[seek.key_id - 1] !=
-		    before && !seek.stopped) {
-			checkf(false, SCENARIO_SEEK, "key %u: a seek "
-			    "abandoned part way moved the frontier", key);
-			return (false);
-		}
-
-		relic_index_seek_begin(index, rel, probe, since, &seek);
-		while (!relic_index_seek_walk(index, &seek, 1, walkedp))
-			continue;
-		if (relic_index_seek_found(&seek) != expected) {
-			checkf(false, SCENARIO_SEEK, "key %u from %u should "
-			    "start at %u, and started at %u", key,
-			    (unsigned int)since, (unsigned int)expected,
-			    (unsigned int)relic_index_seek_found(&seek));
-			return (false);
-		}
-	}
-
-	return (true);
-}
-
-/*
- * A seek is the walk of a delta lookup cut into steps of a bounded number
- * of links (frozen.h): run a link at a time it finds what the whole walk
- * finds, and leaves each key's frontier where the whole walk would; one
- * abandoned part way leaves the frontier where it was; and a key the index
- * lacks has stopped before it begins.  The links counted are those the
- * whole walks follow: each round's seeks follow every link from the
- * previous round's frontiers, and a second pass from the frontiers they
- * left follows none.  The relation grows as in
- * a_delta_lookup_starts_where_its_delta_does().
- */
-static void
-a_seek_in_steps_finds_what_a_walk_does(void)
-{
-	relic_relation_t *rel;
-	relic_config_t config;
-	relic_tuple_id_t since;
-	uint64_t walked;
-	uint64_t again;
-	uint32_t position;
-	unsigned int round;
-	relic_t *ctx;
-
-	bzero(&config, sizeof(config));
-	ctx = context(SCENARIO_SEEK, &config);
-	if (ctx == NULL)
-		return;
-
-	rel = relation(ctx, SCENARIO_SEEK, "member", 3);
-	if (rel == NULL || !fill(ctx, SCENARIO_SEEK, rel, 0, 100) ||
-	    relic_relation_index(ctx, rel, 0x1, &position) != 0) {
-		check(false, SCENARIO_SEEK, "the relation is indexed");
-		relic_destroy(ctx);
-		return;
-	}
-
-	walked = 0;
-	for (round = 0; round < 12; round++) {
-		since = relic_relation_end(rel);
-		if (!fill(ctx, SCENARIO_SEEK, rel, 100 + round * 1000,
-		    round * 5))
-			break;
-		relic_index_raise_since(&rel->indexes[position], since);
-
-		again = 0;
-		if (!stepped_seeks_agree(ctx, rel, position, since, &walked) ||
-		    !frontiers_rest_at(rel, position, since) ||
-		    !stepped_seeks_agree(ctx, rel, position, since, &again) ||
-		    !stepped_seeks_agree(ctx, rel, position, since / 2,
-		    &walked))
-			break;
-		if (again != 0) {
-			checkf(false, SCENARIO_SEEK, "round %u: seeks from "
-			    "the frontiers left should follow no link, and "
-			    "followed %" PRIu64, round, again);
-			break;
-		}
-	}
-
-	checkf(round == 12, SCENARIO_SEEK, "every round's seeks should agree "
-	    "with a scan, and round %u did not", round);
-	check(walked > 0, SCENARIO_SEEK, "the seeks follow links");
-
-	relic_destroy(ctx);
-}
-
 #ifdef RELIC_THREADS
 
 /*
@@ -1571,7 +1437,6 @@ main(void)
 	a_lookup_walking_while_its_key_grows();
 	a_key_first_held_late_is_found_by_its_values();
 	a_delta_lookup_starts_where_its_delta_does();
-	a_seek_in_steps_finds_what_a_walk_does();
 	concurrent_delta_lookups_leave_one_frontier();
 	a_discard_frees_every_derived_relation();
 	an_index_is_charged_exactly();

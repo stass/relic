@@ -169,9 +169,7 @@ static bool	 compile_pattern(relic_scratch_t *scratch,
 static enum relic_order cells_order(const relic_scratch_t *scratch,
 		    const relic_exec_env_t *env, relic_cell_t left,
 		    relic_cell_t right);
-static void	 count_visits(relic_scratch_t *scratch);
 static relic_cell_t dom_cell(relic_dom_t dom);
-static enum relic_exec_status end_run(relic_scratch_t *scratch);
 static relic_dom_t emit_column(relic_scratch_t *scratch,
 		    const relic_plan_term_t *term);
 static enum relic_emit_end emit_head(relic_scratch_t *scratch,
@@ -194,10 +192,6 @@ static void	 gather_fold_key(const relic_scratch_t *scratch,
 static size_t	 grown_capacity(size_t capacity, size_t needed, size_t unit);
 static bool	 key_matches(const relic_op_aggregate_t *aggregate,
 		    const relic_dom_t *probe, const relic_dom_t *tuple);
-static const relic_index_t *lookup_index(const relic_op_atom_t *atom);
-static relic_tuple_id_t lookup_start(const relic_scratch_t *scratch,
-		    const relic_op_atom_t *atom, const relic_index_t *index,
-		    relic_tuple_id_t first);
 static relic_cell_t number_cell(int64_t number);
 static const char *operator_spelling(const relic_step_t *step);
 static bool	 order_satisfies(enum relic_compare_op compare,
@@ -228,17 +222,11 @@ static void	 record_operand_note(relic_scratch_t *scratch,
 static void	 record_ordering_note(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env, const relic_location_t *where,
 		    relic_cell_t left, relic_cell_t right);
-static void	 reach_driver(relic_scratch_t *scratch, bool sliced);
-static void	 resolve_views(relic_scratch_t *scratch,
-		    const relic_exec_env_t *env, const relic_plan_t *plan);
-static enum relic_exec_status run_join(relic_scratch_t *scratch);
 static enum relic_run_end run_postfix(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env, const relic_postfix_t *postfix,
 		    const relic_location_t *where, relic_cell_t *valuep);
-static enum relic_exec_status run_tests(relic_scratch_t *scratch);
-static void	 start_run(relic_scratch_t *scratch,
-		    const relic_exec_env_t *env, const relic_plan_t *plan,
-		    bool prefix_only, const relic_tuple_range_t *slice);
+static void	 resolve_views(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env, const relic_plan_t *plan);
 static bool	 step(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		    const relic_op_t *op, relic_op_state_t *state, bool resume);
 static bool	 step_aggregate(relic_scratch_t *scratch,
@@ -265,13 +253,10 @@ static bool	 step_scan(relic_scratch_t *scratch,
 		    bool resume);
 static relic_dom_t term_value(const relic_scratch_t *scratch,
 		    const relic_plan_term_t *term);
-static bool	 test_holds(relic_scratch_t *scratch, const relic_op_t *op,
-		    const relic_op_state_t *state);
 static size_t	 text_base_top(const relic_scratch_t *scratch,
 		    size_t text_base);
 static relic_cell_t text_cell(size_t offset, size_t length);
 static relic_cell_t text_push(relic_scratch_t *scratch, size_t length);
-static uint64_t	 tuples_read(const relic_scratch_t *scratch);
 static bool	 tuple_matches(relic_scratch_t *scratch,
 		    const relic_op_atom_t *atom, const relic_dom_t *tuple);
 static bool	 work_make_room(relic_scratch_t *scratch, size_t count,
@@ -1503,13 +1488,21 @@ step_scan(relic_scratch_t *scratch, const relic_op_atom_t *atom,
 /*
  * A LOOKUP: find the next tuple on the chain of the key its bound columns
  * hold that matches, starting when not resuming at the first chain tuple in
- * its view (lookup_start()) and stopping at the end of the view.
+ * its view and stopping at the end of the view.  Every view but a delta
+ * begins at the first identifier, so its tuples begin at the head of the
+ * chain; a delta's begin at the first chain tuple at or past its start,
+ * which the index finds from the key's frontier.
  *
  * Every tuple on the chain already agrees with the key columns; it is matched
  * against every term all the same, which binds the other columns and checks
  * a variable written twice among them, so a lookup accepts exactly the
- * tuples a scan with the same terms would.  A lookup counts what it rejects
- * and pauses as a scan does, its cursor on the chain.
+ * tuples a scan with the same terms would.  The probe holds each key
+ * column's value in that column, the key columns being those of the mask
+ * the lookup was planned with, which is its index's; the index reads no
+ * other column, and the rest are left unset.  The index is found by
+ * position each time, since the array holding it can grow while the plan
+ * exists.  A lookup counts what it rejects and pauses as a scan does, its
+ * cursor on the chain.
  */
 static bool
 step_lookup(relic_scratch_t *scratch, const relic_op_atom_t *atom,
@@ -1518,16 +1511,29 @@ step_lookup(relic_scratch_t *scratch, const relic_op_atom_t *atom,
 	relic_tuple_range_t *cursor;
 	const relic_index_t *index;
 	const relic_dom_t *tuple;
+	relic_dom_t probe[RELIC_MAX_ARITY];
 	relic_tuple_id_t id;
 	uint64_t reads_left;
+	uint16_t column;
 	bool matched;
 
 	cursor = &state->cursor;
-	index = lookup_index(atom);
+	index = relic_relation_index_at(atom->relation, atom->index_position);
+	assert(relic_index_key_mask(index) == atom->key_mask);
 
 	if (!resume) {
-		cursor->first = lookup_start(scratch, atom, index,
-		    state->view.first);
+		for (column = 0; column < atom->arity; column++) {
+			if ((atom->key_mask & (UINT32_C(1) << column)) != 0)
+				probe[column] = term_value(scratch,
+				    &atom->terms[column]);
+		}
+
+		if (atom->view == RELIC_VIEW_DELTA)
+			cursor->first = relic_index_first_since(index,
+			    atom->relation, probe, state->view.first);
+		else
+			cursor->first = relic_index_first(index,
+			    atom->relation, probe);
 		cursor->end = state->view.end;
 	}
 
@@ -1553,50 +1559,6 @@ step_lookup(relic_scratch_t *scratch, const relic_op_atom_t *atom,
 	scratch->reads_left = reads_left;
 
 	return (matched);
-}
-
-/*
- * The index a LOOKUP reads, found by position each time, since the array
- * holding it can grow while the plan exists.
- */
-static const relic_index_t *
-lookup_index(const relic_op_atom_t *atom)
-{
-	const relic_index_t *index;
-
-	index = relic_relation_index_at(atom->relation, atom->index_position);
-	assert(relic_index_key_mask(index) == atom->key_mask);
-
-	return (index);
-}
-
-/*
- * Where a LOOKUP's walk of its view, which begins at `first`, starts: the
- * head of the chain of the key its bound columns hold for every view but a
- * delta, and for a delta the first chain tuple at or past its start, which
- * the index finds from the key's frontier.  The probe holds each key
- * column's value in that column, the key columns being those of the mask
- * the lookup was planned with, which is its index's; the index reads no
- * other column, and the rest are left unset.
- */
-static relic_tuple_id_t
-lookup_start(const relic_scratch_t *scratch, const relic_op_atom_t *atom,
-    const relic_index_t *index, relic_tuple_id_t first)
-{
-	relic_dom_t probe[RELIC_MAX_ARITY];
-	uint16_t column;
-
-	for (column = 0; column < atom->arity; column++) {
-		if ((atom->key_mask & (UINT32_C(1) << column)) != 0)
-			probe[column] = term_value(scratch,
-			    &atom->terms[column]);
-	}
-
-	if (atom->view == RELIC_VIEW_DELTA)
-		return (relic_index_first_since(index, atom->relation, probe,
-		    first));
-
-	return (relic_index_first(index, atom->relation, probe));
 }
 
 /*
@@ -2204,12 +2166,12 @@ emit_head(relic_scratch_t *scratch, const relic_op_emit_t *emit)
  * or the next one when resuming.
  *
  * A test, an ASSIGN and an AGGREGATE succeed at most once, so resuming one
- * always finds nothing more.  An EXISTS is its probe, and lets the binding
- * through once when some tuple agrees with it on the columns it reads,
- * however many do.  An ANTI_MEMBER is its probe inverted: the binding
- * survives when no tuple does.  The EMIT is not asked here: the run loop
- * appends its tuple, and treats it as never matching, so nothing below it
- * is ever entered and nothing backtracks into it.
+ * always finds nothing more.
+ * An EXISTS is its probe, and lets the binding through once when some tuple
+ * agrees with it on the columns it reads, however many do.  An ANTI_MEMBER
+ * is its probe inverted: the binding survives when no tuple does.  The EMIT is not asked here: the
+ * run loop appends its tuple, and treats it as never matching, so nothing
+ * below it is ever entered and nothing backtracks into it.
  */
 static bool
 step(relic_scratch_t *scratch, const relic_exec_env_t *env,
@@ -2252,87 +2214,10 @@ step(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	return (false);
 }
 
-/*
- * The tuples the scratch has counted reading since its counters were last
- * taken.
- */
-static uint64_t
-tuples_read(const relic_scratch_t *scratch)
-{
-	return (scratch->counters.tuples_scanned +
-	    scratch->counters.tuples_looked_up);
-}
-
 void
 relic_exec_start(relic_scratch_t *scratch, const relic_exec_env_t *env,
     const relic_plan_t *plan)
 {
-	start_run(scratch, env, plan, false, NULL);
-}
-
-void
-relic_exec_start_prefix(relic_scratch_t *scratch, const relic_exec_env_t *env,
-    const relic_plan_t *plan)
-{
-	assert(relic_plan_driver(plan) != RELIC_PLAN_NO_DRIVER);
-
-	start_run(scratch, env, plan, true, NULL);
-}
-
-/*
- * A run of the prefix is a run of the plan that ends as it reaches the
- * driver (reach_driver()), so a test is asked exactly as a whole run asks
- * it, and a test that rejects finishes the run without reaching the
- * driver (run_tests()).
- */
-enum relic_prefix_status
-relic_exec_run_prefix(relic_scratch_t *scratch)
-{
-	assert(scratch->prefix_only);
-
-	if (relic_exec_run(scratch) == RELIC_EXEC_PAUSED)
-		return (RELIC_PREFIX_PAUSED);
-	if (scratch->error.failed)
-		return (RELIC_PREFIX_FAILED);
-	if (scratch->reached)
-		return (RELIC_PREFIX_REACHED);
-
-	return (RELIC_PREFIX_REJECTED);
-}
-
-/*
- * The run starts at the driver, its cursor the slice (reach_driver()), so
- * its first step reads the slice's first tuple; nothing above it runs, and
- * its view was resolved as every other operation's was, which the slice
- * must lie inside and then becomes.  The caller cut the slice from that
- * view (relic_slice_cut()), and a debug build asserts its range; a
- * LOOKUP's slice start is a tuple of its chain, which the caller found by
- * walking the chain.
- */
-void
-relic_exec_start_slice(relic_scratch_t *scratch, const relic_exec_env_t *env,
-    const relic_plan_t *plan, relic_tuple_range_t slice)
-{
-	assert(relic_plan_driver(plan) != RELIC_PLAN_NO_DRIVER);
-
-	start_run(scratch, env, plan, false, &slice);
-	reach_driver(scratch, true);
-}
-
-/*
- * Ready the scratch to run `plan` from its start, whole or, when
- * `prefix_only`, as far as its driver, with the driver's view the `slice`
- * of it when one is given.  The driver's cursor is left for
- * reach_driver() to open.
- */
-static void
-start_run(relic_scratch_t *scratch, const relic_exec_env_t *env,
-    const relic_plan_t *plan, bool prefix_only,
-    const relic_tuple_range_t *slice)
-{
-	relic_op_state_t *state;
-	size_t driver;
-
 	assert(plan->op_count <= scratch->op_room);
 	assert(scratch->note.where == NULL && !scratch->error.failed);
 
@@ -2348,134 +2233,44 @@ start_run(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	scratch->resume = false;
 	scratch->paused = false;
 	scratch->finished = false;
-
-	driver = relic_plan_driver(plan);
-	scratch->driver = driver;
-	bzero(&scratch->driver_reads, sizeof(scratch->driver_reads));
-	scratch->reached = false;
-	scratch->prefix_only = prefix_only;
-	scratch->base = 0;
-	if (driver == RELIC_PLAN_NO_DRIVER) {
-		assert(slice == NULL);
-		return;
-	}
-
-	state = &scratch->states[driver];
-	if (slice != NULL) {
-		assert(state->view.first <= slice->first &&
-		    slice->first < slice->end && slice->end <= state->view.end);
-		state->view = *slice;
-	}
 }
 
 /*
- * The join has reached the driver: it goes on from there and never
- * backtracks into the tests above it, which have nothing more.
- *
- * A run of the prefix alone is finished here.  Any other opens the
- * driver's cursor here, and so never before its prefix has held, at the
- * start of its walk of its view.  For a SCAN, and for a `sliced` view,
- * whose first identifier its caller found on the chain, that is the view's
- * first identifier.  For a LOOKUP's whole view it is the first tuple of its
- * key's chain in the view (lookup_start()).
- *
- * The driver is then asked to resume from the cursor, which reads the
- * tuple there first.  The join never asks the operation at `base` afresh,
- * so the cursor walks the view once, and the driver's visits are counted
- * from where it opened, `driver_from` (count_visits()).
+ * A SCAN copies its view into its cursor each time it starts, so narrowing
+ * the first operation's view to the piece is all it takes: the first
+ * operation starts once, and every operation below it reads its own view.
  */
-static void
-reach_driver(relic_scratch_t *scratch, bool sliced)
+void
+relic_exec_start_piece(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_plan_t *plan, relic_tuple_range_t piece)
 {
-	const relic_op_atom_t *atom;
-	relic_op_state_t *state;
-	size_t driver;
+	relic_op_state_t *first;
 
-	driver = scratch->driver;
-	scratch->reached = true;
-	scratch->base = driver;
-	scratch->level = driver;
-	if (scratch->prefix_only) {
-		scratch->finished = true;
-		return;
-	}
+	relic_exec_start(scratch, env, plan);
 
-	state = &scratch->states[driver];
-	atom = &scratch->plan->ops[driver].u.atom;
-	state->cursor = state->view;
-	if (scratch->plan->ops[driver].kind == RELIC_OP_LOOKUP && !sliced)
-		state->cursor.first = lookup_start(scratch, atom,
-		    lookup_index(atom), state->view.first);
-	scratch->driver_from = state->cursor.first;
-	scratch->resume = true;
-}
+	first = &scratch->states[0];
+	assert(plan->ops[0].kind == RELIC_OP_SCAN);
+	assert(first->view.first <= piece.first && piece.first <= piece.end &&
+	    piece.end <= first->view.end);
 
-/*
- * Finish the run: the plan has derived everything it will.
- */
-static enum relic_exec_status
-end_run(relic_scratch_t *scratch)
-{
-	scratch->finished = true;
-
-	return (RELIC_EXEC_FINISHED);
-}
-
-/*
- * Count the tuples the driver has read, matched or not, since they were
- * last counted: those its cursor has moved past from `driver_from`, which
- * then moves up to the cursor.  For a SCAN they are the identifiers
- * between.  For a LOOKUP they are the chain tuples between, found by
- * following the chain's links again, which reads no tuple and follows no
- * more links than the call's own steps did.  The walk always meets the
- * cursor, the end of the view bounding it only in defence, since the
- * driver reads nothing past the view.  They are counted here rather than
- * as the driver steps so that no lookup's step pays for telling the driver
- * from the lookups after it, and as every call returns so that
- * `driver_reads` holds the run's visits whenever its caller looks, however
- * the run comes to end.
- */
-static void
-count_visits(relic_scratch_t *scratch)
-{
-	const relic_op_state_t *state;
-	const relic_index_t *index;
-	const relic_op_t *op;
-	relic_tuple_id_t id;
-
-	assert(scratch->reached && !scratch->prefix_only);
-	op = &scratch->plan->ops[scratch->driver];
-	state = &scratch->states[scratch->driver];
-	if (op->kind == RELIC_OP_SCAN) {
-		scratch->driver_reads.visits +=
-		    state->cursor.first - scratch->driver_from;
-	} else {
-		assert(op->kind == RELIC_OP_LOOKUP);
-		index = lookup_index(&op->u.atom);
-		id = scratch->driver_from;
-		while (id != RELIC_ID_NONE && id < state->view.end &&
-		    id != state->cursor.first) {
-			scratch->driver_reads.visits++;
-			id = relic_index_next(index, id);
-		}
-	}
-	scratch->driver_from = state->cursor.first;
+	first->view = piece;
 }
 
 /*
  * Record where the join goes on from once the EMIT at `level` has filled
  * the batch, which is where it would have gone had the batch had room: back
- * to the operation before the EMIT, for its next match.  An EMIT at the
- * lowest level the join runs at, which only the first operation of a plan
- * with no driver can be, has no operation to go back to, and the plan is
+ * to the operation before the EMIT, for its next match.  An EMIT that is
+ * the plan's first operation has no operation before it, and the plan is
  * finished.  No rule is planned that way, since every body has a literal,
  * but the executor does not rely on it.
  */
 static enum relic_exec_status
 yield_after_emit(relic_scratch_t *scratch, size_t level)
 {
-	if (level == scratch->base)
-		return (end_run(scratch));
+	if (level == 0) {
+		scratch->finished = true;
+		return (RELIC_EXEC_FINISHED);
+	}
 
 	scratch->level = level - 1;
 	scratch->resume = true;
@@ -2500,7 +2295,7 @@ yield_before_emit(relic_scratch_t *scratch, size_t level)
 /*
  * Record that a quantum of work is done with the join about to ask the
  * operation at `level`, afresh or for its next match as `resume` says.
- * That pair is all the loop of run_join() carries from one turn to
+ * That pair is all the loop of relic_exec_run() carries from one turn to
  * the next -- the frame and every operation's cursor are already in the
  * scratch -- so the join goes on from it exactly as it would have.
  */
@@ -2515,9 +2310,9 @@ yield_after_quantum(relic_scratch_t *scratch, size_t level, bool resume)
 
 /*
  * Run the plan from where it last stopped until the batch is full, a
- * quantum of work is done, or the plan is finished.  A plan with a driver
- * runs its prefix first (run_tests()), and the join from the driver on
- * once every test has held; any other plan is all join (run_join()).
+ * quantum of work is done, or the first operation has nothing more.
+ * `level` is the operation being asked for a match, and `resume` says
+ * whether it is being asked for its next one or started afresh.
  *
  * A quantum is counted two ways, each up to RELIC_EXEC_QUANTUM, so that
  * neither a join of many cheap bindings nor one whose scans reject relation
@@ -2529,13 +2324,12 @@ yield_after_quantum(relic_scratch_t *scratch, size_t level, bool resume)
  * sets `paused`.  A step with no cursor to resume from charges the tuples
  * it reads to the same count through charge_unresumable_read() and sets
  * `paused` once it has spent them, but finishes its walk.  Every other step
- * does a bounded amount of work.  The run pauses after a step that set
+ * does a bounded amount of work.  The loop pauses after a step that set
  * `paused`: at the next operation when the step matched, which only a step
  * with no cursor can have, and otherwise at the step's own operation, to
- * be asked for its next match; a test of the prefix that rejects, which
- * has no next match, finishes the run instead (run_tests()).  So a call
- * overruns its reads by at most one such step's walk.  A call backtracks
- * or reads at least once before pausing, so every call makes progress.
+ * be asked for its next match.  So a call overruns its reads by at most
+ * one such step's walk.  A call backtracks or reads at least once before
+ * pausing, so every call makes progress.
  *
  * A batch left full by the caller is reported again rather than appended
  * to: the EMIT writes a tuple only into room the batch has, so the caller's
@@ -2545,134 +2339,26 @@ yield_after_quantum(relic_scratch_t *scratch, size_t level, bool resume)
 enum relic_exec_status
 relic_exec_run(relic_scratch_t *scratch)
 {
-	enum relic_exec_status status;
+	const relic_exec_env_t *env;
+	const relic_plan_t *plan;
+	const relic_op_t *op;
+	uint64_t backtracks_left;
+	size_t level;
+	bool matched;
+	bool resume;
 
 	if (scratch->finished)
 		return (RELIC_EXEC_FINISHED);
 	if (scratch->batch_count == RELIC_INSERT_BATCH)
 		return (RELIC_EXEC_PAUSED);
 
-	scratch->reads_left = RELIC_EXEC_QUANTUM;
-	if (!scratch->reached && scratch->driver != RELIC_PLAN_NO_DRIVER)
-		status = run_tests(scratch);
-	else
-		status = run_join(scratch);
-	if (scratch->reached && !scratch->prefix_only)
-		count_visits(scratch);
-
-	return (status);
-}
-
-/*
- * Ask the tests of the prefix, from `level` to the driver, each afresh and
- * in order, as the join would descend through them, and count what they
- * read as the prefix's.  Every test binds nothing and holds at most once,
- * so one that rejects ends the run, as backtracking through the tests above
- * it, which have nothing more, would, and in the same call even when it
- * spent the call's reads.  A test that spends them and holds pauses the
- * run at the next one, the driver included, so that the driver's cursor,
- * whose opening may seek a delta, is opened in a call with its reads
- * whole.  Once every test has held, the join has reached the driver
- * (reach_driver()) and goes on from it in the same call.  So a whole run
- * reaches its driver here alone, and the prefix's reads are what this
- * function reads, which each call counts for itself, the counters being
- * the caller's to take between calls.
- */
-static enum relic_exec_status
-run_tests(relic_scratch_t *scratch)
-{
-	const relic_op_t *op;
-	uint64_t before;
-	bool held;
-	bool paused;
-
-	before = tuples_read(scratch);
-	held = true;
-	paused = false;
-	while (held && !paused && scratch->level < scratch->driver) {
-		op = &scratch->plan->ops[scratch->level];
-		held = test_holds(scratch, op,
-		    &scratch->states[scratch->level]);
-		if (scratch->error.failed)
-			held = false;
-		scratch->level++;
-		paused = scratch->paused;
-		scratch->paused = false;
-	}
-	scratch->driver_reads.prefix += tuples_read(scratch) - before;
-
-	if (!held)
-		return (end_run(scratch));
-	if (paused)
-		return (RELIC_EXEC_PAUSED);
-	reach_driver(scratch, false);
-	if (scratch->finished)
-		return (RELIC_EXEC_FINISHED);
-
-	return (run_join(scratch));
-}
-
-/*
- * Whether a test of the prefix holds, asked afresh, as step() would ask
- * it.  It is asked here rather than through step() so that the join's
- * loop stays step()'s one caller, where the compiler expands it in place.
- */
-static bool
-test_holds(relic_scratch_t *scratch, const relic_op_t *op,
-    const relic_op_state_t *state)
-{
-	switch (op->kind) {
-	case RELIC_OP_MEMBER:
-		return (step_member(scratch, &op->u.atom, &state->view));
-	case RELIC_OP_EXISTS:
-		return (step_probe(scratch, &op->u.atom, &state->view));
-	case RELIC_OP_ANTI_MEMBER:
-		return (!step_probe(scratch, &op->u.atom, &state->view));
-	case RELIC_OP_FILTER:
-		return (step_filter(scratch, scratch->env, &op->u.filter));
-	case RELIC_OP_SCAN:
-	case RELIC_OP_LOOKUP:
-	case RELIC_OP_ASSIGN:
-	case RELIC_OP_AGGREGATE:
-	case RELIC_OP_EMIT:
-		break;
-	}
-	assert(!"a prefix holds only tests");
-
-	return (false);
-}
-
-/*
- * Run the join from where it last stopped until the batch is full, a
- * quantum of work is done, or the operation at the lowest level it runs
- * at, `base`, has nothing more: the driver for a plan with one, whose
- * prefix has held, and the first operation for any other.  `level` is the
- * operation being asked for a match, and `resume` says whether it is being
- * asked for its next one or started afresh.  Every yield records a level
- * at or above `base` and leaves every cursor where it was, and every
- * operation the join asks afresh is above the one it last matched, so a
- * driver, which reach_driver() leaves to resume, goes on from its own
- * cursor however often the run returns.
- */
-static enum relic_exec_status
-run_join(relic_scratch_t *scratch)
-{
-	const relic_exec_env_t *env;
-	const relic_plan_t *plan;
-	const relic_op_t *op;
-	uint64_t backtracks_left;
-	size_t level;
-	size_t base;
-	bool matched;
-	bool resume;
-
 	plan = scratch->plan;
 	env = scratch->env;
-	base = scratch->base;
 
 	level = scratch->level;
 	resume = scratch->resume;
 	backtracks_left = RELIC_EXEC_QUANTUM;
+	scratch->reads_left = RELIC_EXEC_QUANTUM;
 
 	for (;;) {
 		op = &plan->ops[level];
@@ -2684,7 +2370,8 @@ run_join(relic_scratch_t *scratch)
 			case RELIC_EMIT_FULL:
 				return (yield_before_emit(scratch, level));
 			case RELIC_EMIT_FAILED:
-				return (end_run(scratch));
+				scratch->finished = true;
+				return (RELIC_EXEC_FINISHED);
 			}
 			if (scratch->batch_count == RELIC_INSERT_BATCH)
 				return (yield_after_emit(scratch, level));
@@ -2710,7 +2397,7 @@ run_join(relic_scratch_t *scratch)
 			continue;
 		}
 
-		if (level == base)
+		if (level == 0)
 			break;
 
 		level--;
@@ -2721,5 +2408,7 @@ run_join(relic_scratch_t *scratch)
 			return (yield_after_quantum(scratch, level, resume));
 	}
 
-	return (end_run(scratch));
+	scratch->finished = true;
+
+	return (RELIC_EXEC_FINISHED);
 }

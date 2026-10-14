@@ -147,6 +147,8 @@ static int		 stripe_reserve_key(const relic_index_t *index,
 static int		 stripe_reserve_keys(const relic_index_t *index,
 			    relic_index_stripe_t *stripe, size_t added,
 			    relic_idtab_t *grown);
+static relic_tuple_id_t	 walk_toward(const relic_index_t *index,
+			    relic_tuple_id_t id, relic_tuple_id_t since);
 static relic_index_stripe_t *writable_key_stripe(relic_index_t *index,
 			    uint64_t hash);
 
@@ -921,6 +923,21 @@ relic_index_first(const relic_index_t *index, const relic_relation_t *relation,
 }
 
 /*
+ * Walk a chain forward from its tuple `id` toward `since`, and return where
+ * the walk stops: the first chain tuple at or past `since`, or the chain's
+ * last tuple when every tuple from `id` on is below `since`.
+ */
+static relic_tuple_id_t
+walk_toward(const relic_index_t *index, relic_tuple_id_t id,
+    relic_tuple_id_t since)
+{
+	while (id < since && index->next[id - 1] != RELIC_ID_NONE)
+		id = index->next[id - 1];
+
+	return (id);
+}
+
+/*
  * Raise the index to a delta start `since`, from which the lookups about to
  * be made begin, if it is past every start the index was raised to before.
  *
@@ -968,112 +985,36 @@ relic_index_raise_since(relic_index_t *index, relic_tuple_id_t since)
  * order, on any number of threads at once, which is why a frontier is
  * loaded and stored as a relaxed atomic word.
  *
- * A step of the walk reads the `next` array and no tuple.  The walk is the
- * seek below, made whole: there is one definition of where a walk toward
- * a start begins, where it stops and what it leaves as the frontier.
+ * A step of the walk reads the `next` array and no tuple.
  */
 relic_tuple_id_t
 relic_index_first_since(const relic_index_t *index,
     const relic_relation_t *relation, const relic_dom_t *probe,
     relic_tuple_id_t since)
 {
-	relic_index_seek_t seek;
-	uint64_t walked;
-
-	relic_index_seek_begin(index, relation, probe, since, &seek);
-	walked = 0;
-	(void)relic_index_seek_walk(index, &seek, UINT64_MAX, &walked);
-
-	return (relic_index_seek_found(&seek));
-}
-
-/*
- * A start below `latest_since` begins at the chain's head and publishes
- * nothing, and `latest_since` itself begins at the key's frontier and
- * publishes where it stops, as relic_index_first_since() sets out.  A key
- * the index lacks has no chain, and its walk has stopped before it began.
- */
-void
-relic_index_seek_begin(const relic_index_t *index,
-    const relic_relation_t *relation, const relic_dom_t *probe,
-    relic_tuple_id_t since, relic_index_seek_t *seek)
-{
+	relic_atomic_u32_t *frontier;
 	relic_key_ref_t ref;
+	relic_tuple_id_t start;
+	relic_tuple_id_t stop;
 
 	assert(since <= index->latest_since);
 
-	bzero(seek, sizeof(*seek));
-	seek->since = since;
-
 	ref = probe_key(index, relation, probe);
-	if (ref.key_id == RELIC_ID_NONE) {
-		seek->at = RELIC_ID_NONE;
-		seek->stopped = true;
-		return;
-	}
-	seek->stripe = (uint32_t)relic_hash_stripe(ref.hash);
-	seek->key_id = ref.key_id;
+	if (ref.key_id == RELIC_ID_NONE)
+		return (RELIC_ID_NONE);
+	frontier = &ref.stripe->frontiers[ref.key_id - 1];
 
 	if (since < index->latest_since) {
-		seek->from = ref.stripe->entries[ref.key_id - 1].first;
+		stop = walk_toward(index,
+		    ref.stripe->entries[ref.key_id - 1].first, since);
 	} else {
-		seek->from = relic_atomic_u32_load_relaxed(
-		    &ref.stripe->frontiers[ref.key_id - 1]);
-		seek->publishes = since == index->latest_since;
-	}
-	seek->at = seek->from;
-}
-
-/*
- * Walk the chain forward from where the seek is toward its start, and stop
- * at the first chain tuple at or past it, or at the chain's last tuple
- * when every tuple from there on is below it.  Every chain tuple the walk
- * passes is below the start, so the stop it publishes keeps the frontier's
- * invariant.
- */
-bool
-relic_index_seek_walk(const relic_index_t *index, relic_index_seek_t *seek,
-    uint64_t links, uint64_t *walkedp)
-{
-	const relic_index_stripe_t *stripe;
-	relic_tuple_id_t id;
-	uint64_t walked;
-
-	assert(links > 0);
-	if (seek->stopped)
-		return (true);
-
-	id = seek->at;
-	walked = 0;
-	while (id < seek->since && index->next[id - 1] != RELIC_ID_NONE) {
-		if (walked == links) {
-			seek->at = id;
-			*walkedp += walked;
-			return (false);
-		}
-		id = index->next[id - 1];
-		walked++;
-	}
-	seek->at = id;
-	seek->stopped = true;
-	*walkedp += walked;
-
-	if (seek->publishes && id != seek->from) {
-		assert(seek->stripe < RELIC_STRIPES);
-		stripe = &index->stripes[seek->stripe];
-		relic_atomic_u32_store_relaxed(
-		    &stripe->frontiers[seek->key_id - 1], id);
+		start = relic_atomic_u32_load_relaxed(frontier);
+		stop = walk_toward(index, start, since);
+		if (since == index->latest_since && stop != start)
+			relic_atomic_u32_store_relaxed(frontier, stop);
 	}
 
-	return (true);
-}
-
-relic_tuple_id_t
-relic_index_seek_found(const relic_index_seek_t *seek)
-{
-	assert(seek->stopped);
-
-	return (seek->at >= seek->since ? seek->at : RELIC_ID_NONE);
+	return (stop >= since ? stop : RELIC_ID_NONE);
 }
 
 /*

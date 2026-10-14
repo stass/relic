@@ -63,8 +63,8 @@
 #define	SCENARIO_TEXT_MEMORY	"the memory limit refuses strings as serially"
 #define	SCENARIO_HISTORY	"a round reserves what its items inserted"
 #define	SCENARIO_COMPACT	"a merge resolves each local value once"
-#define	SCENARIO_DRIVER		"a lookup drives a shared round"
-#define	SCENARIO_DELTA_DRIVER	"a delta lookup drives its rounds"
+#define	SCENARIO_DRIVER		"a lookup plan keeps its indexed access"
+#define	SCENARIO_DELTA_DRIVER	"whole delta lookup plans agree with serial"
 
 /* Room for a generated program and for a context's diagnostics. */
 #define	PROGRAM_MAX		(1024 * 1024)
@@ -162,8 +162,8 @@ struct text {
 };
 
 static void	 a_deferred_round_inserts_in_serial_order(size_t threads);
-static void	 a_delta_lookup_drives_its_rounds(size_t threads);
-static void	 a_lookup_drives_a_shared_round(size_t threads);
+static void	 whole_delta_lookup_plans_agree_with_serial(size_t threads);
+static void	 a_lookup_plan_keeps_its_indexed_access(size_t threads);
 static void	 a_querys_rewrite_runs_deferred_rounds(size_t threads);
 static uint64_t	 expected_candidates(const relic_t *ctx);
 static uint64_t	 reservation_declines(const relic_t *ctx);
@@ -256,9 +256,9 @@ appendf(text_t *text, const char *format, ...)
  *	two member literals, so that a round runs two variants of one rule;
  *	even/1 and odd/1, mutually recursive over a chain, a component of two
  *	members whose rounds write both;
- *	reach/1 from a constant, whose plan is driven by a lookup and is cut
- *	along its chain; pair/2 over two derivations of one relation filtered
- *	by a comparison, with many duplicates across the items of one round;
+ *	reach/1 from a constant, whose plan starts with a lookup and runs
+ *	whole; pair/2 over two derivations of one relation filtered by a
+ *	comparison, with many duplicates across the items of one round;
  *	lonely/1 behind a negation, and done/0 of no columns;
  *	span/1, total/1, both/2, near/2 and dist/3 over idx/2, a number for
  *	each node, computing integers: span/1 one the value table lacks for
@@ -575,21 +575,20 @@ rounds_reserve_what_serial_rounds_inserted(void)
 }
 
 /*
- * A round whose plan starts with a lookup is shared on its work, without
- * RELIC_F_PARALLEL_ALWAYS:
+ * A plan beginning with an indexed lookup keeps that access and runs
+ * whole.  Thread count must not make its planner substitute a scan:
  *
  *	pair(A, B) :- row(A, V, 7), row(B, V, 13).
  *
  * over DRIVER_MATCHES facts row(A, V, 7), each of its own V, and
  * DRIVER_FAN facts row(B, V, 13) for each V.  The plan looks both literals
  * up, the first on its constant and the second on V and its constant, so
- * the round has no scan to cut; it is cut along the first lookup's
- * matches into several tasks, and derives what the serial evaluator
- * derives, tuple for tuple, counting the same reads.  A pool of one worker
- * shares nothing.
+ * the round has no scan to cut.  Its initial unit estimate leaves the
+ * round serial at every worker count.  Both contexts derive the same
+ * tuples under the same identifiers and count the same indexed reads.
  */
 static void
-a_lookup_drives_a_shared_round(size_t threads)
+a_lookup_plan_keeps_its_indexed_access(size_t threads)
 {
 	diagnostics_t serial_diagnostics;
 	diagnostics_t deferred_diagnostics;
@@ -632,23 +631,9 @@ a_lookup_drives_a_shared_round(size_t threads)
 		    SCENARIO_DRIVER, "%s: both literals are looked up: \"%s\"",
 		    what, explained.text);
 
-		if (relic_pool_size(threads) > 1) {
-			checkf(merged_rounds(deferred) > 0 &&
-			    abandoned_rounds(deferred) == 0, SCENARIO_DRIVER,
-			    "%s: the join is merged, %" PRIu64 " merged and %"
-			    PRIu64 " abandoned", what, merged_rounds(deferred),
-			    abandoned_rounds(deferred));
-			checkf(deferred->pool->lookup_slices > 1,
-			    SCENARIO_DRIVER, "%s: the lookup is cut into "
-			    "slices, %" PRIu64 " of them", what,
-			    deferred->pool->lookup_slices);
-		} else {
-			checkf(merged_rounds(deferred) == 0, SCENARIO_DRIVER,
-			    "%s: no round is shared on one worker", what);
-		}
-		checkf(shared_as_expected(deferred, threads), SCENARIO_DRIVER,
-		    "%s: the rounds are shared when the pool has threads",
-		    what);
+		checkf(merged_rounds(deferred) == 0 &&
+		    abandoned_rounds(deferred) == 0, SCENARIO_DRIVER,
+		    "%s: the lookup plan runs whole without deferral", what);
 		relic_stats(deferred, &stats);
 		checkf(stats.tuples == DRIVER_MATCHES * (1 + DRIVER_FAN) +
 		    DRIVER_MATCHES * DRIVER_FAN, SCENARIO_DRIVER,
@@ -666,7 +651,7 @@ a_lookup_drives_a_shared_round(size_t threads)
 
 /*
  * The rounds of a recursion whose plans are driven by a lookup of a delta,
- * and rounds whose plans test a fact before their driver, are shared under
+ * and rounds whose plans test a fact before a lookup, are deferred under
  * RELIC_F_PARALLEL_ALWAYS and derive what the serial evaluator does:
  *
  *	s(7, Y) :- flag(1), s(7, X), next(X, Y).
@@ -680,11 +665,12 @@ a_lookup_drives_a_shared_round(size_t threads)
  * on 8, whose chains are interleaved, so each chain's visits begin at its
  * first tuple at or past the delta's start, found from the key's frontier.
  * some/1's plan tests flag(1), which holds, before its lookup, and none/1's
- * flag(2), which does not, so its round has no visit to divide and derives
- * nothing.  A pool of one worker runs the same tasks on the calling thread.
+ * flag(2), which does not, so its plan derives nothing.  Each plan runs
+ * whole as one task.  A pool of one worker runs the same tasks on the
+ * calling thread.
  */
 static void
-a_delta_lookup_drives_its_rounds(size_t threads)
+whole_delta_lookup_plans_agree_with_serial(size_t threads)
 {
 	diagnostics_t serial_diagnostics;
 	diagnostics_t deferred_diagnostics;
@@ -723,12 +709,10 @@ a_delta_lookup_drives_its_rounds(size_t threads)
 		    relic_materialize(deferred) == 0, SCENARIO_DELTA_DRIVER,
 		    "%s: both materialize", what);
 		checkf(merged_rounds(deferred) > 0 &&
-		    abandoned_rounds(deferred) == 0 &&
-		    deferred->pool->lookup_slices > 1, SCENARIO_DELTA_DRIVER,
-		    "%s: the rounds are merged and their lookups cut, %" PRIu64
-		    " merged, %" PRIu64 " abandoned and %" PRIu64 " slices",
-		    what, merged_rounds(deferred), abandoned_rounds(deferred),
-		    deferred->pool->lookup_slices);
+		    abandoned_rounds(deferred) == 0, SCENARIO_DELTA_DRIVER,
+		    "%s: the rounds merge whole lookup plans, %" PRIu64
+		    " merged and %" PRIu64 " abandoned", what,
+		    merged_rounds(deferred), abandoned_rounds(deferred));
 		checkf(shared_as_expected(deferred, threads),
 		    SCENARIO_DELTA_DRIVER, "%s: the rounds are shared when the "
 		    "pool has threads", what);
@@ -1999,12 +1983,12 @@ main(void)
 		rounds_reserve_what_deferred_rounds_inserted(threads);
 	}
 	rounds_reserve_what_serial_rounds_inserted();
-	a_lookup_drives_a_shared_round(1);
-	a_lookup_drives_a_shared_round(DEFERRED_THREADS);
-	a_lookup_drives_a_shared_round(MANY_THREADS);
-	a_delta_lookup_drives_its_rounds(1);
-	a_delta_lookup_drives_its_rounds(DEFERRED_THREADS);
-	a_delta_lookup_drives_its_rounds(MANY_THREADS);
+	a_lookup_plan_keeps_its_indexed_access(1);
+	a_lookup_plan_keeps_its_indexed_access(DEFERRED_THREADS);
+	a_lookup_plan_keeps_its_indexed_access(MANY_THREADS);
+	whole_delta_lookup_plans_agree_with_serial(1);
+	whole_delta_lookup_plans_agree_with_serial(DEFERRED_THREADS);
+	whole_delta_lookup_plans_agree_with_serial(MANY_THREADS);
 	pending_values_resolve_once();
 	compacted_rounds_agree(2, 0);
 	compacted_rounds_agree(DEFERRED_THREADS, 0);

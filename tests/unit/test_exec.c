@@ -36,18 +36,17 @@
 
 #define	SCENARIO_BATCHES	"a plan's batches hold each derivation once"
 #define	SCENARIO_EMIT_ONLY	"a plan of its EMIT alone derives its head once"
-#define	SCENARIO_GROWN_CHAIN	"a lookup driver's visits end at its view"
+#define	SCENARIO_GROWN_CHAIN	"a lookup stops at its original view"
 #define	SCENARIO_GROWTH		"what is appended between calls is not read"
 #define	SCENARIO_NEGLECT	"a batch left full is not written past"
 #define	SCENARIO_PIECES		"pieces of a view derive what the whole does"
-#define	SCENARIO_PREFIX_PAUSE	"a prefix pausing at its driver reaches it"
+#define	SCENARIO_PREFIX_PAUSE	"pausing after a test resumes the plan"
 #define	SCENARIO_PROBES		"a probe's scan counts toward the quantum"
 #define	SCENARIO_DELTA_CHECK	"a check of a delta begins at its start"
 #define	SCENARIO_FOLDS		"a fold's reads count toward the quantum"
 #define	SCENARIO_FOLD_EMIT	"a fold that pauses emits its value next call"
 #define	SCENARIO_LOOKUP		"a lookup rejecting its chain pauses inside it"
 #define	SCENARIO_QUANTUM	"a plan deriving nothing pauses every quantum"
-#define	SCENARIO_SLICES		"a lookup's slices derive what the whole does"
 #define	SCENARIO_UNSTARTED	"a scratch no plan has started derives nothing"
 
 /*
@@ -88,11 +87,8 @@ static void	 a_plan_deriving_nothing_pauses_every_quantum(void);
 static void	 a_folds_reads_count_toward_the_quantum(void);
 static void	 a_fold_that_pauses_emits_its_value_next_call(void);
 static void	 a_lookup_rejecting_its_chain_pauses_inside_it(void);
-static void	 a_lookups_slices_derive_what_the_whole_does(void);
-static void	 a_prefix_pausing_at_its_driver_reaches_it(void);
-static void	 a_lookup_drivers_visits_end_at_its_view(void);
-static bool	 run_collecting(relic_scratch_t *scratch, relic_dom_t *out,
-		    size_t room, size_t *countp, size_t base);
+static void	 pausing_after_a_test_resumes_the_plan(void);
+static void	 a_lookup_stops_at_its_original_view(void);
 static void	 a_probes_scan_counts_toward_the_quantum(void);
 static void	 a_check_of_a_delta_begins_at_its_start(void);
 static void	 probes_scanning_count_toward_the_quantum(
@@ -496,12 +492,11 @@ a_scratch_no_plan_has_started_derives_nothing(void)
 }
 
 /*
- * A plan started on a slice of its driving scan's view derives what the
- * whole plan derives while its cursor is inside the slice, in the same
- * order, so slices that cover the view in order, run one after another,
- * derive what the whole does and scan as much.  The slices here are one
- * tuple long, a batch long, and the rest, and one runs past a batch; an
- * empty one is never started, a round running nothing for it.
+ * A plan started on a piece of its first scan's view derives what the
+ * whole plan derives while its cursor is inside the piece, in the same
+ * order.  Pieces that cover the view in order therefore derive what the
+ * whole does and scan as much.  These pieces are empty, one tuple long,
+ * a batch long and the rest; one piece runs past a batch.
  */
 static void
 pieces_of_a_view_derive_what_the_whole_does(void)
@@ -541,9 +536,7 @@ pieces_of_a_view_derive_what_the_whole_does(void)
 	for (k = 0; k + 1 < sizeof(cuts) / sizeof(cuts[0]); k++) {
 		piece.first = cuts[k];
 		piece.end = cuts[k + 1];
-		if (piece.first == piece.end)
-			continue;
-		relic_exec_start_slice(scratch, &fixture.env, &fixture.plan,
+		relic_exec_start_piece(scratch, &fixture.env, &fixture.plan,
 		    piece);
 
 		do {
@@ -1211,227 +1204,19 @@ a_lookup_rejecting_its_chain_pauses_inside_it(void)
 }
 
 /*
- * Run a started plan to its end, appending what it derives to `out`, which
- * has room for `room` values, and counting them in *countp.  Returns
- * whether every pause left the join at or above level `base`.
- */
-static bool
-run_collecting(relic_scratch_t *scratch, relic_dom_t *out, size_t room,
-    size_t *countp, size_t base)
-{
-	size_t i;
-	enum relic_exec_status status;
-	bool above;
-
-	above = true;
-	do {
-		status = relic_exec_run(scratch);
-		if (status == RELIC_EXEC_PAUSED && scratch->level < base)
-			above = false;
-		for (i = 0; i < scratch->batch_count; i++) {
-			if (*countp < room)
-				out[*countp] = scratch->batch[i];
-			(*countp)++;
-		}
-		scratch->batch_count = 0;
-	} while (status == RELIC_EXEC_PAUSED);
-
-	return (above);
-}
-
-/*
- * A plan's prefix runs alone, and its driver's visits run as slices that
- * each start at the driver, so slices that cover the visits in order
- * derive what the whole plan does, in the same order, and read the visits
- * and nothing of the prefix.  The plan checks that r holds its last value,
- * reading all of r, looks b up on the constant 7, and emits each pair's
- * second column; b's chain of 7 is interleaved with a chain of 8, so its
- * identifiers are not consecutive.  The whole run counts r's reads as the
- * prefix's and the chain's as the driver's visits; the prefix alone
- * reaches the driver, or with a value r lacks rejects the plan, reading
- * all of r either way; and slices cut at the chain's ordinals 0, 1, a
- * batch and one, and its end, each a chain tuple to the next slice's
- * first, never backtrack below the driver, though each but the shortest
- * fills a batch.
- */
-static void
-a_lookups_slices_derive_what_the_whole_does(void)
-{
-	enum { HELD = 10, CHAIN = 2 * RELIC_INSERT_BATCH + 7, SLICES = 3 };
-	static relic_tuple_id_t chain[CHAIN];
-	static relic_dom_t whole[CHAIN];
-	static relic_dom_t sliced[CHAIN];
-	static const size_t cuts[SLICES + 1] = {
-		0, 1, RELIC_INSERT_BATCH + 1, CHAIN
-	};
-	enum relic_prefix_status prefix;
-	relic_plan_term_t lookup_terms[2];
-	relic_plan_term_t test_term;
-	relic_tuple_range_t slice;
-	relic_tuple_range_t view;
-	relic_op_state_t states[3];
-	relic_relation_t *pairs;
-	relic_scratch_t scratch;
-	relic_driver_reads_t reads;
-	const relic_index_t *index;
-	relic_dom_t batch[RELIC_INSERT_BATCH];
-	relic_dom_t pair[2];
-	relic_dom_t probe[2];
-	relic_dom_t absent;
-	relic_dom_t last;
-	relic_op_t ops[3];
-	relic_plan_t plan;
-	fixture_t fixture;
-	relic_tuple_id_t id;
-	uint64_t looked_up;
-	uint32_t position;
-	size_t derived;
-	size_t i;
-	size_t k;
-	bool above;
-	bool added;
-
-	if (!fixture_open(&fixture, SCENARIO_SLICES))
-		return;
-	pairs = relation(fixture.ctx, SCENARIO_SLICES, "b", 2);
-	if (pairs == NULL || !fill(&fixture, SCENARIO_SLICES, 1, HELD) ||
-	    relic_value_intern_integer(fixture.ctx, 99999, &absent) != 0) {
-		fixture_close(&fixture);
-		return;
-	}
-	for (i = 0; i < 2 * (size_t)CHAIN; i++) {
-		if (relic_value_intern_integer(fixture.ctx,
-		    7 + (int64_t)(i % 2), &pair[0]) != 0 ||
-		    relic_value_intern_integer(fixture.ctx,
-		    (int64_t)(1000000 + i), &pair[1]) != 0 ||
-		    relic_relation_insert(fixture.ctx, pairs, pair,
-		    &added) != 0) {
-			check(false, SCENARIO_SLICES, "b fills");
-			fixture_close(&fixture);
-			return;
-		}
-	}
-	if (relic_relation_index(fixture.ctx, pairs, 1u, &position) != 0 ||
-	    relic_value_intern_integer(fixture.ctx, 7, &probe[0]) != 0 ||
-	    relic_value_intern_integer(fixture.ctx, HELD, &last) != 0) {
-		check(false, SCENARIO_SLICES, "b is indexed");
-		fixture_close(&fixture);
-		return;
-	}
-
-	test_term.action = RELIC_PLAN_CONSTANT;
-	test_term.u.constant = last;
-	lookup_terms[0].action = RELIC_PLAN_CONSTANT;
-	lookup_terms[0].u.constant = probe[0];
-	lookup_terms[1] = fixture.bind;
-	bzero(ops, sizeof(ops));
-	ops[0].kind = RELIC_OP_EXISTS;
-	ops[0].u.atom.relation = fixture.scanned;
-	ops[0].u.atom.terms = &test_term;
-	ops[0].u.atom.arity = 1;
-	ops[0].u.atom.view = RELIC_VIEW_ALL;
-	ops[1].kind = RELIC_OP_LOOKUP;
-	ops[1].u.atom.relation = pairs;
-	ops[1].u.atom.terms = lookup_terms;
-	ops[1].u.atom.arity = 2;
-	ops[1].u.atom.key_mask = 1u;
-	ops[1].u.atom.index_position = position;
-	ops[1].u.atom.view = RELIC_VIEW_ALL;
-	ops[2] = fixture.ops[1];
-	plan.ops = ops;
-	plan.op_count = 3;
-	check(relic_plan_driver(&plan) == 1, SCENARIO_SLICES,
-	    "the lookup after the test drives the plan");
-
-	relic_scratch_init(&scratch, states, 3, batch, NULL, 1);
-	relic_exec_start(&scratch, &fixture.env, &plan);
-	derived = 0;
-	(void)run_collecting(&scratch, whole, CHAIN, &derived, 0);
-	checkf(derived == CHAIN && scratch.driver_reads.prefix == HELD &&
-	    scratch.driver_reads.visits == CHAIN, SCENARIO_SLICES,
-	    "the whole plan should derive %u pairs, reading %u in its "
-	    "prefix and %u at its driver, not %zu, %llu and %llu", CHAIN,
-	    HELD, CHAIN, derived,
-	    (unsigned long long)scratch.driver_reads.prefix,
-	    (unsigned long long)scratch.driver_reads.visits);
-	bzero(&scratch.counters, sizeof(scratch.counters));
-
-	relic_exec_start_prefix(&scratch, &fixture.env, &plan);
-	while ((prefix = relic_exec_run_prefix(&scratch)) ==
-	    RELIC_PREFIX_PAUSED)
-		continue;
-	check(prefix == RELIC_PREFIX_REACHED &&
-	    scratch.counters.tuples_scanned == HELD &&
-	    scratch.counters.tuples_looked_up == 0 && scratch.batch_count == 0,
-	    SCENARIO_SLICES, "the prefix reaches the driver, reading r alone");
-	bzero(&scratch.counters, sizeof(scratch.counters));
-
-	test_term.u.constant = absent;
-	relic_exec_start_prefix(&scratch, &fixture.env, &plan);
-	while ((prefix = relic_exec_run_prefix(&scratch)) ==
-	    RELIC_PREFIX_PAUSED)
-		continue;
-	check(prefix == RELIC_PREFIX_REJECTED &&
-	    scratch.counters.tuples_scanned == HELD, SCENARIO_SLICES,
-	    "a prefix whose test fails rejects the plan");
-	test_term.u.constant = last;
-	bzero(&scratch.counters, sizeof(scratch.counters));
-
-	index = &pairs->indexes[position];
-	id = relic_index_first(index, pairs, probe);
-	for (i = 0; i < CHAIN && id != RELIC_ID_NONE; i++) {
-		chain[i] = id;
-		id = relic_index_next(index, id);
-	}
-	view = relic_exec_view(&fixture.env, &ops[1].u.atom);
-
-	derived = 0;
-	above = true;
-	bzero(&reads, sizeof(reads));
-	for (k = 0; k < SLICES; k++) {
-		slice.first = chain[cuts[k]];
-		slice.end = cuts[k + 1] < CHAIN ? chain[cuts[k + 1]] : view.end;
-		relic_exec_start_slice(&scratch, &fixture.env, &plan, slice);
-		if (!run_collecting(&scratch, sliced, CHAIN, &derived, 1))
-			above = false;
-		reads.prefix += scratch.driver_reads.prefix;
-		reads.visits += scratch.driver_reads.visits;
-	}
-	looked_up = scratch.counters.tuples_looked_up;
-
-	checkf(derived == CHAIN && bcmp(whole, sliced, sizeof(whole)) == 0,
-	    SCENARIO_SLICES, "the slices should derive the whole's %u pairs "
-	    "in order, and derived %zu", CHAIN, derived);
-	check(above, SCENARIO_SLICES, "no slice pauses below its driver");
-	checkf(scratch.counters.tuples_scanned == 0 && looked_up == CHAIN &&
-	    reads.prefix == 0 && reads.visits == CHAIN, SCENARIO_SLICES,
-	    "the slices should read the %u visits and no prefix, and read "
-	    "%llu tuples of r and %llu of b", CHAIN,
-	    (unsigned long long)scratch.counters.tuples_scanned,
-	    (unsigned long long)looked_up);
-
-	fixture_close(&fixture);
-}
-
-/*
- * A test of the prefix that reads past its quantum and holds pauses as the
- * join descends past it, and the join reaches the driver all the same.
+ * A test that reads past its quantum and holds pauses as the join descends
+ * past it, and the next call resumes at the following operation.
  * The plan checks `p(_, last)` twice without an index, each check reading
  * all of p, a quantum large and more, whose last tuple alone holds; then
- * scans r and emits each value.  So the first check pauses on the way to
- * the second and the second on the way to the driver.  The whole run
- * counts both checks' reads as the prefix's and r's as the driver's
- * visits, though its caller takes the counters after every call, as the
- * evaluator does; and the prefix alone reaches the driver within a call of
- * each pause, deriving nothing.  Checking for a value p lacks instead, the
- * first check rejects in the call it spends, and the prefix alone is
- * finished there, having read p once.
+ * scans r and emits each value.  The caller takes counters after every
+ * call, as the evaluator does; their sum includes both checks and the
+ * scan once.  Checking for a value p lacks instead rejects the plan after
+ * reading p once, including a pause at that rejection's quantum boundary.
  */
 static void
-a_prefix_pausing_at_its_driver_reaches_it(void)
+pausing_after_a_test_resumes_the_plan(void)
 {
 	enum { HELD = 10, WALK = RELIC_EXEC_QUANTUM + 10, CALLS = 4 };
-	enum relic_prefix_status prefix;
 	enum relic_exec_status status;
 	relic_plan_term_t probe_terms[2];
 	relic_op_state_t states[4];
@@ -1440,6 +1225,7 @@ a_prefix_pausing_at_its_driver_reaches_it(void)
 	relic_dom_t batch[RELIC_INSERT_BATCH];
 	relic_dom_t tuple[2];
 	relic_dom_t absent;
+	const relic_dom_t *expected;
 	relic_op_t ops[4];
 	relic_plan_t plan;
 	fixture_t fixture;
@@ -1448,6 +1234,7 @@ a_prefix_pausing_at_its_driver_reaches_it(void)
 	size_t calls;
 	size_t i;
 	bool added;
+	bool ordered;
 
 	if (!fixture_open(&fixture, SCENARIO_PREFIX_PAUSE))
 		return;
@@ -1486,61 +1273,58 @@ a_prefix_pausing_at_its_driver_reaches_it(void)
 	ops[3] = fixture.ops[1];
 	plan.ops = ops;
 	plan.op_count = 4;
-	check(relic_plan_driver(&plan) == 2, SCENARIO_PREFIX_PAUSE,
-	    "the scan after the tests drives the plan");
 
 	relic_scratch_init(&scratch, states, 4, batch, NULL, 1);
 	relic_exec_start(&scratch, &fixture.env, &plan);
 	count = 0;
+	calls = 0;
+	read = 0;
+	ordered = true;
+	do {
+		status = relic_exec_run(&scratch);
+		for (i = 0; i < scratch.batch_count; i++) {
+			expected = relic_relation_tuple(fixture.scanned,
+			    (relic_tuple_id_t)(RELIC_TUPLE_FIRST + count));
+			if (expected == NULL || scratch.batch[i] != expected[0])
+				ordered = false;
+			count++;
+		}
+		read += scratch.counters.tuples_scanned;
+		scratch.batch_count = 0;
+		bzero(&scratch.counters, sizeof(scratch.counters));
+		calls++;
+	} while (status == RELIC_EXEC_PAUSED && calls < CALLS);
+	checkf(status == RELIC_EXEC_FINISHED && !scratch.error.failed &&
+	    count == HELD && ordered && read == 2 * WALK + HELD,
+	    SCENARIO_PREFIX_PAUSE, "the plan should finish with %u ordered "
+	    "values and %u reads, not %zu values and %llu reads after %zu "
+	    "calls", HELD, 2 * WALK + HELD, count,
+	    (unsigned long long)read, calls);
+
+	probe_terms[1].u.constant = absent;
+	relic_exec_start(&scratch, &fixture.env, &plan);
+	calls = 0;
+	count = 0;
+	read = 0;
 	do {
 		status = relic_exec_run(&scratch);
 		count += scratch.batch_count;
+		read += scratch.counters.tuples_scanned;
 		scratch.batch_count = 0;
 		bzero(&scratch.counters, sizeof(scratch.counters));
-	} while (status == RELIC_EXEC_PAUSED);
-	checkf(count == HELD && scratch.driver_reads.prefix == 2 * WALK &&
-	    scratch.driver_reads.visits == HELD, SCENARIO_PREFIX_PAUSE,
-	    "the whole plan should derive %u values, reading %u in its "
-	    "prefix and %u at its driver, not %zu, %llu and %llu", HELD,
-	    2 * WALK, HELD, count,
-	    (unsigned long long)scratch.driver_reads.prefix,
-	    (unsigned long long)scratch.driver_reads.visits);
-
-	relic_exec_start_prefix(&scratch, &fixture.env, &plan);
-	calls = 0;
-	read = 0;
-	do {
-		prefix = relic_exec_run_prefix(&scratch);
-		read += scratch.counters.tuples_scanned;
-		bzero(&scratch.counters, sizeof(scratch.counters));
 		calls++;
-	} while (prefix == RELIC_PREFIX_PAUSED && calls < CALLS);
-	checkf(prefix == RELIC_PREFIX_REACHED && scratch.batch_count == 0 &&
-	    read == 2 * WALK && scratch.driver_reads.prefix == read,
-	    SCENARIO_PREFIX_PAUSE,
-	    "the prefix should reach the driver, reading p twice and "
-	    "counting it, and returned %d after %zu calls with %zu derived, "
-	    "%llu read and %llu counted", (int)prefix, calls,
-	    scratch.batch_count, (unsigned long long)read,
-	    (unsigned long long)scratch.driver_reads.prefix);
-
-	probe_terms[1].u.constant = absent;
-	relic_exec_start_prefix(&scratch, &fixture.env, &plan);
-	prefix = relic_exec_run_prefix(&scratch);
-	read = scratch.counters.tuples_scanned;
-	bzero(&scratch.counters, sizeof(scratch.counters));
-	checkf(prefix == RELIC_PREFIX_REJECTED && read == WALK &&
-	    scratch.driver_reads.prefix == WALK, SCENARIO_PREFIX_PAUSE,
-	    "a check that spends the call and fails should reject in that "
-	    "call, reading p once, and returned %d having read %llu and "
-	    "counted %llu", (int)prefix, (unsigned long long)read,
-	    (unsigned long long)scratch.driver_reads.prefix);
+	} while (status == RELIC_EXEC_PAUSED && calls < CALLS);
+	checkf(status == RELIC_EXEC_FINISHED && !scratch.error.failed &&
+	    count == 0 && read == WALK, SCENARIO_PREFIX_PAUSE,
+	    "a rejected check should finish without rows after reading p "
+	    "once, and returned %d having read %llu",
+	    (int)status, (unsigned long long)read);
 
 	fixture_close(&fixture);
 }
 
 /*
- * A LOOKUP driver's visits are the chain tuples inside its view, however
+ * A LOOKUP's visits are the chain tuples inside its view, however
  * the chain grows while the run is paused, and are counted as of every
  * return, not only the last.  The plan looks b up on the constant 7 and
  * emits each pair's second column, so every chain tuple matches and the
@@ -1551,7 +1335,7 @@ a_prefix_pausing_at_its_driver_reaches_it(void)
  * the driver never reads, before the next call finishes the run.
  */
 static void
-a_lookup_drivers_visits_end_at_its_view(void)
+a_lookup_stops_at_its_original_view(void)
 {
 	enum { CHAIN = 2 * RELIC_INSERT_BATCH + 1 };
 	enum relic_exec_status status;
@@ -1617,7 +1401,7 @@ a_lookup_drivers_visits_end_at_its_view(void)
 		status = relic_exec_run(&scratch);
 		derived += scratch.batch_count;
 		scratch.batch_count = 0;
-		if (scratch.driver_reads.visits != derived)
+		if (scratch.counters.tuples_looked_up != derived)
 			counted = false;
 		if (derived != 2 * RELIC_INSERT_BATCH ||
 		    status != RELIC_EXEC_PAUSED)
@@ -1632,10 +1416,10 @@ a_lookup_drivers_visits_end_at_its_view(void)
 		}
 	} while (status == RELIC_EXEC_PAUSED);
 
-	checkf(derived == CHAIN && scratch.driver_reads.visits == CHAIN,
+	checkf(derived == CHAIN && scratch.counters.tuples_looked_up == CHAIN,
 	    SCENARIO_GROWN_CHAIN, "the run should derive and visit the %u "
 	    "pairs of its view, not %zu and %llu", CHAIN, derived,
-	    (unsigned long long)scratch.driver_reads.visits);
+	    (unsigned long long)scratch.counters.tuples_looked_up);
 	check(counted, SCENARIO_GROWN_CHAIN,
 	    "every return counts the visits the run has made");
 
@@ -1657,9 +1441,8 @@ main(void)
 	a_probes_scan_counts_toward_the_quantum();
 	a_check_of_a_delta_begins_at_its_start();
 	a_lookup_rejecting_its_chain_pauses_inside_it();
-	a_lookups_slices_derive_what_the_whole_does();
-	a_prefix_pausing_at_its_driver_reaches_it();
-	a_lookup_drivers_visits_end_at_its_view();
+	pausing_after_a_test_resumes_the_plan();
+	a_lookup_stops_at_its_original_view();
 
 	return (check_summary("test_exec"));
 }

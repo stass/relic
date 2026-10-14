@@ -39,7 +39,7 @@ librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c lib/arith.c \
 	lib/expr.c lib/facts.c lib/fold.c lib/import.c lib/index.c lib/lex.c \
 	lib/literal.c lib/magic.c lib/merge.c lib/parse.c lib/plan.c \
 	lib/pool.c lib/pred.c lib/regex.c lib/relation.c lib/result.c \
-	lib/round.c lib/rule.c lib/slice.c lib/stratify.c lib/strfn.c \
+	lib/round.c lib/rule.c lib/stratify.c lib/strfn.c \
 	lib/symbol.c lib/task.c lib/util.c lib/value.c lib/window.c
 
 lib_LTLIBRARIES = librelic.la

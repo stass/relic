@@ -21,16 +21,13 @@
 #include "cost.h"
 
 /*
- * The work estimator: a walk of a plan's operations in order, carrying B,
- * the bindings estimated to reach the operation, and W, the work
- * accumulated, from zero (plan.h gives each operation's rule).  The walk
- * stops once no binding reaches the next operation, since nothing after it
- * runs, or once W has saturated, since nothing after it can lower W.  A
- * candidate's estimate walks its recipe from one binding and adds to W the
- * work of building the indexes its draft names and its relations lack,
- * which preparing it would do before it ran.  A round's scheduler walks a
- * prepared plan's own operations, from one binding or from a driver's
- * measured visits, by the same rules and with nothing to build.
+ * The work estimator: a walk of a recipe's steps in plan order, carrying B,
+ * the bindings estimated to reach the step, from one, and W, the work
+ * accumulated, from zero (plan.h gives each step's rule).  The walk stops
+ * once no binding reaches the next step, since nothing after it runs, or
+ * once W has saturated, since nothing after it can lower W.  A candidate's
+ * estimate adds to W the work of building the indexes its draft names and
+ * its relations lack, which preparing it would do before it ran.
  *
  * Every quantity is an unsigned 64-bit count and every sum and product
  * saturates at UINT64_MAX rather than wrapping, so a plan whose work does
@@ -45,31 +42,14 @@ _Static_assert(sizeof(relic_tuple_id_t) <= sizeof(uint32_t),
 _Static_assert((relic_tuple_id_t)-1 > 0,
     "tuple counts are unsigned");
 
-typedef struct relic_cost_walk relic_cost_walk_t;
-
-/*
- * Where a walk is: B, the bindings reaching the next operation, and W, the
- * work so far.
- */
-struct relic_cost_walk {
-	uint64_t	bindings;
-	uint64_t	work;
-};
-
 static uint64_t	 acquisition_work(const relic_plan_draft_t *draft);
-static void	 count_op(relic_cost_walk_t *walk, const relic_op_t *op,
-		    enum relic_cost_kind kind, const relic_exec_env_t *env);
 static uint64_t	 execution_work(const relic_cost_recipe_t *recipe,
 		    const relic_exec_env_t *env);
-static enum relic_cost_kind fold_kind(const relic_op_aggregate_t *fold);
 static relic_tuple_id_t index_keys(const relic_relation_t *relation,
 		    uint32_t key_mask);
-static uint64_t	 plan_walk(const relic_plan_t *plan, size_t from,
-		    uint64_t bindings, const relic_exec_env_t *env);
 static relic_tuple_id_t range_length(relic_tuple_range_t range);
 static uint64_t	 saturating_add(uint64_t left, uint64_t right);
 static uint64_t	 saturating_multiply(uint64_t left, uint64_t right);
-static bool	 walk_is_over(const relic_cost_walk_t *walk);
 
 size_t
 relic_cost_choose(const relic_plan_family_t *family,
@@ -101,68 +81,6 @@ relic_cost_estimate(const relic_plan_candidate_t *candidate,
 	    acquisition_work(&candidate->draft)));
 }
 
-uint64_t
-relic_cost_plan(const relic_plan_t *plan, const relic_exec_env_t *env)
-{
-	return (plan_walk(plan, 0, 1, env));
-}
-
-uint64_t
-relic_cost_driven(const relic_plan_t *plan, size_t driver, uint64_t visits,
-    const relic_exec_env_t *env)
-{
-	assert(driver < plan->op_count);
-
-	return (saturating_add(visits, plan_walk(plan, driver + 1, visits,
-	    env)));
-}
-
-/*
- * Each switch names every value of its enum, so that a kind added later
- * must be classified here rather than be counted as free.
- */
-enum relic_cost_kind
-relic_cost_kind_of(const relic_op_t *op)
-{
-	switch (op->kind) {
-	case RELIC_OP_SCAN:
-		return (RELIC_COST_SCAN);
-	case RELIC_OP_LOOKUP:
-		return (RELIC_COST_LOOKUP);
-	case RELIC_OP_MEMBER:
-	case RELIC_OP_EXISTS:
-		return (RELIC_COST_PROBE);
-	case RELIC_OP_ANTI_MEMBER:
-		return (RELIC_COST_ANTI_PROBE);
-	case RELIC_OP_FILTER:
-	case RELIC_OP_ASSIGN:
-		return (RELIC_COST_OPERATION);
-	case RELIC_OP_EMIT:
-		return (RELIC_COST_EMIT);
-	case RELIC_OP_AGGREGATE:
-		break;
-	}
-
-	return (fold_kind(&op->u.aggregate));
-}
-
-static enum relic_cost_kind
-fold_kind(const relic_op_aggregate_t *fold)
-{
-	switch (fold->access) {
-	case RELIC_FOLD_SCAN:
-		return (RELIC_COST_FOLD_SCAN);
-	case RELIC_FOLD_LOOKUP:
-		return (RELIC_COST_FOLD_LOOKUP);
-	case RELIC_FOLD_CARDINALITY:
-		return (RELIC_COST_OPERATION);
-	case RELIC_FOLD_PROBE:
-		break;
-	}
-
-	return (RELIC_COST_FOLD_PROBE);
-}
-
 /*
  * The work of running a recipe's plan once, by the walk above.
  */
@@ -170,111 +88,77 @@ static uint64_t
 execution_work(const relic_cost_recipe_t *recipe,
     const relic_exec_env_t *env)
 {
-	relic_cost_walk_t walk;
-	size_t i;
-
-	walk.bindings = 1;
-	walk.work = 0;
-	for (i = 0; i < recipe->step_count && !walk_is_over(&walk); i++)
-		count_op(&walk, recipe->steps[i].op, recipe->steps[i].kind,
-		    env);
-
-	return (walk.work);
-}
-
-/*
- * The work of a plan's operations from position `from` on, reached by
- * `bindings` bindings, by the walk above.
- */
-static uint64_t
-plan_walk(const relic_plan_t *plan, size_t from, uint64_t bindings,
-    const relic_exec_env_t *env)
-{
-	relic_cost_walk_t walk;
+	const relic_cost_step_t *step;
 	const relic_op_t *op;
-	size_t i;
-
-	walk.bindings = bindings;
-	walk.work = 0;
-	for (i = from; i < plan->op_count && !walk_is_over(&walk); i++) {
-		op = &plan->ops[i];
-		count_op(&walk, op, relic_cost_kind_of(op), env);
-	}
-
-	return (walk.work);
-}
-
-/*
- * Whether nothing after this point of a walk can change its work: no
- * binding reaches the next operation, or the work has saturated.
- */
-static bool
-walk_is_over(const relic_cost_walk_t *walk)
-{
-	return (walk->bindings == 0 || walk->work == UINT64_MAX);
-}
-
-/*
- * Count one operation, of class `kind`, into a walk: the work it does for
- * the bindings reaching it, and the bindings it passes on (plan.h).
- */
-static void
-count_op(relic_cost_walk_t *walk, const relic_op_t *op,
-    enum relic_cost_kind kind, const relic_exec_env_t *env)
-{
 	uint64_t bindings;
 	uint64_t visits;
+	uint64_t work;
 	relic_tuple_id_t tuples;
+	size_t i;
 
-	bindings = walk->bindings;
-	switch (kind) {
-	case RELIC_COST_SCAN:
-		tuples = range_length(relic_exec_view(env, &op->u.atom));
-		visits = saturating_multiply(bindings, tuples);
-		walk->work = saturating_add(walk->work, visits);
-		walk->bindings = visits;
-		break;
-	case RELIC_COST_LOOKUP:
-		tuples = range_length(relic_exec_view(env, &op->u.atom));
-		visits = relic_cost_lookup_visits(bindings, tuples,
-		    index_keys(op->u.atom.relation, op->u.atom.key_mask));
-		walk->work = saturating_add(walk->work,
-		    saturating_add(bindings, visits));
-		walk->bindings = visits;
-		break;
-	case RELIC_COST_PROBE:
-		walk->work = saturating_add(walk->work, bindings);
-		tuples = range_length(relic_exec_view(env, &op->u.atom));
-		if (tuples == 0)
-			walk->bindings = 0;
-		break;
-	case RELIC_COST_ANTI_PROBE:
-	case RELIC_COST_OPERATION:
-	case RELIC_COST_EMIT:
-		walk->work = saturating_add(walk->work, bindings);
-		break;
-	case RELIC_COST_FOLD_SCAN:
-		tuples = range_length(
-		    relic_relation_all(op->u.aggregate.relation));
-		walk->work = saturating_add(walk->work, saturating_add(
-		    bindings, saturating_multiply(bindings, tuples)));
-		break;
-	case RELIC_COST_FOLD_LOOKUP:
-		tuples = range_length(
-		    relic_relation_all(op->u.aggregate.relation));
-		visits = relic_cost_lookup_visits(bindings, tuples,
-		    index_keys(op->u.aggregate.relation,
-		    op->u.aggregate.key_mask));
-		walk->work = saturating_add(walk->work,
-		    saturating_add(bindings, visits));
-		break;
-	case RELIC_COST_FOLD_PROBE:
-		tuples = range_length(
-		    relic_relation_all(op->u.aggregate.relation));
-		walk->work = saturating_add(walk->work, saturating_add(
-		    bindings, tuples == 0 ? 0 : bindings));
-		break;
+	bindings = 1;
+	work = 0;
+	for (i = 0; i < recipe->step_count; i++) {
+		if (bindings == 0 || work == UINT64_MAX)
+			break;
+		step = &recipe->steps[i];
+		op = step->op;
+
+		switch (step->kind) {
+		case RELIC_COST_SCAN:
+			tuples = range_length(relic_exec_view(env,
+			    &op->u.atom));
+			visits = saturating_multiply(bindings, tuples);
+			work = saturating_add(work, visits);
+			bindings = visits;
+			break;
+		case RELIC_COST_LOOKUP:
+			tuples = range_length(relic_exec_view(env,
+			    &op->u.atom));
+			visits = relic_cost_lookup_visits(bindings, tuples,
+			    index_keys(op->u.atom.relation,
+			    op->u.atom.key_mask));
+			work = saturating_add(work,
+			    saturating_add(bindings, visits));
+			bindings = visits;
+			break;
+		case RELIC_COST_PROBE:
+			work = saturating_add(work, bindings);
+			tuples = range_length(relic_exec_view(env,
+			    &op->u.atom));
+			if (tuples == 0)
+				bindings = 0;
+			break;
+		case RELIC_COST_ANTI_PROBE:
+		case RELIC_COST_OPERATION:
+		case RELIC_COST_EMIT:
+			work = saturating_add(work, bindings);
+			break;
+		case RELIC_COST_FOLD_SCAN:
+			tuples = range_length(
+			    relic_relation_all(op->u.aggregate.relation));
+			work = saturating_add(work, saturating_add(bindings,
+			    saturating_multiply(bindings, tuples)));
+			break;
+		case RELIC_COST_FOLD_LOOKUP:
+			tuples = range_length(
+			    relic_relation_all(op->u.aggregate.relation));
+			visits = relic_cost_lookup_visits(bindings, tuples,
+			    index_keys(op->u.aggregate.relation,
+			    op->u.aggregate.key_mask));
+			work = saturating_add(work,
+			    saturating_add(bindings, visits));
+			break;
+		case RELIC_COST_FOLD_PROBE:
+			tuples = range_length(
+			    relic_relation_all(op->u.aggregate.relation));
+			work = saturating_add(work, saturating_add(bindings,
+			    tuples == 0 ? 0 : bindings));
+			break;
+		}
 	}
+
+	return (work);
 }
 
 /*

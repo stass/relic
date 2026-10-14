@@ -1536,10 +1536,11 @@ layered_program(void)
  *
  * Without the switch, the chain's rounds are a few tuples each and none is
  * shared, however many threads there are.  The paths of the layered graph
- * take a round for each length, and each extends hundreds or thousands of
- * paths by LAYER_WIDTH edges, or is expected to from its driver's view or
- * the round before it, and is shared.  The relation is what the serial
- * evaluator derives.  A build without threads shares none.
+ * take a round for each length.  Their initial range estimates are below
+ * the sharing threshold; later rounds scale the previous work and share
+ * when that estimate repays it.  Some rounds and not all are shared, and
+ * the relation is what the serial evaluator derives.  A build without
+ * threads shares none.
  */
 static void
 rounds_are_shared_when_they_repay_it(void)
@@ -1607,9 +1608,9 @@ rounds_are_shared_when_they_repay_it(void)
 		    LAYERED_PATHS, stats.tuples - LAYERED_EDGES);
 		if (threads_available) {
 			checkf(stats.parallel_rounds > 0 &&
-			    stats.parallel_rounds <= stats.iterations,
+			    stats.parallel_rounds < stats.iterations,
 			    SCENARIO_SHARED, "some of %" PRIu64 " rounds are "
-			    "shared, not %" PRIu64,
+			    "shared and not all, not %" PRIu64,
 			    stats.iterations, stats.parallel_rounds);
 			check(ctx->pool != NULL && ctx->pool->thread_tasks > 0,
 			    SCENARIO_SHARED, "the pool's threads run some of "

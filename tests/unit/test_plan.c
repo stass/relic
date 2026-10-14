@@ -48,7 +48,6 @@
 #define	SCENARIO_WRITTEN	"a textual variant keeps its written order"
 #define	SCENARIO_DELTA_REFUSED	"a delta literal must be a member literal"
 #define	SCENARIO_DRAFT		"a draft names its indexes and builds none"
-#define	SCENARIO_DRIVER		"a plan's driver is its first read after tests"
 #define	SCENARIO_DISTINCT	"a plan keeping every binding derives distinct rows"
 #define	SCENARIO_EMIT_TARGET	"the EMIT writes the relation it is given"
 #define	SCENARIO_ESTIMATE	"the smaller estimate goes first"
@@ -217,7 +216,6 @@ static void	 nested_expression(char *text, size_t size, const char *open,
 static void	 each_operation_builds_its_strings_above_a_base(void);
 static void	 a_fold_in_place_reads_its_key_columns(void);
 static void	 a_draft_names_its_indexes_and_builds_none(void);
-static void	 a_plans_driver_is_its_first_read_after_tests(void);
 static const relic_relation_t *draft_relation(const relic_plan_draft_t *draft,
 		    size_t op);
 static bool	 accesses_are(const relic_plan_draft_t *draft,
@@ -3515,56 +3513,6 @@ a_draft_names_its_indexes_and_builds_none(void)
 	fixture_release(&fixture);
 }
 
-/*
- * A plan's driver is its first SCAN or LOOKUP when only tests come before
- * it, and a plan has none when an assignment, a fold or its EMIT comes
- * first, or when it has no operation; each kind is asked of a plan made of
- * kinds alone, which is all relic_plan_driver() reads.
- */
-static void
-a_plans_driver_is_its_first_read_after_tests(void)
-{
-	static const struct {
-		enum relic_op_kind	kinds[4];
-		size_t			count;
-		size_t			driver;
-	} cases[] = {
-		{ { RELIC_OP_SCAN, RELIC_OP_EMIT }, 2, 0 },
-		{ { RELIC_OP_LOOKUP, RELIC_OP_SCAN, RELIC_OP_EMIT }, 3, 0 },
-		{ { RELIC_OP_MEMBER, RELIC_OP_EXISTS, RELIC_OP_LOOKUP,
-		    RELIC_OP_EMIT }, 4, 2 },
-		{ { RELIC_OP_ANTI_MEMBER, RELIC_OP_FILTER, RELIC_OP_SCAN,
-		    RELIC_OP_EMIT }, 4, 2 },
-		{ { RELIC_OP_FILTER, RELIC_OP_ASSIGN, RELIC_OP_SCAN,
-		    RELIC_OP_EMIT }, 4, RELIC_PLAN_NO_DRIVER },
-		{ { RELIC_OP_AGGREGATE, RELIC_OP_SCAN, RELIC_OP_EMIT }, 3,
-		    RELIC_PLAN_NO_DRIVER },
-		{ { RELIC_OP_EMIT }, 1, RELIC_PLAN_NO_DRIVER },
-		{ { RELIC_OP_MEMBER, RELIC_OP_EXISTS }, 2,
-		    RELIC_PLAN_NO_DRIVER },
-		{ { RELIC_OP_SCAN }, 0, RELIC_PLAN_NO_DRIVER },
-	};
-	relic_op_t ops[4];
-	relic_plan_t plan;
-	size_t driver;
-	size_t i;
-	size_t k;
-
-	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-		bzero(ops, sizeof(ops));
-		for (k = 0; k < cases[i].count; k++)
-			ops[k].kind = cases[i].kinds[k];
-		bzero(&plan, sizeof(plan));
-		plan.ops = ops;
-		plan.op_count = cases[i].count;
-
-		driver = relic_plan_driver(&plan);
-		checkf(driver == cases[i].driver, SCENARIO_DRIVER, "case %zu "
-		    "should be driven at %zu, not %zu", i, cases[i].driver,
-		    driver);
-	}
-}
-
 int
 main(void)
 {
@@ -3602,7 +3550,6 @@ main(void)
 	a_program_holds_the_stack_its_shape_needs();
 	each_operation_builds_its_strings_above_a_base();
 	a_draft_names_its_indexes_and_builds_none();
-	a_plans_driver_is_its_first_read_after_tests();
 
 	return (check_summary("test_plan"));
 }

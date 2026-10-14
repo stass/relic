@@ -1052,7 +1052,12 @@ relation, the bytes they and the values occupy, and the distinct symbols,
 strings and integers interned.
 .Fa parallel_rounds
 counts the rounds of evaluation whose work was shared among more than one
-thread, and is the one counter that depends on the number of threads.
+thread, and is the one counter that depends on the number of threads
+after a successful evaluation.
+Failed-evaluation counters and statistics read inside callbacks can differ
+with the thread count and collection point.
+A shared round reports notes after merging; an interrupt from a note
+callback fails evaluation without replaying that round.
 .Fa derivations
 also counts the facts copied into the relation of a predicate rules
 derive, not the facts of a predicate no rule derives,
