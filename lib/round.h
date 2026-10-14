@@ -84,8 +84,9 @@ struct relic_insert_history {
  * `insertions` the record of what the item inserted, where they are kept,
  * and NULL otherwise.  `target` is the position among the round's
  * targets of the relation the item's tuples go into, which for a plan is
- * the relation its EMIT names.  `gained` is set once the item's turn has
- * inserted a tuple its target did not hold, whichever way the round ran.
+ * the relation the caller names for those tuples.  `gained` is set once
+ * the item's turn has inserted a tuple its target did not hold, whichever
+ * way the round ran.
  */
 struct relic_round_item {
 	const relic_plan_t	*plan;

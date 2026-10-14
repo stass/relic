@@ -35,7 +35,7 @@
  *
  * The executor never inserts.  It fills the batch and returns when the batch
  * is full, having saved where it was, and the caller decides where the
- * batch goes -- inserted into the relation the EMIT names, delivered to a
+ * batch goes -- inserted into the relation the caller names, delivered to a
  * caller as rows, or kept aside -- and empties it before resuming.  So one
  * executor serves every way a plan's derivations are used.  It fails only by
  * recording that it did: an expression whose result is not defined, and a

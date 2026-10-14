@@ -527,11 +527,11 @@ saturated by unrelated work, and its measurement is outstanding.
 
 Still to do, in order: the default-enablement blocker, which waits on
 the p620 revalidation of serial gain, parallel time and bounded memory;
-stored-source parallel waves; `EMIT` carrying an output schema rather
-than a relation handle,
-as the design requires -- a reduced producer's `EMIT` still names the
-source's empty relation, kept unread only by the planner's row-read
-guard (`relic_reduction_confirm_rows()`); and reducing query-owned group
+stored-source parallel waves; creating a source's derived relation only
+once it is selected to materialize -- `plan_members()` resolves every
+member through `relic_relation_written()` while the source is still
+promised, so a reduced producer leaves an empty relation that
+`relic_relation_read()` refuses; and reducing query-owned group
 rules, whose sources the inventory blocks. Query-owned folds also choose
 no stored summary of their own: `plan_query()` prepares the query's
 plans without drafting them, and after a materialization the scope that

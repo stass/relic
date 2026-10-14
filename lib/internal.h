@@ -1386,9 +1386,9 @@ int	 relic_stratify(relic_t *ctx);
  * lib/plan.c
  *
  * Plan one rule's ordinary plan into `arena`, creating the relations it
- * reads and the indexes its lookups read.  The plan's EMIT writes into
- * `target`, which the caller names -- the relation of the head's predicate,
- * or a query's answer -- and whose arity must be the rule's head arity.
+ * reads and the indexes its lookups read.  The caller passes `target` --
+ * the relation of the head's predicate, or a query's answer -- so the head
+ * arity can be checked against it.  The plan does not retain `target`.
  * `incomplete`, indexed by predicate identifier minus one, marks the
  * relations still being derived, whose size the planner assumes rather than
  * measures; NULL marks none.  Returns 0, or -1 with a diagnostic reported:

@@ -66,6 +66,14 @@ are sorted in `docs/todo-parallel.md`.
 
 ## Engine
 
+**A reduced source's derived relation is created before it is stored.**
+[Medium, component: `lib/eval.c`] `plan_members()` resolves every component
+member through `relic_relation_written()` while a source is still promised.
+A producer the certificate admits never writes that relation, and
+`relic_relation_read()` refuses it, so no plan answers from the empty
+store. The relation should be created only when the source is selected to
+materialize.
+
 **A table's growth hashes every tuple again.** [Low, component:
 `lib/util.c`, `lib/relation.c`] `relic_idtab_complete_growth()` rehashes
 each entry through a callback that reads the tuple or key it names and

@@ -19,9 +19,9 @@
  *
  * The executor (lib/exec.c) runs one plan in the evaluation's scratch and
  * returns each time it has filled a batch of head tuples.  The evaluation
- * takes the batch -- inserting it into the relation the plan's EMIT names,
- * or delivering it to a caller as rows -- and lets the executor go on, until
- * the plan has derived everything it will.
+ * takes the batch -- inserting it into the relation the caller names for
+ * the plan, or delivering it to a caller as rows -- and lets the executor
+ * go on, until the plan has derived everything it will.
  *
  * A program is evaluated one strongly connected component of its dependency
  * graph at a time, in the order the program's schedule gives: by stratum, and
@@ -143,14 +143,14 @@ struct relic_row_sink {
 };
 
 /*
- * Where a running plan's EMIT sends the head tuples it derives.  They have
- * the arity of `relation`, the relation the EMIT names, and are inserted
- * into it; or, when `rows` has a callback, each is delivered to it as a row
- * instead, and the relation is never written.  Only a query's rule is ever
- * given rows, and only when query_streams() admits its plan.  With
- * `reducer`, the tuples are reduced into it instead, and the relation,
- * the source of the reduction, is still never written: only a source's
- * producer is given one, by reduce_source().
+ * Where a running plan's EMIT sends the head tuples it derives.  The plan
+ * does not name a relation.  The tuples have the arity of `relation`,
+ * which this target holds, and are inserted into it; or, when `rows` has
+ * a callback, each is delivered to it as a row instead, and the relation
+ * is never written.  Only a query's rule is ever given rows, and only when
+ * query_streams() admits its plan.  With `reducer`, the tuples are reduced
+ * into it instead, and the relation, the source of the reduction, is never
+ * written: only a source's producer is given one, by reduce_source().
  */
 struct relic_emit_target {
 	relic_relation_t	*relation;
@@ -164,9 +164,9 @@ struct relic_emit_target {
  * `rule` is what the plan was built from, kept so that the plan can be
  * explained, its head found among the component's members, and a note about
  * one of its comparisons attributed to it.  `target` is where its EMIT's
- * tuples go: the relation the EMIT names, held here writable where the plan
- * holds it read-only, unless the plan is a query's that delivers its rows to
- * the caller.  A running plan is only read while it runs; the executor's
+ * tuples go.  The plan does not name that relation; the target holds it,
+ * writable, unless the plan is a query's that delivers its rows to the
+ * caller.  A running plan is only read while it runs; the executor's
  * state is the evaluation's scratch.  `history` is what the plan did the
  * last time it ran, from which a round estimates whether it is worth
  * sharing among threads, and `insertions` is where what its runs inserted

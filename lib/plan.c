@@ -2352,17 +2352,17 @@ planning_status(relic_t *ctx, relic_arena_t *arena, int status)
  * reported: memory or the memory limit refused an index or a statistic, or
  * the planner broke one of a plan's invariants, which is an internal error.
  *
- * The EMIT writes into `target`, whose arity must be the rule's head arity.
- * `incomplete`, when not NULL, is indexed by
- * predicate identifier minus one and marks the relations still being
- * derived; every other relation is measured as it stands.
+ * The caller passes `target` so the head arity can be checked against it.
+ * The plan does not retain `target`.  `incomplete`, when not NULL, is
+ * indexed by predicate identifier minus one and marks the relations still
+ * being derived; every other relation is measured as it stands.
  *
  * The plan and everything it points at except its relations are allocated
  * from `arena`, and live as long as the caller keeps it.  The relations the
  * body reads, and the indexes its lookups read, are created here if they do
  * not yet exist; they belong to the context, which is what lets a plan hold
- * them.  The target belongs to the caller, who keeps it for as long as the
- * plan.
+ * them.  The caller keeps `target` and pairs it with the plan when the plan
+ * runs.
  */
 int
 relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
