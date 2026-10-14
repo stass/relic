@@ -137,6 +137,24 @@ a relation unpolled. Each is linear in the groups or rows, so a large
 table delays an interrupt by that much. Bound them as the row walk is
 bounded, or poll inside them, and test an interrupt landing in each.
 
+**Ordering reduced groups can take quadratic work.** [Medium, component:
+`lib/reduce.c`, `fill_summary()`] Finalization insertion-sorts every group
+by its first source occurrence. Parallel partials drained in several waves
+can insert later slices' groups before earlier slices' remaining groups,
+so many distinct keys cause quadratic shifts; the inner shift loop also
+does not poll for interruption. Use a bounded-work sort and cover
+interleaved partial drains with many distinct keys and interruption.
+
+**Reduction workers bypass the frozen-store interface.** [Medium,
+component: `lib/eval.c`, `lib/reduce.c`, `lib/reduce.h`] `advance_lane()`
+passes a mutable context to `relic_reducer_take()`, compiled with the full
+internal interface. Worker-safe accounting and diagnostic suppression
+depend on the reducer's finite budget and report flag, rather than the
+compiler boundary used by the executor and ordinary tasks. Expose private
+partial updates through the frozen interface, with explicit round
+accounting and caller-owned failure reporting; keep publication and
+context mutation on the coordinator.
+
 ## Benchmarks
 
 **Validate a build policy against code-placement regressions.** [Medium,
