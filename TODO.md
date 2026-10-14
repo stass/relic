@@ -22,8 +22,8 @@ of which `contrib/` holds only the homebrew formula, so
 **Select small performance follow-ups.** [Medium, component:
 `bench/compare/`, `lib/eval.c`, `lib/import.c`, `lib/merge.c`]
 Choose whether to release expired worker screens for better memory-limit
-admission and use existing tags for faster derived membership after the
-bounded cross-host checks. The
+admission and use existing tags for faster derived membership, with the
+measured additional storage and remaining adoption checks explicit. The
 [performance plan](docs/todo-benchmark-performance.md) separates measured
 benefits from memory costs and noisy timings. Re-evaluate driver slicing's
 benefit relative to its reach before expanding it; the

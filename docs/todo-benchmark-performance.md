@@ -311,9 +311,18 @@ background activity and substantial p620 contention limit release claims.
   and chain closure improve about 19%/14% serially and 9%/11% at sixteen
   workers, with 8/16 MiB more final storage. An equal-length executable
   control preserves the cyclic gain and leaves serial import near neutral.
-  All three sanitizer suites pass. Complete the p620 replication before
-  selecting the storage tradeoff; the measurements are of the isolated
-  change, not a combination with screen release.
+  All three sanitizer suites pass. The
+  [p620 replica](../bench/compare/recorded/freebsd-5995wx/membership-growth/README.md)
+  passes focused checks, twelve exact full-query cases and four import
+  output/count controls. Its eighty
+  timing pairs finish under severe changing contention; every sample is
+  retained, and the cohort's completion does not make it a release
+  measurement. Paired medians improve cyclic closure about 13% serially
+  and 11% at sixteen workers, and chain closure about 6%/7%, with lower
+  user CPU and the same storage tradeoff as M3. Prefer this candidate
+  to a new container; default adoption still needs its explicit memory
+  tradeoff and the design's remaining validation. These measurements are
+  of the isolated change, not a combination with screen release.
 * **Stop the cached-hash/grouped-container implementation path.** Probe
   counts show useful comparison filtering from existing tags. Sampled
   growth includes scanning and placement that a hash cache would keep;
