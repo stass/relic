@@ -301,14 +301,13 @@ struct relic_config {
  * derives except as they stood when it began, which is every round but a
  * pass of the naive fixed point: what its rules derive is gathered while
  * they run and inserted when the last has finished, in the order it would
- * have been inserted as it was derived, and the scan each rule starts from
- * is cut into pieces run one after another.  That is how a round runs on
- * several threads, and the switch runs every round that way however little
- * work it holds, so that the way is exercised by every program.  It reads
- * every table an import reads a window of records at a time too, as a large
- * table is read on several threads, whatever the table's size and the
- * number of threads.  The relations, the values and every count of work
- * come out as they do without it.
+ * have been inserted as it was derived, and each rule's eligible first scan
+ * or lookup is cut into pieces run one after another.  That is how a round
+ * runs on several threads.  The switch uses that path however little work
+ * a round holds, so every program exercises it.  It also reads every
+ * eligible regular-file table a window of records at a time, whatever the
+ * table's size and number of threads.  The relations, the values and every
+ * count of work come out as they do without it.
  */
 #define	RELIC_F_PARALLEL_ALWAYS	0x0040u
 
@@ -348,11 +347,11 @@ struct relic_config {
  * Import every table a field at a time, typing and interning each field
  * and staging each record as it is read, whatever the number of threads
  * and even with RELIC_F_PARALLEL_ALWAYS, as a small table or one read on
- * fewer than eight threads always is.  A table is otherwise read a window
- * of records at a time, each window's fields decoded and its values and
- * records checked before any is interned or staged.  The facts, the values
- * and the identifiers they are given are the same, and so is a failed
- * import's message and what it leaves interned.
+ * fewer than eight threads normally is.  An eligible regular-file table is
+ * otherwise read a window of records at a time, with each window decoded
+ * and its values and records checked before any is interned or staged.
+ * The facts, the values and the identifiers they are given are the same,
+ * and so is a failed import's message and what it leaves interned.
  */
 #define	RELIC_F_NO_BATCH_IMPORT	0x0400u
 

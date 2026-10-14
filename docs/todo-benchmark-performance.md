@@ -13,7 +13,14 @@ Related: [open work](../TODO.md), [comparison tables](../BENCHMARKS.md),
 [parallel work](todo-parallel.md), [testing](../specs/design-testing.md).
 The [retained-baseline measurements](../bench/compare/recorded/retained-baseline.md)
 record the simplification's throughput tradeoff and the remaining merge
-workspace, with raw samples from both hosts.
+workspace, with raw samples from both hosts. The
+[complexity audit](../bench/compare/recorded/complexity/README.md) compares
+the retained engine with the code before this plan: noncomment library
+lines grow 17.8%, with bulk loading and driver slicing accounting for
+about 69% of the physical-line increase. Average function branching is
+similar; coordination and ownership are the larger maintenance cost.
+The [focused investigation results](../bench/compare/recorded/focused-investigations.md)
+connect the isolated changes, ownership measurements and their limits.
 
 ## Decisions from the implementation work
 
@@ -23,7 +30,7 @@ workspace, with raw samples from both hosts.
 | 2. Pending-value compaction | Keep. | Workspace follows referenced local values instead of repeated tuple columns, with explicit ownership and no second interner. |
 | 3. Bound query factoring | Keep its narrow certificate. | Removes orders of magnitude of redundant derivations and memory on eligible recursion. |
 | 4. Bulk loading | Keep transferable builders, bounded batching, regular-file selection, framing overlap and input limits. Use one symbol index as the retained baseline. | Builders, batching and framing have measured gains. The simpler composition regresses parallel import throughput; isolate that loss before reconsidering symbol striping, separately from grouped reduction. |
-| 5. Indexed driver slicing | Keep the bounded first-driver extension; finish validation before expanding it. | Shares useful work without abandoning indexed selection or adding per-match storage. |
+| 5. Indexed driver slicing | Re-evaluate the retained extension's benefit before expanding it or completing a broader feature queue. | Its modest measured whole-command gain reaches fifteen library files and the ordinary serial executor; the benefit has a narrower evidence base than stages 1-3. |
 | 6. General grouped reduction | Withdraw from the production plan. Keep ordinary fold semantics, the stored-count shortcut and a separate EMIT schema. | The reduction framework adds source-removal state, summary selection, value ownership and a separate parallel lifecycle across the engine. Its measured gains do not justify that scope. |
 | Candidate routing and index layouts | Investigations, not scheduled implementations. | Establish the remaining bottleneck and compare smaller changes before accepting another permanent representation or execution protocol. |
 
@@ -171,39 +178,63 @@ workers from 1.67 to 0.87 s and M3 sixteen-worker import from 0.69 to
 from worker-read cache lines and classify counters local until publication.
 These changes remove observed serialization and false sharing.
 
-The retained implementation uses one keyed symbol index. Earlier p620
-measurements of symbol-index striping showed a sixteen-worker scale-10
-`facts-join` gain from 1.04 to 0.95 s, while one-thread time grew from 1.57
-to 1.62 s. Scalar inputs paid 1-6%; peak RSS grew 16-26 MB on FreeBSD.
-The striped index adds wide byte hashes, stripe lists, deferred growth
-and a parallel publication lifecycle to ordinary interning.
+The retained implementation uses one keyed symbol index. The
+[M3 isolation](../bench/compare/recorded/m3-max/import-isolation/README.md)
+and [p620 isolation](../bench/compare/recorded/freebsd-5995wx/import-isolation/README.md)
+each compare twelve interleaved triples per cell: the pre-reduction
+engine, that engine with only the symbol package removed, and the
+retained engine. All 36 exact cases and 432 timed commands pass per host.
+Removing the package raises sixteen-worker files/facts import paired
+medians by 31.3%/23.6% on M3 and 18.8%/18.9% on the contended p620.
+Complete commands pay less because import is part of their work.
+The bridge to the retained engine is small on the decisive cases.
 
-The ten-pair retained-baseline comparison shows a larger cost on M3:
-sixteen-worker files/facts imports have paired wall ratios 1.310/1.253,
-and complete commands 1.170/1.113. Every pair loses in those four cells.
-The contended p620 cohort points in the same direction. Default complete
-commands are broadly stable; RSS changes are not uniformly better.
-This is a measured complexity/throughput tradeoff, not a free simplification.
-Before choosing another publication design, isolate this loss and compare
-its cost with the archived striped implementation. Do not restore the
-grouped-reduction framework to address an import result, or add allocation
-bundling and scheduling machinery without their own evidence.
+This establishes a real tradeoff independent of grouped reduction.
+The package adds about 599 net library lines for wide byte hashes, stripe
+lists, deferred growth and parallel publication. It also includes a
+scalar in-room reservation shortcut, so the comparison does not isolate
+striping alone. Scalar differences are small or noisy in these cohorts;
+the earlier blanket scalar-regression claim is not a sufficient rejection
+criterion. The
+[isolated scalar reservation control](../bench/compare/recorded/m3-max/symbol-room/README.md)
+has favorable M3
+paired medians of about 1.5% on files import and 2.2% on facts import,
+with broad ranges and a near-neutral integer control. That is too small
+and noisy to select a default optimization from this cohort. Keep the
+whole package's substantial parallel benefit and maintenance cost visible
+when deciding on symbol publication; the shortcut does not settle it.
 
 Remaining work is validation of the retained composition: serial/default
 throughput, large regular files, small imports, malformed or stalled
 streams, record/window limits, resumption, allocation failure and populated
-store appends. The 120 MB scale-10 peak target is not met; attribute live
-payload, slack and allocator retention before selecting another layout.
+store appends. The
+[import ownership study](../bench/compare/recorded/m3-max/import-memory/README.md)
+finds 142.9 MB of occupied representation and metadata, plus 63.4 MB of
+capacity slack, at the scalar scale-10 requested peak. Parallel `facts10`
+holds about 42.4 MB of input/window/map capacity at its own published
+requested peak. Small lifetime
+cleanup cannot plausibly deliver the former 120 MB target with this
+representation. Requested capacity is not RSS, so these observations are
+not a mathematical lower bound on residency. Remove that target from the
+implementation queue; any smaller representation needs its own case.
+
+Ordinary destruction returns malloc in-use bytes to the process baseline
+in all 48 diagnostic runs. RSS and physical footprint remain high through
+the separate one-second observations, with no effect from pressure relief.
+This establishes neither a leak nor an exact allocator-retention amount.
+Do not add an allocator workaround or another delay experiment on that
+evidence.
 See [bulk loading](../specs/design-bulk-load.md).
 
 ## 5. Partition indexed driving cursors
 
 [Medium, components: `lib/slice.c`, `lib/exec.c`, `lib/round.c`]
 
-Keep slices of the first scan or lookup after a once-executed binding-free
-prefix. Lookup preparation uses two bounded forward walks, no match array
-and no new insert-time metadata. It reuses the existing executor, work
-history, pool and merge. This is an extension of the ordinary round path.
+The retained extension slices the first scan or lookup after a
+once-executed binding-free prefix. Lookup preparation uses two bounded
+forward walks, no match array and no new insert-time metadata. It reuses
+the existing executor, work history, pool and merge, but introduces
+prefix/slice state and driver-visit accounting into ordinary execution too.
 
 Seven interleaved p620 runs at scale 8 and sixteen workers improved the
 complete `facts-join` command from 1.05 to 1.00 s. Loading was about
@@ -212,11 +243,16 @@ than the whole-command percentage. Peak RSS grew by roughly 17 MB.
 Serial instruction counts grew by at most 0.83% on the measured controls;
 most observed cycle variation followed code layout.
 
-Keep the regression requiring the indexed plan and a successful shared
-round. Before expanding slicing, complete the independent visit-list,
-interrupt, skew, allocation-failure and declined-preparation checks in
-[parallel work](todo-parallel.md#driver-slicing-is-not-validated-beyond-its-target),
-and measure M3 as well as p620. Tune preparation costs from those results.
+Its 1,367 net physical library lines are the weakest demonstrated benefit
+relative to scope among the retained stages. Keep the regression requiring
+the indexed plan and a successful shared round. Before expanding slicing,
+compare its complete-command and evaluation benefit with the scan-only
+reference on the target and relevant controls; retain necessary fixes if
+the extension is narrowed. The independent visit-list, interrupt, skew,
+allocation-failure and declined-preparation checks in
+[parallel work](todo-parallel.md#driver-slicing-is-not-validated-beyond-its-target)
+remain validation gaps if the extension stays, along with an M3 comparison.
+Tune preparation costs from those results.
 Do not add deeper-driver slicing, worker affinity or another scheduling
 protocol solely to raise a parallel-round count.
 
@@ -252,30 +288,45 @@ retain every experimental capability. No replacement framework is queued.
 [Medium, components: `lib/task.c`, `lib/merge.c`, `lib/relation.c`,
 `lib/util.c`, `bench/compare/`]
 
-The retained-baseline cohort completes ten interleaved pairs per cell on
-both hosts with exact answers and unchanged work/final-storage counters.
-Residual Mac activity and substantial p620 contention limit release timing
-claims. It identifies the next local experiment:
+The focused investigations identify small candidates and close the case
+for implementing larger mechanisms on the measured workloads. Mac
+background activity and substantial p620 contention limit release claims.
 
-* **Candidate workspace first.** On retained scale-2 closure, round 3
-  holds 16.16 million worker copies for 1.15 million unique tuples.
-  Its sampled accounted peak is 1.324 GB: 893 MB of candidates and
-  362 MB of candidate-finding scratch dominate. Worker screening tables
-  account for 167.8 MB and are unused after gathering. Test releasing
-  those tables at that boundary, preserving candidate rows and ordinary
-  serial replay. Their capacity bounds the possible accounted reduction
-  at 12.7%; RSS savings remain unmeasured. Releasing all candidates only
-  after staging misses this peak. Compare time, accounted peaks and RSS
-  on duplicate-heavy and low-duplicate controls, including pending values,
-  allocation refusal and interrupts, before accepting the change.
-* **Membership and growth remain diagnostic work.** Separate hashing, successful/failed probes,
-  secondary maintenance and growth rehashing. Compare isolated compact,
-  tagged and cached-hash layouts under identical stripe and growth policies.
-  A permanent wider entry needs a complete-run gain that simpler choices
-  cannot provide; retain the compact representation when none earns its cost.
-* **Import peak memory remains diagnostic work.** Establish live ownership, capacity slack and
-  allocator retention independently. An RSS target alone does not justify
-  another persistent index representation.
+* **Release expired screens at the existing barrier.** The
+  [M3 prototype](../bench/compare/recorded/m3-max/screen-release/README.md)
+  lowers the sampled sixteen-worker charged peak from 1.324 GB to
+  1.157 GB and passes a frozen-budget regression that otherwise falls
+  back to serial execution. Process RSS falls only about 1.1%, and
+  parallel wall time is roughly flat to slightly worse. This is a local
+  admission improvement, not a large RSS or speed fix. The
+  [p620 replica](../bench/compare/recorded/freebsd-5995wx/screen-release/README.md)
+  reproduces the frozen-budget result, with no consistent speed gain and
+  mixed RSS effects. Its sixteen-worker paired wall ratio is 1.020,
+  ranging from 0.757 to 1.274 under changing load. Consider the local
+  lifetime change for its admission benefit; no routing design follows
+  from its limited process-memory effect.
+* **Prefer the existing tags to a new container.** The
+  [membership study](../bench/compare/recorded/m3-max/membership-growth/README.md)
+  changes only the constructor for fresh derived relations. M3 cyclic
+  and chain closure improve about 19%/14% serially and 9%/11% at sixteen
+  workers, with 8/16 MiB more final storage. An equal-length executable
+  control preserves the cyclic gain and leaves serial import near neutral.
+  All three sanitizer suites pass. Complete the p620 replication before
+  selecting the storage tradeoff; the measurements are of the isolated
+  change, not a combination with screen release.
+* **Stop the cached-hash/grouped-container implementation path.** Probe
+  counts show useful comparison filtering from existing tags. Sampled
+  growth includes scanning and placement that a hash cache would keep;
+  the hash callback accounts for only 4 of 4,562 main-thread samples on
+  cyclic closure and 21-23 in the short chain captures. These samples
+  do not justify another canonical storage module. High-arity workloads
+  remain unmeasured, which limits the conclusion; it does not create an
+  automatic follow-up project.
+* **Close import-memory attribution.** Keep the owned-capacity and
+  teardown evidence above. No new layout or allocator intervention is
+  selected from the RSS observations. The isolated scalar reservation
+  shortcut also adds no implementation task on its inconclusive timing
+  evidence; retain the prototype and measured limits with the import study.
 
 Experiments use isolated branches and immutable binaries. Each has a
 specific bottleneck, baseline, counterexample and rejection criterion.

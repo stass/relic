@@ -580,12 +580,9 @@ Selection follows four gates in order:
    gain unavailable from the cheaper candidates; a memory improvement
    without a useful complete-run benefit is not the locality goal.
 
-The plan's goal of at least twenty percent lower wall median than the
-best successful rival applies to the combined pipeline at the stated
-large scales. It is not a predicted contribution from membership alone.
-An intermediate gain can leave that objective open. The selection report
-states which gaps remain rather than translating a probe speedup into
-an unsupported engine lead.
+The selection report states the complete-command gains, storage costs
+and remaining gaps. A probe speedup does not establish an engine lead
+over another implementation or commit the project to a larger pipeline.
 
 Only the selected mechanism enters production. Update the canonical
 index contract, the identifier table's owner choices and the memory
@@ -597,6 +594,15 @@ requires carrying its maintenance overhead in the engine.
 
 ## Alternatives not taken
 
+* **Implementing every candidate before establishing its bottleneck.**
+  The [retained-engine study](../bench/compare/recorded/m3-max/membership-growth/README.md)
+  demonstrates useful comparison filtering with the existing linear tags.
+  Its sampled growth cost includes scanning and placement that a cached
+  hash would retain; the hash callback alone does not justify a wider
+  table on those workloads. Grouped controls and cached hashes need
+  separate evidence of a benefit beyond the existing tags. High-arity growth
+  is outside that evidence, so the conclusion is limited to the measured
+  workloads rather than a universal claim about either representation.
 * **A runtime layout chooser or per-relation adaptation.** Lookup timing,
   observed collisions and worker count would complicate deterministic
   capacity and refusal. One selected representation needs no migration,

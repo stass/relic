@@ -26,11 +26,15 @@ tuples, and merge staging and scratch add further storage. The
 finds about 14 worker copies per unique tuple in the peak round. Its
 candidate-finding barrier holds 1.324 GB of accounted storage, including
 167.8 MB of worker screening tables no longer read after gathering.
-Measure releasing those tables before merge scratch is allocated; their
-capacity is a 12.7% upper bound on that sampled accounted peak's reduction,
-not a measured RSS saving. Releasing all candidates after staging misses
-the peak. Keep allocator retention separate and compare low-duplicate
-controls before accepting a lifetime change. Global value owners, tuple owners, resumable routing waves and
+The [screen-release prototype](../bench/compare/recorded/m3-max/screen-release/README.md)
+reduces that sampled charged peak by 12.66% and admits a forced merge at
+a lower frozen budget, with ordinary replay and ownership preserved.
+M3 process RSS falls only 1.1% at sixteen workers; elapsed time gives no
+general gain. The [p620 replica](../bench/compare/recorded/freebsd-5995wx/screen-release/README.md)
+reproduces the admission result with mixed RSS and noisy timing. Consider
+it for its local admission benefit, keeping that separate from the much larger
+candidate-copy problem. Releasing all candidates after staging misses
+the peak. Global value owners, tuple owners, resumable routing waves and
 new private handle formats are not implementation commitments. A design
 must demonstrate why the measured waste cannot be removed more locally.
 The recorded scale-8 all-pairs tree peak of 109.1 GiB is another capacity

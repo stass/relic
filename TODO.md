@@ -19,20 +19,20 @@ of which `contrib/` holds only the homebrew formula, so
 `contrib/pkgsrc/devel/relic/` are to write; and the
 [release procedure](specs/design-release.md#the-release-procedure).
 
-**Measure the remaining performance gaps.** [Medium, component:
+**Select small performance follow-ups.** [Medium, component:
 `bench/compare/`, `lib/eval.c`, `lib/import.c`, `lib/merge.c`]
-Measure a local release of worker screening tables after gathering, before
-candidate-finding scratch reaches the merge's memory peak. The
-[retained-baseline evidence](bench/compare/recorded/retained-baseline.md)
-also records the parallel import cost of the retained composition; keep
-that tradeoff separate from the rejected aggregate framework.
-The [performance plan](docs/todo-benchmark-performance.md) records the
-stages kept, the aggregate and symbol-layout experiments removed, and the
-evidence required before another design is selected. Candidate workspace,
-canonical membership and import peak memory are investigations; no new
-routing or summary framework is queued. The
-[comparison matrix](bench/compare/recorded/m3-max/results.tsv) and
-[parallel work](docs/todo-parallel.md) supply controls and known gaps.
+Choose whether to release expired worker screens for better memory-limit
+admission and use existing tags for faster derived membership after the
+bounded cross-host checks. The
+[performance plan](docs/todo-benchmark-performance.md) separates measured
+benefits from memory costs and noisy timings. Re-evaluate driver slicing's
+benefit relative to its reach before expanding it; the
+[complexity audit](bench/compare/recorded/complexity/README.md) attributes
+about 69% of retained source growth to importing and slicing. Import
+ownership is measured, and neither a cached/grouped membership module,
+candidate routing nor a replacement summary framework is queued.
+Symbol publication remains a separate speed/complexity decision supported
+by the isolated import comparisons.
 
 **Parallel evaluation misses its speed-up targets.** [Medium, component:
 `lib/round.c`, `docs/todo-parallel.md`] With the pool, `tc-cyclic` should
@@ -46,26 +46,6 @@ built, and parallel loading misses its target. The causes and what to try
 are sorted in `docs/todo-parallel.md`.
 
 ## Engine
-
-**A table's growth hashes every tuple again.** [Low, component:
-`lib/util.c`, `lib/relation.c`] `relic_idtab_complete_growth()` rehashes
-each entry through a callback that reads the tuple or key it names and
-hashes it again, so a canonical index growing to two million tuples
-recomputes some four million hashes from columns scattered through storage.
-On serial `chain-closure` that is a quarter of the run,
-`relic_hash_words()` under `relic_idtab_reserve()` in a sampled profile. It
-is also most of what a deferred round's merge costs on the rounds that grow
-the canonical index, which hold `chain-closure`'s average merge at 130
-microseconds against 66 for a typical round. A slot that kept the 32-bit
-hash beside the identifier would rehash from the table alone.
-The [membership locality design](specs/design-membership-locality.md)
-includes that cached-hash candidate alongside the compact reference and
-tagged alternatives. Measure complete `chain-closure` runs and isolated
-growth against steady storage and peak memory; successful duplicate
-checks alone do not settle the tradeoff. Its
-[adoption rule](specs/design-membership-locality.md#adoption-rule)
-governs the shared experiment. Record measured rejection, if applicable,
-in the design's alternatives with the benchmark artifact.
 
 **Type tests read the type bits directly.** [Medium, component:
 `lib/exec.c`, `lib/rule.c`] Floats take tag 3 with the top bit of the index
@@ -198,16 +178,6 @@ footprint as well as resident set, before changing the policy. The memory
 limit does not count the transient either: an insertion or a round's merge
 admitted at the limit holds one array's or one table's old generation
 beside the new one while it is copied, one at a time.
-
-**Attribute the remaining import peak.** [Medium, component:
-`lib/import.c`, `lib/relation.c`, `bench/compare/facts-join`] Transferable
-builders and bounded parallel import meet the scale-10 time goal on p620
-without a striped symbol index: 1.57 s at one thread and 1.04 s at
-sixteen. The 120 MB peak target remains unmet. Measure live payload,
-capacity slack and allocator retention separately on the simplified tree
-before selecting another layout. The
-[performance plan](docs/todo-benchmark-performance.md#4-build-and-load-base-relations-in-bulk)
-records the retained gains and the rejected symbol-index tradeoff.
 
 ## Testing and CI
 
