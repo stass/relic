@@ -172,15 +172,12 @@ struct relic_op_state {
 
 /*
  * The work the executor has counted since its caller last took the counts:
- * the tuples its scans and its lookups read, each defined where
- * relic_stats_t documents the counter of the same name, and the lookups
- * its folds made in a summary (lib/reduce.h), which read no tuple and
- * relic_stats() does not report.
+ * the tuples its scans and its lookups read.  Each is defined where
+ * relic_stats_t documents the counter of the same name.
  */
 struct relic_exec_counters {
 	uint64_t	tuples_scanned;
 	uint64_t	tuples_looked_up;
-	uint64_t	summary_probes;
 };
 
 /*
@@ -192,20 +189,17 @@ relic_exec_counters_add(relic_exec_counters_t *total,
 {
 	total->tuples_scanned += more->tuples_scanned;
 	total->tuples_looked_up += more->tuples_looked_up;
-	total->summary_probes += more->summary_probes;
 }
 
 /*
  * The work plans did, in the one unit a round's estimate and a plan's
- * history are measured in: the tuples they read, the summary lookups
- * their folds made in place of reading a group's tuples, and the tuples
- * they derived.
+ * history are measured in: the tuples they read and the tuples they
+ * derived.
  */
 static inline uint64_t
 relic_exec_work(uint64_t derivations, const relic_exec_counters_t *read)
 {
-	return (derivations + read->tuples_scanned + read->tuples_looked_up +
-	    read->summary_probes);
+	return (derivations + read->tuples_scanned + read->tuples_looked_up);
 }
 
 /*
@@ -335,10 +329,7 @@ struct relic_pending {
  * bytes of each symbol or string at its offset in `bytes`, and the hash of
  * each, relic_pending_hash(), which is what the value table or the pool
  * finds it by: an integer's by its value, a symbol's or a string's by its
- * bytes.  A symbol's or a string's is the pool's wide hash, whose keyed
- * low half, relic_hash_low(), is what any other table of them is keyed by;
- * an integer's is the table's 32 bits.  relic_pending_hash() hashes one
- * value alone, reading a symbol's
+ * bytes.  relic_pending_hash() hashes one value alone, reading a symbol's
  * or a string's bytes at `bytes` plus its offset, so that a caller can
  * hash the values before it has made a batch of them.
  *
@@ -367,12 +358,12 @@ typedef struct relic_pending_batch relic_pending_batch_t;
 
 struct relic_pending_batch {
 	const relic_pending_t	*values;
-	const uint64_t		*hashes;
+	const uint32_t		*hashes;
 	const char		*bytes;
 	size_t			 count;
 };
 
-uint64_t relic_pending_hash(const relic_t *ctx, const relic_pending_t *value,
+uint32_t relic_pending_hash(const relic_t *ctx, const relic_pending_t *value,
 	    const char *bytes);
 size_t	 relic_pending_slots(size_t count);
 void	 relic_pending_find(const relic_t *ctx,

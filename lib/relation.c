@@ -2371,28 +2371,11 @@ relic_relation_written(relic_t *ctx, relic_pred_id_t pred)
  * read names -- its own, or, for a base view, the one it views.  A base
  * store is created empty on first use, so a predicate nothing states or
  * derives reads as empty.
- *
- * A source the active scope does not store is not among those relations.
- * Reading it is an internal error and creates nothing: the scope either
- * will reduce it or already has, and an empty row store would let a plan
- * answer as though the source held no row.
  */
 relic_relation_t *
 relic_relation_read(relic_t *ctx, relic_pred_id_t pred)
 {
-	const relic_reduced_source_t *source;
 	const relic_pred_t *entry;
-	char described[RELIC_PRED_TEXT_MAX];
-
-	source = relic_reduction_source(ctx, pred);
-	if (source != NULL && source->state != RELIC_SOURCE_STORED) {
-		relic_diag_internal(ctx, NULL,
-		    "a plan reads the rows of %s, which its reduction does "
-		    "not store",
-		    relic_pred_identify(ctx, pred, described,
-		    sizeof(described)));
-		return (NULL);
-	}
 
 	entry = relic_pred_of(ctx, pred);
 	if (entry != NULL && entry->derived)

@@ -3060,43 +3060,25 @@ a_fold_goes_where_its_key_is_bound(void)
 }
 
 /*
- * The access path of a fold: the relation's tuple count for a count with
- * no key, and a whole-relation walk for any other fold with none or for
- * that count under the reference strategy; the index keyed on the key
- * columns when there are local columns too; a probe when every column is
- * a key column; and a walk whatever the key under RELIC_F_NO_INDEX, as a
- * generator is scanned under it.
+ * The access path of a fold: cardinality for an unkeyed count; the index
+ * keyed on the key columns when there are local columns too; a probe when
+ * every column is a key column; and a walk whatever the key under
+ * RELIC_F_NO_INDEX, as a generator is scanned under it.
  */
 static void
 a_fold_reads_its_group_by_its_key(void)
 {
 	static const char *const keyed = "e(a, b).\ns(a).\n"
 	    "r(X, N) :- s(X), N = count { e(X, Y) }.\n";
-	static const char *const unkeyed = "e(a, b).\n"
-	    "r(N) :- N = count { e(X, Y) }.\n";
 	const relic_op_aggregate_t *fold;
 	fixture_t fixture;
 
-	fold = fold_planned(&fixture, unkeyed, 0, 0);
+	fold = fold_planned(&fixture, "e(a, b).\n"
+	    "r(N) :- N = count { e(X, Y) }.\n", 0, 0);
 	if (fold != NULL)
-		check(fold->access == RELIC_FOLD_CARDINALITY &&
-		    fold->key_count == 0, SCENARIO_FOLD_ACCESS,
-		    "a count with no key reads the tuple count");
-	fixture_release(&fixture);
-
-	fold = fold_planned(&fixture, unkeyed, RELIC_F_NO_GROUP_REDUCTION, 0);
-	if (fold != NULL)
-		check(fold->access == RELIC_FOLD_SCAN && fold->key_count == 0,
-		    SCENARIO_FOLD_ACCESS, "the reference strategy walks the "
-		    "relation for a count with no key");
-	fixture_release(&fixture);
-
-	fold = fold_planned(&fixture, "e(1, 2).\n"
-	    "r(N) :- N = sum(Y) { e(X, Y) }.\n", 0, 0);
-	if (fold != NULL)
-		check(fold->access == RELIC_FOLD_SCAN && fold->key_count == 0,
-		    SCENARIO_FOLD_ACCESS, "a sum with no key walks the "
-		    "relation");
+		check(fold->access == RELIC_FOLD_CARDINALITY && fold->key_count == 0,
+		    SCENARIO_FOLD_ACCESS, "an unkeyed count reads the tuple "
+		    "count");
 	fixture_release(&fixture);
 
 	fold = fold_planned(&fixture, keyed, 0, 1);

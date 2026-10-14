@@ -955,8 +955,8 @@ interning_a_symbol_survives_a_failed_allocation(void)
 }
 
 /*
- * A new symbol the pool already has room for -- here a second symbol in
- * the first's stripe -- is copied and placed without growing anything, so
+ * A new symbol the pool already has room for is copied and placed
+ * without growing anything, so
  * of all the requests it makes only its copy's in the arena can be
  * refused.  Refused there, it must add nothing and leave the account as it
  * stands, and the retry must number it next.
@@ -969,8 +969,6 @@ a_symbol_placed_in_room_survives_a_refused_copy(void)
 	size_t requested;
 	uint32_t first;
 	uint32_t second;
-	unsigned int n;
-	unsigned int stripe;
 	int status;
 
 	ctx = relic_create();
@@ -980,15 +978,7 @@ a_symbol_placed_in_room_survives_a_refused_copy(void)
 	}
 	check(relic_symbol_intern(ctx, "alpha", 5, &first) == 0,
 	    SCENARIO_SYMBOL, "the first symbol should be interned");
-	stripe = relic_hash_stripe(relic_symbol_hash(ctx, "alpha", 5));
-	for (n = 0; n < 1000; n++) {
-		snprintf(text, sizeof(text), "s%u", n);
-		if (relic_hash_stripe(relic_symbol_hash(ctx, text,
-		    strlen(text))) == stripe)
-			break;
-	}
-	check(n < 1000, SCENARIO_SYMBOL,
-	    "a second symbol should share the first's stripe");
+	strlcpy(text, "beta", sizeof(text));
 
 	requested = relic_atomic_size_load(&bytes_requested);
 	refusing = REFUSE_ARENA;
@@ -1841,19 +1831,15 @@ an_import_on_threads_refused_once_reads_on_or_fails(void)
 		serve_every_allocation();
 
 		checkf(pool_settled(ctx), SCENARIO_IMPORT_ONCE,
-		    "the symbol pool should be counted as it stands, with no "
-		    "table prepared, with allocation %ld refused", budget);
+		    "the symbol pool should be counted as it stands, "
+		    "with allocation %ld refused", budget);
 		if (budget < 0) {
 			check(status == 0, SCENARIO_IMPORT_ONCE,
 			    "an import on threads never refused should "
 			    "succeed");
 			symbols = relic_symbol_count(ctx);
 			sweep = allocations_made() - before;
-			check(!THREADS_AVAILABLE ||
-			    ctx->counters.symbols_deferred > 0,
-			    SCENARIO_IMPORT_ONCE, "the sweep should cover a "
-			    "window whose new symbols grow the pool's stripes "
-			    "in the parts placing them");
+
 		} else if (status != 0) {
 			checkf(errors_reported == 1 && out_of_memory(ctx) &&
 			    relic_base_total(ctx) == 0, SCENARIO_IMPORT_ONCE,
@@ -1887,21 +1873,10 @@ an_import_on_threads_refused_once_reads_on_or_fails(void)
 	    "the sweep should refuse an allocation on a thread of the pool");
 }
 
-/*
- * Whether the account counts the symbol pool as it stands and no stripe
- * of its index holds a table prepared to grow into, as every reservation
- * leaves it, failed or not.
- */
+/* Whether the account counts the symbol pool as it stands. */
 static bool
 pool_settled(const relic_t *ctx)
 {
-	size_t s;
-
-	for (s = 0; s < RELIC_STRIPES; s++) {
-		if (ctx->symbols.grown[s].capacity != 0)
-			return (false);
-	}
-
 	return (ctx->account.pool_bytes == relic_symbol_pool_bytes(ctx));
 }
 

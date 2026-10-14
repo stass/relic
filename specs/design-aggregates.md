@@ -12,11 +12,6 @@ groups, mixed types, and why a sum's overflow depends only on the group's
 rows -- is stated in [language.md](language.md#aggregates) and not repeated
 here.
 
-[Direct grouped reduction](design-group-reduction.md) defines the physical
-alternative that consumes a certified distinct producer into group state,
-and summaries that reuse folds over complete stored rows. Compilation and
-the logical group schema described here apply to both physical forms.
-
 Related: [language](language.md#aggregates),
 [safety](language.md#safety), [stratification](language.md#stratification),
 [architecture](architecture.md#aggregates),
@@ -66,15 +61,14 @@ no group rule; the fold reads the atom's relation directly
 
 ## Invariants
 
-* **The logical group is a set, by construction.** Under a binding of the
-  shared columns, the source's tuples with that key are exactly the rows
-  the body denotes, with no column for `_`. A stored relation supplies
-  distinctness; direct reduction requires a proof that each emitted source
-  row is distinct before replacing that store with aggregate state.
-* **A fold reads a complete source.** The edge from a reader to the
+* **The group relation is the group, by construction.** Under any binding
+  of the shared columns, its tuples with that key are exactly the rows the
+  body denotes: distinct because a relation is a set, with no column for
+  `_` because a wildcard has no slot. The fold needs nothing else.
+* **A fold reads a complete relation.** The edge from a reader to the
   predicate it folds is strict, like a negative edge, so the relation is
-  finished before any rule folding it runs, and its rows or immutable
-  summary never change while folded.
+  finished before any rule folding it runs, and it never changes while
+  folded.
 * **A statement is published whole or not at all.** Its group rules and its
   outer rule are appended together after every check passes, or none are.
 * **Slot c is column c.** In the body an aggregate literal carries, slot
@@ -87,8 +81,7 @@ no group rule; the fold reads the atom's relation directly
   ([The exact sum](#the-exact-sum)). So nothing about the answer or the
   failure depends on the order a strategy inserted the group's tuples.
 * **A fold writes only executor-local state.** It reads a complete relation
-  or summary and binds a frame slot; it interns nothing and allocates
-  nothing. Fallible summary construction is a separate scheduled action.
+  and binds a frame slot; it interns nothing and allocates nothing.
 
 ## The group rule
 
@@ -335,30 +328,6 @@ that continues the cycle are reported as one note pointing inside the
 braces. How the closing edge and the cycle are chosen is
 [design-stratify.md](design-stratify.md)'s.
 
-## Physical reductions and summaries
-
-An eligible producer can supply an immutable summary instead of storing
-its source rows, under the distinctness, consumer and lifetime proofs in
-[direct grouped reduction](design-group-reduction.md#eligibility-and-consumer-ownership).
-Ordinary row readers retain materialization; an exact projection of the
-grouping keys can be supplied from the summary's ordered keys. Named
-source removal belongs to a partial query run and never to a current
-whole-program fixed point.
-
-A retained complete relation can also have selected group summaries built
-once for repeated folds. These summaries are run-scoped, not insert-time
-index metadata or persistent caches. Both forms preserve the logical
-dependency graph and expose a separate summary access to the planner.
-The ordinary materialized path remains the reference under
-`RELIC_F_NO_GROUP_REDUCTION` / `-X no-group-reduction`.
-
-Summary construction does not report aggregate outcomes. A fold looks up
-its completed state at the same outer-plan position where it would walk
-rows, then binds, compares, rejects or reports in the ordinary way. This
-keeps unrequested overflow and invalid-type groups silent, and preserves
-the empty-group defaults. Sum invalidity takes precedence over its final
-range check.
-
 ## Planning
 
 An aggregate literal becomes one **AGGREGATE** operation. It is placed with
@@ -373,16 +342,15 @@ derives. Earliest is not always cheapest -- a fold read only by the head is
 done before later literals have rejected bindings -- and why the planner
 does not try to place it later is in [design-planning.md](design-planning.md).
 
-The source folded is complete, so the operation reads the whole logical
-source, never a delta: a fold has no semi-naive variant of its own, and in
-another literal's delta variant it reads the same source every round.
-A summary access probes its immutable key table and finalizes that group's
-state. An unkeyed count over a stored source can read the tuple count
-directly. Under the row-fold reference, rows are reached in one of three
-ways, chosen by the planner and
+The relation folded is complete, so the operation reads it through the
+whole-relation view, never through a delta: a fold has no semi-naive
+variant of its own, and in another literal's delta variant it folds the same
+relation every round, as an anti-member tests the same relation. The rows
+of a group are reached through an access chosen by the planner and
 written into the operation so the executor has no branch on the strategy:
 
-* **no key column**: walk the whole relation, which is then the group;
+* **no key column**: read the whole-view cardinality for `count`; other
+  functions walk the whole relation, which is then the group;
 * **some key columns**: walk the chain of the index keyed on exactly those
   columns, built when the first plan that needs it is made and kept with
   the relation's other indexes
@@ -400,6 +368,10 @@ holds, with an identifier already (see
 literal keyed on the result is looked up through the slot's frame entry.
 
 ## Execution
+
+An unkeyed count reads the complete source view's tuple count. It visits
+no row, allocates nothing and adds no tuple-read counter. Other functions
+and keyed counts use the row-fold accesses below.
 
 A fold builds its key from the key slots' frame entries, laid out as a tuple
 of the relation with only the key columns read, reaches the group's rows as
@@ -464,13 +436,6 @@ final value is the exact total over the integers whatever order the rows
 were visited in. Whether that total fits `int64_t` -- whether the high word
 is the sign extension of the low one -- is asked once, at the end.
 
-A [direct reduction](design-group-reduction.md#exact-arithmetic-and-the-source-cardinality-bound)
-enforces the same source row ceiling even without a tuple store. Its
-partials combine in the same two-word representation, and a completed
-summary checks range only when its consumer requests the group. Removing
-storage does not remove the arithmetic bound or make an unrequested
-overflow observable.
-
 That is what makes overflow a function of the group's set of rows. Adding
 in `int64_t` with a check per step would overflow on `INT64_MAX, 1, -1` and
 not on `1, -1, INT64_MAX`, and since a group's visit order is its insertion
@@ -479,17 +444,13 @@ depend on the strategy in a way no equivalence could state.
 
 ### Parallel rounds
 
-A fold reads complete rows or an immutable summary and writes only its own
-frame. Number slots, pending integers, merge resolution and the serial
-retry after an overflow use the existing expression machinery
-([parallel evaluation](design-parallel.md)). A materialized group rule is
-a one-pass component, shared as any other such component is.
-
-A reduced producer instead uses a reducer taker and bounded partial
-groups, combined into one private builder at barriers. Its completed
-summary precedes all consumer tasks. This construction and its ownership
-are specified in [group reduction](design-group-reduction.md#bound-parallel-partials);
-an ordinary candidate merge continues to handle the outer rule's output.
+A fold reads a complete relation and writes only its own frame, so it needs
+nothing new from a shared round: a number slot in the frame, a pending
+integer in a candidate, the measure and rewrite before the merge, and an
+overflow that abandons the job and reruns the round serially are all the
+expression machinery's (see [design-parallel.md](design-parallel.md)). A
+group rule is a one-pass component, so its pass is shared among a round's
+threads as any one-pass component's is.
 
 ## Queries
 
@@ -505,7 +466,7 @@ held by the query, and run by it. Answering a query is one sequence:
 2. evaluate the program's part: the whole program's fixed point, or, when
    the query is rewritten, the part the rewrite reads completely;
 3. **run each of the query's group rules once**, in body order, into its
-   group relation or certified summary (a fold in place has no group rule);
+   group relation (a fold in place has none to run);
 4. evaluate the rewrite's generated rules, when the query is rewritten;
 5. run the query's plan, and deliver its answer.
 
@@ -533,10 +494,6 @@ derives the same rows in the same order. What a run may leave behind is an
 index: a fold in place over a program relation builds the index on its key
 columns in that relation, which stays with the relation and is charged to
 the memory limit, as a lookup's index is, until the relation is discarded.
-
-Completed summaries are released by the query's reduction scope after its
-borrowing plans are destroyed. They keep no state in a prepared query
-between runs and cannot survive a discard or materialized fallback.
 
 A query whose plan holds a fold is gathered rather than streamed: `sum` can
 fail on any binding, `count` can put a pending integer in a row, and `min`
@@ -605,14 +562,10 @@ tools from aggregates; each is bounded:
   reader wrote it, as an aggregate of the predicate whose rule holds it --
   `limit exceeded: tuples=20 while deriving an aggregate of pairs/1` -- or
   of the query, since the generated name says nothing the reader can act on.
-  A row-walking fold in place stores only its index, charged as every index is.
-  A fold itself allocates nothing. Direct reduction and reusable summaries
-  charge group state and retained payload as evaluation memory, while
-  enforcing the ordinary source row ceiling separately from stored-tuple
-  admission ([reduction limits](design-group-reduction.md#ownership-failure-paths-and-limits)).
-* **Unbounded time.** A row-walking fold is linear in its stored group;
-  a summary lookup reads precomputed state. What the limits do not bound
-  is the work of deriving a
+  A fold in place stores nothing but its index, charged as every index is.
+  A fold itself allocates nothing.
+* **Unbounded time.** A fold is linear in its group, and a group is a relation
+  the limits bound. What the limits do not bound is the work of deriving a
   group. By default a literal that binds nothing the rule reads is an
   existence check
   ([planning](design-planning.md#dead-variables-and-existence-checks)), so
@@ -656,11 +609,13 @@ binding, binding a shared variable only outside the braces, the identity
 rule as a folded body's description, folding selections and projections in
 place -- are not repeated here.
 
-* **An eagerly evaluated relation of final fold results.** Computing every
-  result before its outer consumer can report overflow for an unrequested
-  group and cannot represent an empty group without a separate default.
-  Selected summaries retain accumulator outcomes, finalized only by a
-  reached fold, and impose no generated result relation on every aggregate.
+* **A relation of folded results.** A second generated rule folding each
+  group once, read by the outer rule with a default for an empty group,
+  would make a repeated fold one lookup instead of one walk, at the price of
+  a second relation, a generator over groups and a lookup with a default.
+  A fold costs what its group holds, which the limits bound, while the
+  second relation would cost every program with an aggregate, repeated
+  folds or not.
 * **Placing a fold late.** The planner has no estimate of a group's size to
   justify it.
 * **Demand through an aggregate.** A folded predicate is read completely,

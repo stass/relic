@@ -14,9 +14,8 @@
 /*
  * The aggregate functions' accumulators, as fold.h describes them.
  *
- * Every operation reads views and the accumulator and writes only the
- * accumulator, so a fold walking stored rows on a worker and a reduction
- * combining partial groups on the calling thread can share them.
+ * Every operation reads value views and writes only its accumulator.
+ * Stored-row folds share the same arithmetic and type-outcome rules.
  */
 
 static enum relic_fold_step choose_extreme(enum relic_aggregate_fn fn,
@@ -39,7 +38,7 @@ choose_extreme(enum relic_aggregate_fn fn, const relic_value_view_t *extreme,
 {
 	switch (relic_value_view_order(candidate, extreme)) {
 	case RELIC_ORDER_EQUAL:
-		return (RELIC_FOLD_TIED);
+		return (RELIC_FOLD_KEPT);
 	case RELIC_ORDER_LESS:
 		return (fn == RELIC_AGG_MIN ? RELIC_FOLD_REPLACED :
 		    RELIC_FOLD_KEPT);
@@ -93,56 +92,6 @@ relic_fold_add(enum relic_aggregate_fn fn, relic_fold_state_t *state,
 	}
 
 	return (choose_extreme(fn, extreme, value));
-}
-
-/*
- * Two parts of a group combine as their rows would have been added one at
- * a time: a sum adds its exact totals, and an extreme is valid only when
- * both parts are and hold one type, and is then the better of the two.  A
- * part with no rows contributes nothing, and an accumulator with none
- * takes the other part's state whole.
- */
-enum relic_fold_step
-relic_fold_combine(enum relic_aggregate_fn fn, relic_fold_state_t *state,
-    uint64_t rows, const relic_value_view_t *extreme,
-    const relic_fold_state_t *more, uint64_t more_rows,
-    const relic_value_view_t *more_extreme)
-{
-	switch (fn) {
-	case RELIC_AGG_COUNT:
-		return (RELIC_FOLD_KEPT);
-	case RELIC_AGG_SUM:
-		if (state->invalid)
-			return (RELIC_FOLD_KEPT);
-		if (more->invalid) {
-			state->invalid = true;
-			return (RELIC_FOLD_INVALIDATED);
-		}
-		relic_sum_combine(&state->sum, &more->sum);
-		return (RELIC_FOLD_KEPT);
-	case RELIC_AGG_MIN:
-	case RELIC_AGG_MAX:
-		break;
-	}
-
-	if (more_rows == 0)
-		return (RELIC_FOLD_KEPT);
-
-	if (rows == 0) {
-		*state = *more;
-		return (more->invalid ? RELIC_FOLD_INVALIDATED :
-		    RELIC_FOLD_REPLACED);
-	}
-
-	if (state->invalid)
-		return (RELIC_FOLD_KEPT);
-
-	if (more->invalid || more->type != state->type) {
-		state->invalid = true;
-		return (RELIC_FOLD_INVALIDATED);
-	}
-
-	return (choose_extreme(fn, extreme, more_extreme));
 }
 
 /*

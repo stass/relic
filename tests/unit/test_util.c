@@ -1669,23 +1669,18 @@ a_word_sequence_hashes_to_a_fixed_value(void)
 
 /*
  * A wide hash is two hashes in one word.  Its low half is the keyed hash
- * relic_hash_words() or relic_hash_bytes() computes, which a table's rehash
- * relies on to recover a slot without the high half; its high half, and so
- * the stripe, is the same under every seed, which is what makes a striped
- * table's storage a function of its keys.  The stripes of many short byte
- * strings are spread among the stripes rather than piled into one.
+ * relic_hash_words() computes, which a table's rehash relies on to recover
+ * a slot without the high half; its high half, and so the stripe, is the
+ * same under every seed, which is what makes a striped table's storage a
+ * function of its keys.
  */
 static void
 a_wide_hash_keys_its_slot_and_not_its_stripe(void)
 {
 	static const uint32_t words[] = { 7u, 1u, 0u, 42u, 7u, 9u, 3u, 5u };
-	static const char text[] = "a stripe per thread";
-	bool used[RELIC_STRIPES];
 	uint64_t wide;
 	uint64_t other;
-	size_t stripes;
 	size_t count;
-	char key[2];
 
 	for (count = 0; count <= sizeof(words) / sizeof(words[0]); count++) {
 		wide = relic_hash_words_wide(SEED, words, count);
@@ -1703,33 +1698,6 @@ a_wide_hash_keys_its_slot_and_not_its_stripe(void)
 		    "a %zu-word key should choose one stripe under every "
 		    "seed", count);
 	}
-
-	for (count = 0; count < sizeof(text); count++) {
-		wide = relic_hash_bytes_wide(SEED, text, count);
-		other = relic_hash_bytes_wide(OTHER_SEED, text, count);
-
-		checkf(relic_hash_low(wide) ==
-		    relic_hash_bytes(SEED, text, count), SCENARIO_WIDE,
-		    "the low half of a %zu-byte wide hash should be its "
-		    "keyed hash", count);
-		checkf(wide >> 32 == other >> 32, SCENARIO_WIDE,
-		    "the high half of a %zu-byte wide hash should not "
-		    "depend on the seed", count);
-	}
-
-	bzero(used, sizeof(used));
-	for (count = 0; count < 256; count++) {
-		key[0] = (char)count;
-		key[1] = 'x';
-		used[relic_hash_stripe(relic_hash_bytes_wide(SEED, key,
-		    sizeof(key)))] = true;
-	}
-	stripes = 0;
-	for (count = 0; count < RELIC_STRIPES; count++)
-		stripes += used[count] ? 1 : 0;
-	checkf(stripes == RELIC_STRIPES, SCENARIO_WIDE,
-	    "256 two-byte keys should reach every stripe, not %zu of %zu",
-	    stripes, (size_t)RELIC_STRIPES);
 }
 
 int

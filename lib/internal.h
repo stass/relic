@@ -34,7 +34,6 @@
 #include "plan.h"
 #include "program.h"
 #include "queue.h"
-#include "reduce.h"
 #include "relation.h"
 #include "round.h"
 #include "strfn.h"
@@ -59,7 +58,6 @@ typedef struct relic_staged_set relic_staged_set_t;
 typedef struct relic_staging relic_staging_t;
 typedef struct relic_materialized relic_materialized_t;
 typedef struct relic_fresh_string relic_fresh_string_t;
-typedef struct relic_fresh_stripes relic_fresh_stripes_t;
 typedef struct relic_symbol relic_symbol_t;
 typedef struct relic_symtab relic_symtab_t;
 typedef struct relic_token relic_token_t;
@@ -148,19 +146,12 @@ struct relic_symbol {
  * The bytes are packed in an arena of alignment one: a string is read as
  * bytes and never as an object, so one symbol's bytes and terminator follow
  * the previous symbol's with no padding.
- *
- * The index is striped (util.h): a symbol is placed in the stripe its
- * bytes' wide hash chooses, under the hash's keyed half, which is what its
- * entry keeps.  `grown[s]` is the table a reservation prepared for stripe
- * s to grow into, empty unless one awaits its append; the pool's bytes
- * count it beside the stripe it replaces.
  */
 struct relic_symtab {
 	relic_symbol_t	*entries;	/* indexed by id - 1 */
 	size_t		 count;
 	size_t		 capacity;
-	relic_idtab_t	 index[RELIC_STRIPES];
-	relic_idtab_t	 grown[RELIC_STRIPES];
+	relic_idtab_t	 index;
 	relic_arena_t	 strings;
 	uint64_t	 hash_seed;	/* the context's */
 };
@@ -198,25 +189,10 @@ struct relic_valtab {
  * a batch import staged whole and the ones it declined and read again a
  * field at a time.  `commits_shared` counts the load commits whose appends
  * were placed on the pool, and `commits_deferred` those whose appends'
- * stripes grew in the parts placing them.  `symbols_shared` and
- * `symbols_deferred` count the same of the pool's batches of new strings.
- * `frames_ahead` counts the
+ * stripes grew in the parts placing them.  `frames_ahead` counts the
  * steps of framing a batch import ran as the filler of a window's jobs.
- *
- * `sources_reduced` counts the sources whose rows were reduced straight
- * into group state rather than stored, `reduced_rows` the rows they
- * derived, and `reduced_groups` the groups their summaries hold; the
- * lookups folds made in a summary are `read.summary_probes`.
- * `summaries_built` counts the summaries built over stored relations
- * for their folds, whose rows a build visits count as scanned.
- * `reduction_peak` is the most bytes one reduction held at once: its
- * builder, and the summary and scratch of its finishing.
- * `reductions_shared` counts the sources whose producer ran through
- * bounded parallel partials, and `reduction_waves` the waves those
- * runs drained.
- *
  * relic_stats() reports none of these; they show the tests which way an
- * import, a commit or a grouped source went.
+ * import or a commit went.
  */
 struct relic_counters {
 	uint64_t		iterations;
@@ -229,15 +205,6 @@ struct relic_counters {
 	uint64_t		frames_ahead;
 	uint64_t		commits_shared;
 	uint64_t		commits_deferred;
-	uint64_t		symbols_shared;
-	uint64_t		symbols_deferred;
-	uint64_t		sources_reduced;
-	uint64_t		reduced_rows;
-	uint64_t		reduced_groups;
-	uint64_t		summaries_built;
-	uint64_t		reductions_shared;
-	uint64_t		reduction_waves;
-	size_t			reduction_peak;
 };
 
 /*
@@ -381,9 +348,7 @@ struct relic_adornment_set {
  * since what the query reads on demand is what nothing has evaluated when the
  * rewrite is planned.  `component_of` gives, for each predicate, the position
  * of its component in the program's schedule, or SIZE_MAX when no rule
- * derives it.  `called` marks, by position, the components a positive
- * literal of a body the query reaches calls, whether or not they turned
- * out complete.
+ * derives it.
  *
  * `rules_by_head` holds the indexes into the program's rule table of every
  * rule, grouped by head and in program order within a head: those deriving
@@ -446,7 +411,6 @@ struct relic_magic {
 	relic_t			*ctx;
 	relic_arena_t		 arena;
 	bool			*incomplete;
-	bool			*called;
 	size_t			*component_of;
 	size_t			*rules_by_head;
 	size_t			*first_rule_of;
@@ -510,12 +474,6 @@ struct relic_materialized {
  * the context; a query's is cleared when its answer begins, so each answer
  * is reported on once.
  *
- * `reduction` is the scope of the direct grouped reductions of the query
- * run under way (lib/uses.c), which the planner resolves every read of a
- * relation through, or NULL outside one and when reduction is turned off.
- * It belongs to the run, which holds it from before its first evaluation
- * until after its last plan is released.
- *
  * `hash_seed` keys every hash the context's tables compute.  It is drawn
  * from the operating system when the context is created and never changes;
  * each table owner copies it when it is initialized.  No result depends on
@@ -555,7 +513,6 @@ struct relic {
 	uint64_t		 hash_seed;
 	relic_materialized_t	 materialized;
 	relic_pool_t		*pool;
-	relic_reduction_t	*reduction;
 	relic_signal_flag_t	 interrupted;
 	bool			 query_mixed_noted;
 	bool			 busy;
@@ -779,8 +736,8 @@ const char *relic_symbol_bytes(const relic_t *ctx, uint32_t id,
 	    size_t *lengthp);
 size_t	 relic_symbol_count(const relic_t *ctx);
 uint32_t relic_symbol_find(const relic_t *ctx, const void *bytes,
-	    size_t length, uint64_t hash);
-uint64_t relic_symbol_hash(const relic_t *ctx, const void *bytes,
+	    size_t length, uint32_t hash);
+uint32_t relic_symbol_hash(const relic_t *ctx, const void *bytes,
 	    size_t length);
 int	 relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	    uint32_t *idp);
@@ -800,7 +757,7 @@ void	 relic_symtab_reset(relic_symtab_t *table);
 const char *relic_symtab_bytes(const relic_symtab_t *table, uint32_t id,
 	    size_t *lengthp);
 uint32_t relic_symtab_find(const relic_symtab_t *table, const void *bytes,
-	    size_t length, uint64_t hash);
+	    size_t length, uint32_t hash);
 int	 relic_symtab_intern(relic_symtab_t *table, const void *bytes,
 	    size_t length, uint32_t *idp);
 
@@ -811,74 +768,41 @@ int	 relic_symtab_intern(relic_symtab_t *table, const void *bytes,
  * relic_symbol_intern() split into the steps a caller that must ask the
  * memory limit first, and must not fail once it starts to write, needs.
  *
- * relic_symbol_list() lists them by the stripe of the pool's index each is
- * placed in, which every step after reads.  It writes nothing but
- * `stripes`.  relic_symbol_pool_bytes_after() is what the pool would
- * occupy once it held them, having grown as interning them one at a time
- * would grow it, or SIZE_MAX when a size cannot count it or a stripe could
- * not grow.  It reads the pool and writes nothing.
- * relic_symbol_has_room() says whether identifiers remain for them.
- * relic_symbol_reserve() makes room for them all -- each stripe of the
- * index, the entries, and a copy of each one's bytes in the arena -- and
- * returns -1, having reported nothing, when there is not the room or the
- * allocator refuses; the stripes and the entries it grew stay grown and
- * counted, no copy stays, and the pool's contents are as they were.
+ * relic_symbol_pool_bytes_after() is what the pool would occupy once it
+ * held them, having grown as interning them one at a time would grow it,
+ * or SIZE_MAX when a size cannot count it.  It reads the pool and writes
+ * nothing.  relic_symbol_has_room() says whether identifiers remain for
+ * them.  relic_symbol_reserve() makes room for them all -- the index, the
+ * entries, and a copy of each one's bytes in the arena -- and returns -1,
+ * having reported nothing, when there is not the room or the allocator
+ * refuses; the index and the entries it grew stay grown and counted, no
+ * copy stays in the arena, and the pool's contents are as they were.
  * relic_symbol_append() then numbers them, and cannot fail.  A reservation
  * sets *copiesp to where its copies begin in the arena, and
  * relic_symbol_unreserve() gives back the copies of one that will not be
  * appended after all, leaving the pool as a reservation that failed does:
  * nothing may allocate from the pool between the two.
- * relic_symbol_add() is a reservation and its append in one call, which
- * fails as the reservation does.
- *
- * The append places the strings a stripe to a part, on the context's pool
- * when it has more than one worker and the batch holds at least
- * RELIC_SYMBOL_PARALLEL_COUNT strings, or RELIC_F_PARALLEL_ALWAYS asks,
- * and on the calling thread otherwise; it makes no pool.  Each stripe
- * grows when it is reserved, except under relic_symbol_add(): when its
- * append shares, and the memory limit admits every table the growth
- * replaces held beside its replacement, each stripe's growth is prepared
- * by the reservation and completed by the part that places the stripe, so
- * that the stripes grow on several threads at once.  Only the one call can
- * defer, so nothing is reserved while the replaced tables are held, and
- * nothing finds the pool with a stripe not yet grown.  Each stripe reaches
- * the same capacity either way.
  *
  * A fresh string's `bytes` must stay readable until it is reserved, and
  * `copy` is where the reservation put it, or NULL once a reservation has
- * failed or been given back.  `hash` is relic_symbol_hash() of its bytes.
- *
- * The positions in the batch of the strings stripe s is to place are
- * `list[start[s]]` up to `list[start[s + 1]]`, in increasing order.  The
- * caller gives `list` room for the batch's strings.
+ * failed or been given back.
  */
 struct relic_fresh_string {
 	const char	*bytes;
 	char		*copy;
 	size_t		 length;
-	uint64_t	 hash;
+	uint32_t	 hash;
 };
 
-struct relic_fresh_stripes {
-	uint32_t	*list;
-	size_t		 start[RELIC_STRIPES + 1];
-};
-
-void	 relic_symbol_list(const relic_fresh_string_t *fresh, size_t count,
-	    relic_fresh_stripes_t *stripes);
 size_t	 relic_symbol_pool_bytes_after(const relic_t *ctx,
-	    const relic_fresh_string_t *fresh, size_t count,
-	    const relic_fresh_stripes_t *stripes);
+	    const relic_fresh_string_t *fresh, size_t count);
 bool	 relic_symbol_has_room(const relic_t *ctx, size_t count);
 int	 relic_symbol_reserve(relic_t *ctx, relic_fresh_string_t *fresh,
-	    size_t count, const relic_fresh_stripes_t *stripes,
-	    relic_arena_mark_t *copiesp);
-int	 relic_symbol_add(relic_t *ctx, relic_fresh_string_t *fresh,
-	    size_t count, const relic_fresh_stripes_t *stripes);
+	    size_t count, relic_arena_mark_t *copiesp);
 void	 relic_symbol_unreserve(relic_t *ctx, relic_fresh_string_t *fresh,
 	    size_t count, const relic_arena_mark_t *copies);
 void	 relic_symbol_append(relic_t *ctx, const relic_fresh_string_t *fresh,
-	    size_t count, const relic_fresh_stripes_t *stripes);
+	    size_t count);
 
 /*
  * lib/value.c
@@ -979,14 +903,12 @@ void	 relic_valtab_reset(relic_valtab_t *table);
  * reported when the
  * table or the pool could not grow, for memory or because it holds as many
  * values as an identifier can name; their contents are then as they were.
- * The pool's growth may be deferred to the parts placing its new strings,
- * as relic_symbol_add() defers it.  The commit is two halves for a caller
- * that must make every fallible step before it changes anything and must
- * report nothing itself: relic_pending_reserve() grows the table and the
- * pool to hold the new values, every growth at once, returning -1, with no
- * diagnostic and the contents unchanged, when it could not.
- * relic_pending_append() then interns them, and cannot fail.  Nothing may
- * intern a value between the two.  A caller that decides
+ * It is two halves, for a caller that must make every fallible step before
+ * it changes anything and must report nothing itself:
+ * relic_pending_reserve() grows the table and the pool to hold the new
+ * values, returning -1, with no diagnostic and the contents unchanged, when
+ * it could not, and relic_pending_append() then interns them, and cannot
+ * fail.  Nothing may intern a value between the two.  A caller that decides
  * not to append after a reservation succeeded calls
  * relic_pending_unreserve() instead, which leaves the table and the pool as
  * a reservation that failed would: grown and counted, with no copy of a new
@@ -1011,7 +933,7 @@ void	 relic_valtab_reset(relic_valtab_t *table);
  * a map, so that a caller holds a probe only while it measures.
  */
 struct relic_pending_probe {
-	uint64_t		*hashes;	/* each value's, batch order */
+	uint32_t		*hashes;	/* each value's, batch order */
 	uint32_t		*slots;		/* relic_pending_slots(room) */
 	size_t			 room;
 };
@@ -1020,7 +942,6 @@ struct relic_pending_map {
 	relic_dom_t		*ids;		/* each value's, batch order */
 	int64_t			*fresh;		/* new integers, as first met */
 	relic_fresh_string_t	*strings;	/* new strings, as first met */
-	relic_fresh_stripes_t	 stripes;	/* of the new strings */
 	size_t			 room;
 	size_t			 count;
 	size_t			 fresh_count;
@@ -1400,23 +1321,6 @@ int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
 	    const bool *incomplete, relic_plan_t *plan);
 
 /*
- * The draft relic_plan_rule() would prepare, into *draft, the relations it
- * reads created and the indexes it reads not built: what the choice of a
- * component's summaries estimates before any plan of it is prepared.
- * Arguments and failures are as for relic_plan_rule(), less an index
- * refused.
- */
-int	 relic_plan_draft_rule(relic_t *ctx, relic_arena_t *arena,
-	    const relic_rule_t *rule, relic_relation_t *target,
-	    const bool *incomplete, relic_plan_draft_t *draft);
-
-/*
- * Whether an operation reads the index of `relation` keyed on `key_mask`.
- */
-bool	 relic_plan_reads_index(const relic_op_t *op,
-	    const relic_relation_t *relation, uint32_t key_mask);
-
-/*
  * Plan a semi-naive delta variant of a rule into *family (plan.h): the
  * drafts of its delta-first plan and its input-first plan, kept once when
  * the two orders are the same, or the one plan a reference configuration
@@ -1532,98 +1436,12 @@ const relic_op_atom_t *relic_op_atom(const relic_op_t *op);
  * diagnostic reported: memory, or the rewrite's limit outgrown, which is
  * reported as a warning and sets `abandoned`.
  * relic_magic_reset() releases the rewrite, whatever state it is in.
- *
- * Between finding what the query reads completely and evaluating it, a
- * direct reduction may add to it.  relic_magic_component_of() is the
- * position in the program's schedule of a predicate's component, or
- * SIZE_MAX when no rule derives it, and relic_magic_reaches() whether the
- * query reaches the component at `position`: reads it completely, or
- * calls it through a positive literal of a body the query reaches.
- * relic_magic_complete_also() makes the `count` components at `positions`
- * complete too, with everything they depend on, so that the rewrite reads
- * them as it reads the rest; it returns 0, or -1 with the failure
- * reported.
  */
 void	 relic_magic_init(relic_magic_t *magic, relic_t *ctx);
 void	 relic_magic_reset(relic_magic_t *magic);
 int	 relic_magic_find_complete(relic_magic_t *magic,
 	    const relic_query_t *query);
-size_t	 relic_magic_component_of(const relic_magic_t *magic,
-	    relic_pred_id_t pred);
-bool	 relic_magic_reaches(const relic_magic_t *magic, size_t position);
-int	 relic_magic_complete_also(relic_magic_t *magic,
-	    const size_t *positions, size_t count);
 int	 relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query);
-
-/*
- * lib/uses.c
- *
- * The scope of a run's direct grouped reductions and summaries
- * (lib/reduce.h): a query's run, or the whole program's materialization.
- *
- * relic_reduction_begin() makes `reduction` empty and makes it the
- * context's for the run about to start, unless
- * RELIC_F_NO_GROUP_REDUCTION turns reduction off; relic_reduction_end()
- * destroys every summary it holds, releases it, and leaves the context
- * with none.  Every plan that holds one of its summaries must have been
- * released before then.
- *
- * relic_reduction_select() records in the context's scope the families
- * of the run's folds of stored relations, then admits the sources whose
- * every use is a fold of one key or a projection of that key, and of
- * which the query reaches a fold, and promotes into `magic`'s complete
- * part the projections the query reaches.  It is called once `magic` has
- * found what the query reads completely and before any of that is
- * evaluated, or, with `magic` and `query` NULL, before the whole program
- * is materialized, which admits no source.  It returns 0, or -1 with the
- * failure reported; with no scope it records nothing.
- *
- * relic_reduction_source() and relic_reduction_projection() are the
- * scope's entry for a predicate, or NULL; the source's is writable, since
- * its turn records what it became.
- *
- * relic_reduction_fold() is how the planner resolves an aggregate's
- * source: 0 with *summaryp NULL when the fold reads rows, 0 with the
- * summary and the position of the fold's signature among the source's or
- * the family's when it reads a summary, and -1 with an internal error
- * reported when the source's rows are not there and no summary stands in
- * for them, or a family's summary no longer describes its relation.
- * relic_reduction_family() is the family a fold of a stored relation
- * would read when summarized: one with no summary yet that holds the
- * fold's signature, or NULL.  Every other read of a relation's rows goes
- * through relic_relation_read(), which refuses a source the scope does
- * not store.
- */
-void	 relic_reduction_begin(relic_reduction_t *reduction, relic_t *ctx);
-void	 relic_reduction_end(relic_reduction_t *reduction, relic_t *ctx);
-int	 relic_reduction_select(relic_t *ctx, relic_magic_t *magic,
-	    const relic_query_t *query);
-relic_reduced_source_t *relic_reduction_source(relic_t *ctx,
-	    relic_pred_id_t pred);
-const relic_key_projection_t *relic_reduction_projection(const relic_t *ctx,
-	    relic_pred_id_t pred);
-int	 relic_reduction_fold(relic_t *ctx, const relic_aggregate_t *aggregate,
-	    const relic_summary_t **summaryp, uint16_t *signaturep);
-relic_fold_family_t *relic_reduction_family(relic_t *ctx,
-	    const relic_aggregate_t *aggregate);
-
-/*
- * lib/summarize.c
- *
- * relic_summarize_drafts() chooses, from the `draft_count` drafts of
- * every plan a component will prepare first, folding or not, made before
- * any of them is prepared, the families of stored relations worth
- * summarizing, and builds them, over the views `env` resolves: an index a
- * plan missing from the drafts reads would be counted as a saving.
- * *builtp and *built_countp are the families it built, in the order they
- * were, from `arena`, for explain to name.  Returns 0, or -1 with the failure reported; a family
- * whose build was refused is left unbuilt.  With no scope it builds
- * nothing.
- */
-int	 relic_summarize_drafts(relic_t *ctx, relic_arena_t *arena,
-	    const relic_plan_draft_t *drafts, size_t draft_count,
-	    const relic_exec_env_t *env, const relic_fold_family_t ***builtp,
-	    size_t *built_countp);
 
 /*
  * lib/eval.c
@@ -1771,13 +1589,7 @@ _Static_assert(RELIC_IMPORT_WINDOW_RECORDS > 0,
  * and shown.  The rules shown between a query's heading and its plan are
  * its group rules.  A query's rule names no predicate, so the functions
  * that show a query are given its answer relation, whose name its head is
- * written with.  relic_explain_reduction() annotates the rule last shown,
- * whose rows a source's reduction takes instead of its relation, with the
- * source, its key and its folds' signatures; relic_explain_projection()
- * annotates a projection's rule, which the source's keys replace, with
- * the source it reads them from; relic_explain_summary() names, under a
- * component's heading, a family of a stored relation summarized for its
- * folds, with its key and signatures.  `depth` is the level a
+ * written with.  `depth` is the level a
  * component's heading is indented to, one more for a component of a
  * rewritten program than for one of the program itself; what belongs to
  * the component is indented beneath it.  None can fail.
@@ -1800,13 +1612,6 @@ void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
 	    const relic_relation_t *answer, const relic_magic_t *magic);
 void	 relic_explain_abandoned_rewrite(relic_t *ctx,
 	    const relic_rule_t *query, const relic_relation_t *answer);
-void	 relic_explain_reduction(relic_t *ctx,
-	    const relic_reduced_source_t *source, unsigned int depth);
-void	 relic_explain_projection(relic_t *ctx,
-	    const relic_key_projection_t *projection,
-	    const relic_reduced_source_t *source, unsigned int depth);
-void	 relic_explain_summary(relic_t *ctx, const relic_fold_family_t *family,
-	    unsigned int depth);
 
 /*
  * lib/index.c
@@ -1887,8 +1692,7 @@ void	 relic_index_link_append(relic_index_t *index,
  * no caller decides whether a relation exists yet, and never moves, so a
  * caller may hold as many of them as it likes for as long as the relation
  * lives: a base store as long as the context, a derived relation until the
- * next discard.  A source the active scope does not store is refused
- * instead, and no row store is created for it.
+ * next discard.
  *
  * relic_base_store() finds a predicate's base store without creating it,
  * and relic_base_count() and relic_base_total() count the facts one or
@@ -2049,26 +1853,11 @@ void	 relic_index_link_append(relic_index_t *index,
  */
 
 /*
- * The fewest new strings whose placement in the pool's index is shared
- * among the pool's workers rather than done on the calling thread: a
- * constant of performance alone.  The tests reserve a batch one short of
- * it, so it is at least two, and a batch of one never wakes the pool.
- */
-#ifndef RELIC_SYMBOL_PARALLEL_COUNT
-#define	RELIC_SYMBOL_PARALLEL_COUNT	4096u
-#endif
-_Static_assert(RELIC_SYMBOL_PARALLEL_COUNT >= 2,
-    "a batch one string short of sharing must hold a string");
-
-/*
  * The fewest tuples a load's commit appends on the pool rather than on the
- * calling thread: a constant of performance alone.  Where sharing, waking
- * the pool included, begins to beat one thread depends on the workers and
- * the store: measured on a 64-core machine, some 2000 tuples into a store
- * that need not grow at 16 and 32 workers, 16000 at 8 and 64, and 32000
- * at 128 or into a small store that must grow.  This count sits among
- * them, within a fraction of a millisecond of the best at each.  The tests
- * run a commit one tuple short of it, so it is at least two.
+ * calling thread: a constant of performance alone, a little past the count
+ * at which placing them on 16 workers, waking the pool included, begins to
+ * beat placing them on one, some 12000 on the machine it was measured on.
+ * The tests run a commit one tuple short of it, so it is at least two.
  */
 #ifndef RELIC_COMMIT_PARALLEL_TUPLES
 #define	RELIC_COMMIT_PARALLEL_TUPLES	16384u

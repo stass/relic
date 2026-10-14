@@ -1082,46 +1082,6 @@ relic_magic_find_complete(relic_magic_t *magic, const relic_query_t *query)
 
 	close_complete(&demand.complete);
 	note_incomplete(magic);
-	magic->called = demand.handled;
-
-	return (0);
-}
-
-size_t
-relic_magic_component_of(const relic_magic_t *magic, relic_pred_id_t pred)
-{
-	return (component_of(magic, pred));
-}
-
-bool
-relic_magic_reaches(const relic_magic_t *magic, size_t position)
-{
-	return (magic->complete_components[position] ||
-	    magic->called[position]);
-}
-
-/*
- * The added components are closed over what they depend on as the walk's
- * were, and what the query reads on demand is found again, so the rewrite
- * planned afterwards reads the added components as complete.
- */
-int
-relic_magic_complete_also(relic_magic_t *magic, const size_t *positions,
-    size_t count)
-{
-	relic_closure_t closure;
-	size_t i;
-
-	if (count == 0)
-		return (0);
-
-	if (closure_begin(&closure, magic) != 0)
-		return (-1);
-
-	for (i = 0; i < count; i++)
-		mark_complete(&closure, positions[i]);
-	close_complete(&closure);
-	note_incomplete(magic);
 
 	return (0);
 }

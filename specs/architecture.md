@@ -276,16 +276,10 @@ order values by domain identifier**; ordering decodes the values. A value
 evaluation computes is interned when its output batch or admitted round
 is committed, before tuples naming it are inserted.
 
-The symbol pool's lookup index is striped as a relation's canonical index
-is: a byte string's stripe is chosen by the unkeyed half of its wide hash
-and its slot by the keyed half, so a batch of new symbols numbered in
-first-appearance order can be placed a stripe to a thread, while what each
-stripe holds and costs is a function of the strings alone, the same for
-every seed and thread count. Striping moves no identifier and puts no
-stripe bits in one. Every pool lookup is given the wide hash, and
-whatever keeps a byte value's hash for a later lookup or placement keeps
-the wide one; a pool entry keeps only the keyed half its stripe rehashes
-by.
+The symbol pool uses one keyed lookup index. New entries receive their
+identifiers and are placed in that index on the calling thread in input
+order. Workers can hash and compare pending values privately before that
+publication boundary.
 
 The rejected alternatives are a tagged 64-bit cell, whose boxed integers have
 two encodings every construction site must keep canonical, and the public value
@@ -421,9 +415,8 @@ See [design-planning.md](design-planning.md) and
 
 The executor (`lib/exec.c`) runs a plan with an explicit loop and no C
 recursion, and hands its derivations back in batches; it never inserts.
-Its `EMIT` describes output terms and arity, while the batch taker owns
-the insertion, answer or reduction destination. An output schema is not
-a readable relation. A
+EMIT carries an output schema with no relation pointer. Its caller owns
+the insertion or delivery destination and checks that the arity agrees. A
 recursive component -- a set of mutually recursive predicates, its
 members -- is evaluated semi-naively (`lib/eval.c`): each round runs rule
 variants in which one recursive literal reads the previous round's delta,
@@ -474,31 +467,7 @@ group is complete before it is folded. `sum` is exact in a 128-bit
 accumulator, so both its value and its overflow are functions of the
 group's set of rows, never of the order they arrived in.
 
-A certified nonrecursive producer can reduce distinct rows directly into
-group state when every consumer is a fold or an exact projection of the
-same keys. Named source rows are omitted only within a partial query run;
-full materialization retains them for later queries. Evaluation-owned
-source bindings distinguish a complete summary from a readable relation,
-so an ordinary atom cannot mistake an omitted store for an empty one.
-Complete stored relations can also supply reusable fold summaries when
-their construction pays for itself.
-
-Summary construction retains exact accumulators and type-invalid outcomes;
-only a consumer that reaches its fold reports an overflow or mixed-type
-note. This preserves outer filtering and empty-group behavior. The logical
-source row ceiling still bounds exact arithmetic when no row store exists.
-One global builder and bounded parallel partials keep state proportional
-to groups and retained bytes; ordered publication resolves retained values
-before consumers run. Strict aggregate edges and the materialization
-currency contract remain intact.
-
-With a configured memory limit, summary construction runs serially: group
-combination order can change transient ownership, and serial construction
-keeps limit refusals independent of worker count without reconstructing
-that allocation history. Immutable consumers can still run in parallel.
-
-See [design-aggregates.md](design-aggregates.md) and
-[direct grouped reduction](design-group-reduction.md).
+See [design-aggregates.md](design-aggregates.md).
 
 ### Magic Sets
 
@@ -558,31 +527,17 @@ frozen before preparation begins, and a refusal discards prefix and task
 effects together before the serial retry. These rules preserve the
 ordered merge's proof for both access paths and for constant-test prefixes.
 
-Producers retain bounded packets, not a full candidate history per worker.
-Barrier-separated jobs first canonicalize pending values in round-owned
-value partitions, then deduplicate target tuples in tuple partitions.
-Every owner has one writer per phase. A tuple retains its minimum logical
-derivation position even when that witness arrives late; ordering those
-minima recovers the serial insertion stream. Private pending handles name
-semantic values and never become public IDs. A shared byte ceiling covers
-transport and pending output copies, while owner data follows global
-distinct tuples and values.
-
-The merge walks ordered unique tuples and collects one descriptor per
-referenced private value, then uses the ordinary resolver to promise
-identifiers. Owned columns are rewritten directly to those promises;
-stored hashes and stripes are recomputed before reserved append. Draining
-publishes no values or tuples and crosses no delta boundary. Exact final
-storage projections and a conservative serial scratch floor govern
-admission, including when transport quotas shorten executor batches. A
-refusal releases the attempt before serial retry. These phase and
-ownership rules remove worker replication without concurrent global
-insertion or a queue deadlock protocol.
+Computed values stay worker-local during derivation. The merge gathers
+one descriptor per referenced worker-local value in logical first-occurrence
+order, then uses the ordinary value resolver to assign identifiers. Private
+columns are rewritten directly to those promises before tuple deduplication
+and commit. This preserves value identity without another interner and
+bounds resolution descriptors by local distinct values rather than column
+occurrences.
 
 See [design-parallel.md](design-parallel.md),
 [ordered driving cursors](design-driver-slicing.md) and
-[pending value compaction](design-pending-values.md), with
-[bounded candidate routing](design-round-routing.md) defining round ownership.
+[pending value compaction](design-pending-values.md).
 
 ### Library interface
 

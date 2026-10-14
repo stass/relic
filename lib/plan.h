@@ -343,19 +343,15 @@ struct relic_op_assign {
  * whole relation, matching the key columns of each tuple when there are
  * any; by walking the index keyed on exactly the key columns; or, when
  * every column is a key column, by probing for the one tuple the key names.
- * A fold with no key walks the whole relation, which is then the group, and
- * so does one under RELIC_F_NO_INDEX, as a generator with bound columns is
- * scanned under it; an unkeyed count reads only the relation's tuple
- * count, its cardinality.  A fold of a source the run reduced, or of a
- * stored relation it summarized, reads no rows: it finds the key's group
- * in the summary and reads the group's state (lib/reduce.h).
+ * A count with no key reads the complete view's tuple count. Other folds
+ * with no key walk the whole relation, which is then the group, as do
+ * keyed folds under RELIC_F_NO_INDEX.
  */
 enum relic_fold_access {
 	RELIC_FOLD_SCAN,
 	RELIC_FOLD_LOOKUP,
 	RELIC_FOLD_PROBE,
-	RELIC_FOLD_CARDINALITY,
-	RELIC_FOLD_SUMMARY
+	RELIC_FOLD_CARDINALITY
 };
 
 /*
@@ -367,11 +363,8 @@ enum relic_fold_access {
  * its shared variables stand in.  `access` says how the group's rows are
  * reached, and for RELIC_FOLD_LOOKUP `index_position` names the index
  * keyed on `key_mask` as a LOOKUP's does, once relic_plan_prepare() has set
- * it.  For RELIC_FOLD_SUMMARY `relation` is NULL, since the fold reads no
- * rows, and the fold reads its group's row count and, but for a count,
- * accumulator `signature` of `summary`, which the run owns and outlives
- * the plan.  `fn` folds column `column` of each row, which `count` does
- * not read.
+ * it.  `fn` folds column `column` of
+ * each row, which `count` does not read.
  *
  * `binds` says whether the fold binds `slot` or, bound before, compares its
  * value with it; `kind` is the slot's kind, a number slot when a count or
@@ -384,7 +377,6 @@ enum relic_fold_access {
 struct relic_op_aggregate {
 	const relic_relation_t	*relation;
 	const relic_aggregate_t	*aggregate;
-	const relic_summary_t	*summary;		/* RELIC_FOLD_SUMMARY */
 	const uint16_t		*key_slots;
 	relic_location_t	 where;
 	uint32_t		 key_mask;
@@ -394,7 +386,6 @@ struct relic_op_aggregate {
 	uint16_t		 arity;
 	uint16_t		 key_count;
 	uint16_t		 column;
-	uint16_t		 signature;		/* RELIC_FOLD_SUMMARY */
 	enum relic_slot_kind	 kind;
 	uint16_t		 slot;
 	bool			 binds;
@@ -499,8 +490,6 @@ struct relic_plan_draft {
  *	FOLD_LOOKUP	B folds and Q visits; B onward
  *	FOLD_PROBE	B folds and B visits, none when the relation is
  *			empty; B onward
- *	FOLD_CARDINALITY B folds, reading no row; B onward
- *	FOLD_SUMMARY	B folds and B summary probes; B onward
  *	EMIT		B emissions
  */
 enum relic_cost_kind {
@@ -512,8 +501,6 @@ enum relic_cost_kind {
 	RELIC_COST_FOLD_SCAN,
 	RELIC_COST_FOLD_LOOKUP,
 	RELIC_COST_FOLD_PROBE,
-	RELIC_COST_FOLD_CARDINALITY,
-	RELIC_COST_FOLD_SUMMARY,
 	RELIC_COST_EMIT
 };
 

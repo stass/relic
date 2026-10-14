@@ -242,17 +242,8 @@ uint64_t relic_hash_words_wide(uint64_t seed, const uint32_t *words,
 	    size_t count);
 
 /*
- * The hash of a byte string kept in a striped table, as wide as a word
- * sequence's: its low half is relic_hash_bytes(), and its high half an
- * unkeyed hash of the same bytes, for the same reasons.
- */
-uint64_t relic_hash_bytes_wide(uint64_t seed, const void *bytes,
-	    size_t length);
-
-/*
  * Striped tables.  A table several threads fill at once without a lock --
- * a relation's canonical index, a secondary index's key table, the symbol
- * pool's index -- is
+ * a relation's canonical index, a secondary index's key table -- is
  * RELIC_STRIPES identifier tables, and a key lives in the one its wide
  * hash's top RELIC_STRIPE_BITS bits choose.  Stripes share nothing, so a
  * thread per stripe can grow and fill them at once.  The count is a
@@ -370,13 +361,6 @@ struct relic_idprobe {
  */
 void	 relic_idtab_init(relic_idtab_t *table, bool tagged);
 void	 relic_idtab_reset(relic_idtab_t *table);
-
-/*
- * Drop every entry and keep the slots.  The table never removes one key,
- * so an owner that starts a fresh set of keys reuses the allocation this
- * way instead of freeing it and paying for it again.
- */
-void	 relic_idtab_clear(relic_idtab_t *table);
 
 /*
  * Make a tagged table untagged for good, releasing its tags and keeping

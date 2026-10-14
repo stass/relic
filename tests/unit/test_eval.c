@@ -235,6 +235,7 @@ static void	 run_scenarios(const char *strategy, unsigned int flags);
 static void	 the_counters_record_the_work_done(void);
 static void	 the_total_order_sorts_across_types(void);
 static void	 two_member_literals_derive_once(void);
+static void	 an_unkeyed_count_reads_no_source_rows(void);
 
 static void
 record_diagnostic(void *callback_ctx, enum relic_diag_level level,
@@ -1383,6 +1384,35 @@ a_delta_is_emptied_when_its_member_rests(void)
 }
 
 /*
+ * An unkeyed count asks the complete source's cardinality.  Duplicate
+ * facts count once, an absent source counts zero, and counting either
+ * reads no tuple.  The expected answers are independent of the planner's
+ * access choice and the counter distinguishes it from a row walk.
+ */
+static void
+an_unkeyed_count_reads_no_source_rows(void)
+{
+	static const char *const scenario = "an unkeyed count reads no rows";
+	relic_stats_t before;
+	relic_stats_t after;
+	diag_log_t log;
+	relic_t *ctx;
+
+	ctx = context_with("e(a, b). e(c, d). e(a, b).", &log);
+	if (ctx == NULL)
+		return;
+
+	relic_stats(ctx, &before);
+	(void)answers_are(scenario, ctx, "N = count { e(X, Y) }?", "2");
+	relic_stats(ctx, &after);
+	check(after.tuples_scanned == before.tuples_scanned &&
+	    after.tuples_looked_up == before.tuples_looked_up, scenario,
+	    "counting a complete source should read no tuple");
+	(void)answers_are(scenario, ctx, "N = count { absent(X) }?", "0");
+	relic_destroy(ctx);
+}
+
+/*
  * Every scenario that checks answers, under one evaluation strategy.  The
  * name goes to the log, so that a failure says which strategy it was under.
  */
@@ -1401,6 +1431,7 @@ run_scenarios(const char *strategy, unsigned int flags)
 	negation_keeps_what_is_absent();
 	a_later_load_can_make_a_derived_tuple_false();
 	a_discard_gives_back_what_the_limits_count();
+	an_unkeyed_count_reads_no_source_rows();
 }
 
 /*

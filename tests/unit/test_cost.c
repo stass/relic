@@ -600,6 +600,7 @@ a_fold_counts_its_groups_rows_by_its_access(void)
 	candidate_t built;
 	example_t example;
 	relic_op_t *fold;
+	relic_plan_t plan;
 	uint64_t cost;
 	uint64_t expected;
 
@@ -644,6 +645,19 @@ a_fold_counts_its_groups_rows_by_its_access(void)
 	cost = estimate(&built, &example);
 	checkf(cost == 3 * GUARDS, SCENARIO_FOLDS, "a probing fold of an "
 	    "empty relation visits nothing, %u, not %llu", 3 * GUARDS,
+	    (unsigned long long)cost);
+
+	fold->u.aggregate.relation = example.edge;
+	fold->u.aggregate.access = RELIC_FOLD_CARDINALITY;
+	fold->u.aggregate.key_mask = 0;
+	built.steps[1].kind = RELIC_COST_OPERATION;
+	bzero(&plan, sizeof(plan));
+	plan.ops = built.ops;
+	plan.op_count = built.candidate.draft.op_count;
+	cost = relic_cost_plan(&plan, &example.env);
+	checkf(cost == 3 * GUARDS && estimate(&built, &example) == cost,
+	    SCENARIO_FOLDS, "a cardinality fold costs one operation per "
+	    "binding and visits no row, %u, not %llu", 3 * GUARDS,
 	    (unsigned long long)cost);
 
 	example_release(&example);

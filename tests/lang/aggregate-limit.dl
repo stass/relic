@@ -1,8 +1,6 @@
-% A stored group relation is a relation: the tuple limit counts it and
-% refuses the insertion that would pass it, naming the aggregate by the
-% predicate of the rule holding it.  The group is stored because
-% no-group-reduction asks for it; aggregate-reduced-limit.dl is the same
-% program with the group reduced instead.
+% A group relation is a relation: the tuple limit counts it and refuses the
+% insertion that would pass it, naming the aggregate by the predicate of
+% the rule holding it.
 n(1). n(2). n(3). n(4). n(5). n(6).
 pairs(C) :- C = count { n(X), n(Y) }.
 pairs(C)?

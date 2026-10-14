@@ -13,9 +13,8 @@ Related: [architecture: storage](architecture.md#storage),
 [hashing](design-values.md#the-hash-function-and-the-seed),
 [memory](design-memory.md#the-memory-limit),
 [bulk loading](design-bulk-load.md),
-[candidate routing](design-round-routing.md),
 [benchmarks](design-bench.md), [testing](design-testing.md),
-[implementation plan](../docs/todo-benchmark-performance.md#8-improve-canonical-membership-locality).
+[implementation plan](../docs/todo-benchmark-performance.md#next-investigations).
 
 ## Model
 
@@ -79,19 +78,16 @@ The design gives no layout a performance win by assumption.
 
 ## Establishing the remaining cost
 
-The measurement baseline includes the selected recursive plans, loading,
-driver slicing, grouped reduction and candidate routing used for the
-intended production comparison. If the experiment isolates an earlier
-baseline, its result is scoped to that baseline and cannot establish the
-default for a different pipeline.
+The measurement baseline is the retained engine: bounded recursive plan
+selection, ordinary materialized aggregates, current loading and indexed
+driver slicing. Every experiment names its exact source and build so that
+a result on one baseline does not establish a default for another.
 
-Routing is particularly relevant: it eliminates repeated retention of
-new candidates, but frozen-store screens can still ask the same relation
-about many derivations. A low rate of committed insertions does not mean
-that membership sees few probes. Conversely, producer-local and owner
-screens can remove work before it reaches persistent membership. Count
-at the canonical boundary instead of inferring the workload from final
-relation cardinality or emitted heads.
+Worker-local screens remove repeated candidates within each worker, but
+copies can remain across workers. Frozen-store screens can ask the same
+relation about many derivations. Count at the canonical boundary rather
+than inferring probe traffic from final relation cardinality or emitted
+heads; a low rate of committed insertion does not imply few probes.
 
 Separate input construction, frozen screening, ordinary insertion and
 reserved append/growth in diagnostic runs. For each relation/arity,
@@ -256,8 +252,8 @@ New entries obtain their cached hash from the same prepared hash used
 for membership and placement. Neither rehashing nor copying silently
 changes its seed or mixes in a pointer, tuple ID or thread number.
 
-The cache applies only to final domain columns. Candidate-routing hashes
-over private value handles never enter it. After pending values resolve,
+The cache applies only to final domain columns. Hashes of private pending
+markers never enter it. After pending values resolve,
 the ordinary final hash and stripe are computed before persistent append.
 The cache stays correct by construction because stored columns are
 immutable for the payload's lifetime. Reset discards entries; moving a

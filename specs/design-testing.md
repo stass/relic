@@ -83,7 +83,6 @@ complete. The eval fuzz target and the derivation-count oracle both use it.
 | existence checks == full generators | `-X no-exists` |
 | deferred rounds == serial rounds, at any thread count | `-X parallel`, `-j N` |
 | aggregates folded in place == group rules | `-X group-rules` |
-| direct group reductions and summaries == materialized row folds | `-X no-group-reduction` |
 | streamed rows == gathered answer | `-X no-stream` |
 
 Naive, no-index, no-reorder and no-exists are also run without the rewrite, by
@@ -112,16 +111,6 @@ Three harnesses check them:
   tuples streaming than gathering, since a corpus in which nothing streamed
   would compare a behaviour with itself.
 * The random driver and the eval fuzz target, below.
-
-Group-reduction tests also compare default and forced-deferred builds of
-the same physical plan across worker counts. Curated cases pin unrequested
-overflow, invalid groups, empty defaults, bound-result comparisons and
-post-query materialization. The whole-program derivation oracle disables
-group reduction so its expected row materialization and fold counts stay
-independent; optimized runs compare answers and the appropriate tuple-total
-bounds to that reference. Structural counters verify removed stores,
-reused summaries and bounded partial workspace rather than relying on
-elapsed time ([validation](design-group-reduction.md#validation)).
 
 ### Exclusions and anchoring
 

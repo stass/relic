@@ -23,7 +23,7 @@
 #define	RELIC_HASH_MULTIPLIER	UINT64_C(0xbf58476d1ce4e5b9)
 
 /*
- * The state the unkeyed fold of a wide hash starts from, in
+ * The state the unkeyed fold of relic_hash_words_wide() starts from, in
  * place of a seed: the golden ratio's fraction, an arbitrary constant whose
  * bits are mixed, so that a key of no words still has a stripe.
  */
@@ -175,27 +175,6 @@ relic_hash_words_wide(uint64_t seed, const uint32_t *words, size_t count)
 	for (i = 0; i < count; i++) {
 		keyed = hash_fold(keyed, words[i]);
 		unkeyed = hash_fold(unkeyed, words[i]);
-	}
-
-	return ((unkeyed & ~(uint64_t)UINT32_MAX) |
-	    (uint32_t)finalize(keyed));
-}
-
-uint64_t
-relic_hash_bytes_wide(uint64_t seed, const void *bytes, size_t length)
-{
-	const unsigned char *data;
-	uint64_t keyed;
-	uint64_t unkeyed;
-	size_t i;
-
-	data = bytes;
-	keyed = hash_start(seed);
-	unkeyed = RELIC_STRIPE_FOLD_START;
-
-	for (i = 0; i < length; i++) {
-		keyed = hash_fold(keyed, data[i]);
-		unkeyed = hash_fold(unkeyed, data[i]);
 	}
 
 	return ((unkeyed & ~(uint64_t)UINT32_MAX) |
@@ -445,18 +424,6 @@ relic_idtab_reset(relic_idtab_t *table)
 		free(table->tags);
 	}
 	relic_idtab_init(table, table->tagged);
-}
-
-void
-relic_idtab_clear(relic_idtab_t *table)
-{
-	if (table->slots == NULL)
-		return;
-
-	bzero(table->slots, table->capacity * sizeof(*table->slots));
-	if (table->tags != NULL)
-		bzero(table->tags, table->capacity);
-	table->count = 0;
 }
 
 void

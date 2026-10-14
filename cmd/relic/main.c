@@ -102,9 +102,8 @@ enum stdin_reader {
  * their columns may come from.  `exports` holds the -O operands, parsed, in
  * the order given.  `config` is what the context is created with: -j sets
  * its thread count, -l its limits, -X naive, no-index, no-reorder,
- * no-magic, no-factor, no-stream, no-exists, no-batch-import,
- * no-group-reduction, parallel and group-rules its flags, and a second -v
- * the flag that asks for notes about
+ * no-magic, no-factor, no-stream, no-exists, no-batch-import, parallel and
+ * group-rules its flags, and a second -v the flag that asks for notes about
  * mixed-type comparisons.
  * `verbosity` counts the -v options.
  *
@@ -816,11 +815,6 @@ parse_debug(const char *name, options_t *options)
 
 	if (strcmp(name, "no-batch-import") == 0) {
 		options->config.flags |= RELIC_F_NO_BATCH_IMPORT;
-		return (0);
-	}
-
-	if (strcmp(name, "no-group-reduction") == 0) {
-		options->config.flags |= RELIC_F_NO_GROUP_REDUCTION;
 		return (0);
 	}
 

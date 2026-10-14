@@ -503,23 +503,6 @@ op_index_read(relic_op_t *op, const relic_relation_t **relationp,
 }
 
 /*
- * The question op_index_read() answers, asked of a copy, since the answer
- * it gives is a position the caller could write.
- */
-bool
-relic_plan_reads_index(const relic_op_t *op, const relic_relation_t *relation,
-    uint32_t key_mask)
-{
-	const relic_relation_t *read;
-	relic_op_t copy;
-	uint32_t mask;
-
-	copy = *op;
-	return (op_index_read(&copy, &read, &mask) != NULL &&
-	    read == relation && mask == key_mask);
-}
-
-/*
  * Record the index an operation just emitted over `relation` reads, if it
  * reads one.  The operation holds its relation read-only, and building the
  * index needs it writable, so the caller passes the relation it placed the
@@ -1227,21 +1210,18 @@ place_comparison(relic_planner_t *planner, const relic_literal_t *literal)
 
 /*
  * How an AGGREGATE reaches its group's rows, from which of the relation's
- * columns are key columns: with no key, the relation's tuple count for a
- * count and all of its rows for any other function; the one tuple the
- * key names when every column is one; and otherwise those an index on the
+ * columns are key columns: its tuple count for an unkeyed count, all of
+ * its rows for other folds with no key, the one tuple the
+ * key names when every column is one, and otherwise those an index on the
  * key columns holds, or, under RELIC_F_NO_INDEX, those a walk of the whole
- * relation matches.  RELIC_F_NO_GROUP_REDUCTION, the reference strategy,
- * walks the rows of an unkeyed count too.
+ * relation matches.
  */
 static enum relic_fold_access
 fold_access(const relic_planner_t *planner, enum relic_aggregate_fn fn,
     uint32_t key_mask, uint16_t arity)
 {
-	if (key_mask == 0 && fn == RELIC_AGG_COUNT &&
-	    (planner->ctx->config.flags & RELIC_F_NO_GROUP_REDUCTION) == 0)
+	if (key_mask == 0 && fn == RELIC_AGG_COUNT)
 		return (RELIC_FOLD_CARDINALITY);
-
 	if (key_mask == 0)
 		return (RELIC_FOLD_SCAN);
 
@@ -1259,56 +1239,36 @@ fold_access(const relic_planner_t *planner, enum relic_aggregate_fn fn,
  * over the relation it folds.  It binds its result slot when nothing has, a
  * number slot for a count or a sum and a domain slot for a min or a max, and
  * otherwise compares with it, reading it as the kind of slot it is.  A
- * lookup reads the index keyed on the literal's key columns.  A fold of a
- * source the run reduced reads its summary, and no relation: nothing
- * records an access, since nothing that changes is read.
+ * lookup reads the index keyed on the literal's key columns.
  */
 static int
 place_aggregate(relic_planner_t *planner, const relic_literal_t *literal)
 {
 	const relic_aggregate_t *aggregate;
-	const relic_summary_t *summary;
-	const relic_pred_t *source;
 	relic_op_aggregate_t *fold;
 	relic_relation_t *relation;
 	relic_op_t *op;
-	uint16_t signature;
 
 	aggregate = &literal->u.aggregate;
-	if (relic_reduction_fold(planner->ctx, aggregate, &summary,
-	    &signature) != 0)
+	relation = relic_relation_read(planner->ctx, aggregate->source);
+	if (relation == NULL)
 		return (-1);
-	relation = NULL;
-	if (summary == NULL) {
-		relation = relic_relation_read(planner->ctx,
-		    aggregate->source);
-		if (relation == NULL)
-			return (-1);
-	}
 
 	op = append_op(planner, RELIC_OP_AGGREGATE);
 	fold = &op->u.aggregate;
 	fold->relation = relation;
 	fold->aggregate = aggregate;
-	fold->summary = summary;
-	fold->signature = signature;
 	fold->key_slots = aggregate->shared;
 	fold->where = aggregate->where;
 	fold->fn = aggregate->fn;
+	fold->arity = relation->arity;
 	fold->key_count = aggregate->shared_count;
 	fold->column = aggregate->column;
 	fold->slot = aggregate->result;
 	fold->key_mask = aggregate->key_mask;
-	if (summary != NULL) {
-		source = relic_pred_of(planner->ctx, aggregate->source);
-		fold->arity = source == NULL ? 0 : source->arity;
-		fold->access = RELIC_FOLD_SUMMARY;
-	} else {
-		fold->arity = relation->arity;
-		fold->access = fold_access(planner, fold->fn, fold->key_mask,
-		    fold->arity);
-		record_access(planner, op, relation);
-	}
+	fold->access = fold_access(planner, fold->fn, fold->key_mask,
+	    fold->arity);
+	record_access(planner, op, relation);
 
 	fold->binds = (planner->bound & slot_bit(fold->slot)) == 0;
 	if (!fold->binds) {
@@ -2368,26 +2328,11 @@ int
 relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
     relic_relation_t *target, const bool *incomplete, relic_plan_t *plan)
 {
-	relic_plan_draft_t draft;
-
-	bzero(plan, sizeof(*plan));
-
-	if (relic_plan_draft_rule(ctx, arena, rule, target, incomplete,
-	    &draft) != 0)
-		return (-1);
-
-	return (relic_plan_prepare(ctx, arena, &draft, plan));
-}
-
-int
-relic_plan_draft_rule(relic_t *ctx, relic_arena_t *arena,
-    const relic_rule_t *rule, relic_relation_t *target,
-    const bool *incomplete, relic_plan_draft_t *draft)
-{
 	relic_planner_t planner;
+	relic_plan_draft_t draft;
 	int status;
 
-	bzero(draft, sizeof(*draft));
+	bzero(plan, sizeof(*plan));
 
 	status = planner_init(&planner, ctx, arena, rule, target,
 	    RELIC_PLAN_NO_DELTA, RELIC_POLICY_GREEDY, incomplete);
@@ -2396,10 +2341,14 @@ relic_plan_draft_rule(relic_t *ctx, relic_arena_t *arena,
 	if (status == 0)
 		status = decide_order(&planner);
 	if (status == 0)
-		status = emit_draft(&planner, draft);
+		status = emit_draft(&planner, &draft);
 	planner_release(&planner);
 
-	return (planning_status(ctx, arena, status));
+	status = planning_status(ctx, arena, status);
+	if (status != 0)
+		return (-1);
+
+	return (relic_plan_prepare(ctx, arena, &draft, plan));
 }
 
 /*

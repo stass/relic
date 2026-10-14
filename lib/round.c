@@ -645,8 +645,7 @@ round_reads_no_target(const relic_round_t *round)
  * is past whatever the items before it in a round inserted, rather than
  * through a member's view, which the deltas fixed before the round began;
  * NULL for an operation that reads none that way.  A fold reads its group
- * relation whole, and a fold of a summary reads none, its relation being
- * NULL.  A filter, an assignment and the EMIT read no relation.
+ * relation whole.  A filter, an assignment and the EMIT read no relation.
  * Every kind is named, so a new one does not compile until it is placed.
  */
 static const relic_relation_t *

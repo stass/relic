@@ -11,8 +11,7 @@
  * result either is the exact one or is reported as overflowing, and division
  * and remainder at every combination of signs and at a zero divisor.  The
  * exact sum is driven with each extreme in each order and read back, and
- * checked near the bound its accumulator is sized for, and partial sums are
- * combined across every split of their addends.  The suite is built
+ * checked near the bound its accumulator is sized for.  The suite is built
  * twice, once over the compiler's overflow builtins and once
  * over the portable comparisons, and must pass both; under
  * UndefinedBehaviorSanitizer neither may execute a signed overflow.
@@ -24,7 +23,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <strings.h>
 
 #include "arith.h"
 #include "harness.h"
@@ -70,12 +68,10 @@ static void	 quotients_truncate_and_remainders_follow_the_dividend(void);
 static int64_t	 sum_of(const int64_t *addends, size_t count, bool *fitsp);
 static void	 sums_are_exact_in_every_order(void);
 static void	 sums_driven_by_the_extremes_come_back(void);
-static void	 combined_partials_agree_with_one_sum(void);
 #ifdef __SIZEOF_INT128__
 static relic_sum_t sum_holding(wide_t total);
 static wide_t	 sum_total(const relic_sum_t *sum);
 static void	 sums_near_the_bound_are_exact(void);
-static void	 combined_sums_are_exact(void);
 #endif
 
 static const char *
@@ -445,123 +441,7 @@ sums_near_the_bound_are_exact(void)
 		}
 	}
 }
-
-/*
- * Two partial sums combined, each drawn from the same states near the
- * bound and either side of zero: the combined total must be the oracle's
- * sum of the two, whichever is combined into which, including the pairs
- * whose low words carry and the pairs whose signs cancel.  A sum combined
- * with itself doubles, which it does only when the other sum's words are
- * read before the first is written.
- */
-static void
-combined_sums_are_exact(void)
-{
-	static const wide_t one = 1;
-	wide_t states[12];
-	wide_t expected;
-	relic_sum_t sum;
-	relic_sum_t more;
-	size_t s;
-	size_t m;
-
-	states[0] = (wide_t)(BOUND_ADDENDS - 1) * INT64_MAX;
-	states[1] = (wide_t)(BOUND_ADDENDS - 1) * INT64_MIN;
-	states[2] = (wide_t)INT64_MAX;
-	states[3] = (wide_t)INT64_MIN;
-	states[4] = 0;
-	states[5] = 1;
-	states[6] = -1;
-	states[7] = (wide_t)UINT64_MAX;
-	states[8] = -(wide_t)UINT64_MAX;
-	states[9] = one << 64;
-	states[10] = -(one << 64);
-	states[11] = (wide_t)INT64_MAX + 1;
-
-	for (s = 0; s < sizeof(states) / sizeof(states[0]); s++) {
-		for (m = 0; m < sizeof(states) / sizeof(states[0]); m++) {
-			sum = sum_holding(states[s]);
-			more = sum_holding(states[m]);
-			relic_sum_combine(&sum, &more);
-			expected = states[s] + states[m];
-
-			checkf(sum_total(&sum) == expected, SCENARIO_SUM,
-			    "state %zu combined with state %zu should be "
-			    "exact", s, m);
-			checkf(relic_sum_fits(&sum) == (expected >= INT64_MIN &&
-			    expected <= INT64_MAX), SCENARIO_SUM,
-			    "state %zu combined with state %zu should fit "
-			    "exactly when the total does", s, m);
-		}
-
-		sum = sum_holding(states[s]);
-		relic_sum_combine(&sum, &sum);
-		checkf(sum_total(&sum) == states[s] + states[s], SCENARIO_SUM,
-		    "state %zu combined with itself should double", s);
-	}
-}
 #endif
-
-/*
- * Each three-addend case of the order test split into partial sums every
- * way a parallel fold may split it -- each addend alone, a pair and the
- * third, all three in one -- and the partials combined in each order:
- * every split must give the total the addends give one by one.
- */
-static void
-combined_partials_agree_with_one_sum(void)
-{
-	static const int64_t cases[][3] = {
-		{ INT64_MAX, 1, -1 },
-		{ INT64_MIN, -1, 1 },
-		{ INT64_MAX, INT64_MAX, INT64_MIN },
-		{ INT64_MIN, INT64_MIN, INT64_MAX },
-		{ INT64_MAX, INT64_MIN, -1 },
-		{ INT64_MAX, 1, 0 }
-	};
-	/* The part each addend joins, for every split of three addends. */
-	static const size_t splits[][3] = {
-		{ 0, 0, 0 }, { 0, 0, 1 }, { 0, 1, 0 }, { 1, 0, 0 },
-		{ 0, 1, 2 }
-	};
-	relic_sum_t parts[3];
-	relic_sum_t whole;
-	relic_sum_t sum;
-	size_t c;
-	size_t s;
-	size_t i;
-	size_t first;
-	bool fits;
-	int64_t total;
-
-	for (c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
-		total = sum_of(cases[c], 3, &fits);
-		for (s = 0; s < sizeof(splits) / sizeof(splits[0]); s++) {
-			bzero(parts, sizeof(parts));
-			for (i = 0; i < 3; i++)
-				relic_sum_add(&parts[splits[s][i]],
-				    cases[c][i]);
-
-			for (first = 0; first < 3; first++) {
-				sum = parts[first];
-				for (i = 0; i < 3; i++)
-					if (i != first)
-						relic_sum_combine(&sum,
-						    &parts[i]);
-
-				whole.lo = 0;
-				whole.hi = 0;
-				relic_sum_combine(&whole, &sum);
-				checkf(relic_sum_fits(&whole) == fits &&
-				    (!fits || relic_sum_value(&whole) ==
-				    total), SCENARIO_SUM,
-				    "case %zu split %zu combined from part "
-				    "%zu should agree with the one-by-one "
-				    "sum", c, s, first);
-			}
-		}
-	}
-}
 
 int
 main(void)
@@ -571,10 +451,8 @@ main(void)
 	negation_overflows_only_at_the_minimum();
 	sums_are_exact_in_every_order();
 	sums_driven_by_the_extremes_come_back();
-	combined_partials_agree_with_one_sum();
 #ifdef __SIZEOF_INT128__
 	sums_near_the_bound_are_exact();
-	combined_sums_are_exact();
 #endif
 
 	return (check_summary("arith"));

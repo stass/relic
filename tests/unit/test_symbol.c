@@ -27,7 +27,6 @@
 #include "harness.h"
 #include "internal.h"
 
-#define	SCENARIO_BATCH		"a batch leaves the pool as one at a time does"
 #define	SCENARIO_EMBEDDED	"a NUL byte is part of the key"
 #define	SCENARIO_EMPTY		"the empty string is an ordinary symbol"
 #define	SCENARIO_HASH		"a symbol keeps the hash it was placed by"
@@ -38,11 +37,7 @@
 #define	SCENARIO_PACKED		"a symbol's bytes follow the previous one's"
 #define	SCENARIO_UNKNOWN	"an unassigned identifier names nothing"
 
-typedef struct batch_case batch_case_t;
-
-static void	 a_batch_leaves_the_pool_as_one_at_a_time(void);
 static void	 a_symbol_keeps_the_hash_it_was_placed_by(void);
-static void	 batch_alike(const batch_case_t *c);
 static void	 a_symbol_too_long_is_refused_unread(void);
 static void	 an_unassigned_identifier_has_no_bytes(void);
 static void	 embedded_nul_bytes_distinguish_symbols(void);
@@ -280,8 +275,7 @@ an_unassigned_identifier_has_no_bytes(void)
 	check(relic_symbol_bytes(ctx, RELIC_ID_NONE, NULL) == NULL,
 	    SCENARIO_UNKNOWN, "identifier zero should name nothing");
 	check(relic_symbol_bytes(ctx, only + 1, NULL) == NULL,
-	    SCENARIO_UNKNOWN,
-	    "an identifier past the last should name nothing");
+	    SCENARIO_UNKNOWN, "an identifier past the last should name nothing");
 	check(relic_string(ctx, only + 1, NULL) == NULL, SCENARIO_UNKNOWN,
 	    "and the public accessor should agree");
 
@@ -399,202 +393,9 @@ the_pool_packs_its_bytes(void)
 	relic_destroy(ctx);
 }
 
-/*
- * A batch of new strings reserved and appended at once leaves the pool as
- * interning them one at a time does: the same identifiers, every stripe of
- * the index at the same capacity, and the bytes the projection promised.
- * That holds whether the stripes are placed on the calling thread or on a
- * pool, and whether they grow at once or in the parts that place them.  A
- * batch is shared from RELIC_SYMBOL_PARALLEL_COUNT strings, and its growth
- * deferred when it is reserved and appended in one call, as `one_call`
- * asks, and the memory limit admits the tables it replaces; `tight` sets
- * the limit to admit the batch and not them.  The stripes are chosen by an
- * unkeyed hash, so two contexts, whose seeds differ, fill their stripes
- * alike.  Both pools hold BATCH_HELD strings before the batch, so that
- * every stripe has a table to replace, and the batches are large enough
- * that every stripe grows several times.
- */
-enum {
-	BATCH_FULL = RELIC_SYMBOL_PARALLEL_COUNT + 1024,
-	BATCH_HELD = 600,
-	NAME_SIZE = 16
-};
-
-struct batch_case {
-	const char	*how;
-	size_t		 count;
-	size_t		 threads;
-	bool		 one_call;
-	bool		 tight;
-};
-
-static void
-a_batch_leaves_the_pool_as_one_at_a_time(void)
-{
-	static const batch_case_t cases[] = {
-		{ "on the calling thread", BATCH_FULL, 1, true, false },
-		{ "on the pool, growing at once", BATCH_FULL, 4, false,
-		    false },
-		{ "on the pool, growing in its parts", BATCH_FULL, 4, true,
-		    false },
-		{ "one string short of the pool",
-		    RELIC_SYMBOL_PARALLEL_COUNT - 1, 4, true, false },
-		{ "on the pool, the limit refusing the parts' growth",
-		    BATCH_FULL, 4, true, true },
-	};
-	size_t i;
-
-	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
-		batch_alike(&cases[i]);
-}
-
-static void
-batch_alike(const batch_case_t *c)
-{
-	static relic_fresh_string_t fresh[BATCH_FULL];
-	static char names[BATCH_FULL][NAME_SIZE];
-	static uint32_t list[BATCH_FULL];
-	relic_fresh_stripes_t stripes;
-	relic_arena_mark_t copies;
-	relic_account_t *account;
-	relic_config_t config;
-	relic_t *single;
-	relic_t *batch;
-	size_t projected;
-	size_t first_unequal;
-	size_t first_lost;
-	size_t s;
-	size_t i;
-	uint32_t id;
-	bool shares;
-	int written;
-	int added;
-
-	bzero(&config, sizeof(config));
-	config.threads = c->threads;
-	single = relic_create();
-	batch = relic_create_config(&config);
-	checkf(single != NULL && batch != NULL, SCENARIO_BATCH,
-	    "%s: two contexts should be created", c->how);
-	if (single == NULL || batch == NULL)
-		goto out;
-	if (c->threads > 1 && relic_pool_create(&batch->pool, c->threads,
-	    batch->hash_seed) != 0) {
-		checkf(false, SCENARIO_BATCH, "%s: a pool should be created",
-		    c->how);
-		goto out;
-	}
-
-	for (i = 0; i < BATCH_HELD; i++) {
-		written = snprintf(names[0], NAME_SIZE, "held%zu", i);
-		if (written < 0 || relic_symbol_intern(single, names[0],
-		    (size_t)written, &id) != 0 || relic_symbol_intern(batch,
-		    names[0], (size_t)written, &id) != 0) {
-			checkf(false, SCENARIO_BATCH, "%s: \"%s\" should "
-			    "intern", c->how, names[0]);
-			goto out;
-		}
-	}
-
-	for (i = 0; i < c->count; i++) {
-		written = snprintf(names[i], NAME_SIZE, "s%zu", i);
-		if (written < 0 || relic_symbol_intern(single, names[i],
-		    (size_t)written, &id) != 0) {
-			checkf(false, SCENARIO_BATCH, "%s: \"%s\" should "
-			    "intern", c->how, names[i]);
-			goto out;
-		}
-		fresh[i].bytes = names[i];
-		fresh[i].copy = NULL;
-		fresh[i].length = (size_t)written;
-		fresh[i].hash = relic_symbol_hash(batch, names[i],
-		    (size_t)written);
-	}
-
-	stripes.list = list;
-	relic_symbol_list(fresh, c->count, &stripes);
-	projected = relic_symbol_pool_bytes_after(batch, fresh, c->count,
-	    &stripes);
-	if (c->tight) {
-		account = &batch->account;
-		account->limit = account->store_bytes + account->value_bytes +
-		    account->pool_bytes + account->predtab_bytes +
-		    account->arena_bytes - relic_symbol_pool_bytes(batch) +
-		    projected;
-	}
-	if (c->one_call)
-		added = relic_symbol_add(batch, fresh, c->count, &stripes);
-	else {
-		added = relic_symbol_reserve(batch, fresh, c->count, &stripes,
-		    &copies);
-		if (added == 0)
-			relic_symbol_append(batch, fresh, c->count, &stripes);
-	}
-	if (added != 0) {
-		checkf(false, SCENARIO_BATCH, "%s: the batch should be "
-		    "added", c->how);
-		goto out;
-	}
-
-	checkf(relic_symbol_pool_bytes(batch) == projected, SCENARIO_BATCH,
-	    "%s: the batch should hold the bytes its projection promised",
-	    c->how);
-	checkf(relic_symbol_pool_bytes(batch) ==
-	    relic_symbol_pool_bytes(single), SCENARIO_BATCH,
-	    "%s: the batch should hold the bytes one at a time holds",
-	    c->how);
-	checkf(batch->account.pool_bytes == projected, SCENARIO_BATCH,
-	    "%s: the account should count what the pool holds", c->how);
-	first_unequal = RELIC_STRIPES;
-	for (s = 0; s < RELIC_STRIPES; s++) {
-		if (batch->symbols.index[s].capacity !=
-		    single->symbols.index[s].capacity ||
-		    batch->symbols.index[s].count !=
-		    single->symbols.index[s].count ||
-		    batch->symbols.grown[s].capacity != 0) {
-			first_unequal = s;
-			break;
-		}
-	}
-	checkf(first_unequal == RELIC_STRIPES, SCENARIO_BATCH,
-	    "%s: stripe %zu should be filled and sized as one at a time "
-	    "fills it", c->how, first_unequal);
-
-	first_lost = c->count;
-	for (i = 0; i < c->count; i++) {
-		if (relic_symbol_find(batch, names[i], fresh[i].length,
-		    fresh[i].hash) != (uint32_t)(BATCH_HELD + i + 1)) {
-			first_lost = i;
-			break;
-		}
-	}
-	checkf(first_lost == c->count, SCENARIO_BATCH,
-	    "%s: \"%s\" should be found under identifier %zu", c->how,
-	    first_lost < c->count ? names[first_lost] : "",
-	    BATCH_HELD + first_lost + 1);
-
-#ifdef RELIC_THREADS
-	shares = c->threads > 1 && c->count >= RELIC_SYMBOL_PARALLEL_COUNT;
-#else
-	shares = false;
-#endif
-	checkf(batch->counters.symbols_shared == (shares ? 1 : 0),
-	    SCENARIO_BATCH, "%s: the batch should %sbe placed on the pool",
-	    c->how, shares ? "" : "not ");
-	checkf(batch->counters.symbols_deferred ==
-	    (shares && c->one_call && !c->tight ? 1 : 0), SCENARIO_BATCH,
-	    "%s: the stripes should %sgrow in the parts placing them",
-	    c->how, shares && c->one_call && !c->tight ? "" : "not ");
-
-out:
-	relic_destroy(single);
-	relic_destroy(batch);
-}
-
 int
 main(void)
 {
-	a_batch_leaves_the_pool_as_one_at_a_time();
 	a_symbol_keeps_the_hash_it_was_placed_by();
 	a_symbol_too_long_is_refused_unread();
 	an_unassigned_identifier_has_no_bytes();

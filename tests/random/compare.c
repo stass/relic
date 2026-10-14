@@ -66,15 +66,7 @@
  *
  * The strategies under RELIC_F_GROUP_RULES hold the group relations the
  * others fold in place without copying, so their tuple totals are held only
- * to each other's.  Those under RELIC_F_NO_GROUP_REDUCTION store a source
- * the others reduce straight into group state, and the values only its
- * rows hold, so their totals are held to none; the strategy whose
- * derivations are counted runs under it too, so that it counts the rows
- * of the program's ordinary fixed point.  Whether a source is reduced
- * depends on its producer's plan, and RELIC_F_NO_EXISTS plans a literal
- * holding `_` as a scan that may derive a row twice where the default's
- * EXISTS derives it once, so that strategy may store a source the default
- * reduces, and its totals are held to none either.
+ * to each other's.
  */
 
 typedef struct strategy strategy_t;
@@ -111,7 +103,7 @@ static const strategy_t strategies[STRATEGY_COUNT] = {
 		"no-stream", RELIC_F_NO_STREAM, false, STRATEGY_DEFAULT, 0,
 		FAULT_NONE },
 	[STRATEGY_NO_EXISTS] = {
-		"no-exists", RELIC_F_NO_EXISTS, false, STRATEGY_NONE, 0,
+		"no-exists", RELIC_F_NO_EXISTS, false, STRATEGY_DEFAULT, 0,
 		FAULT_NONE },
 	[STRATEGY_PARALLEL] = {
 		"parallel", RELIC_F_PARALLEL_ALWAYS, false, STRATEGY_DEFAULT,
@@ -149,16 +141,8 @@ static const strategy_t strategies[STRATEGY_COUNT] = {
 	[STRATEGY_GROUP_RULES_NO_MAGIC] = {
 		"group-rules+no-magic", RELIC_F_GROUP_RULES | RELIC_F_NO_MAGIC,
 		false, STRATEGY_NONE, 0, FAULT_NONE },
-	[STRATEGY_NO_GROUP_REDUCTION] = {
-		"no-group-reduction", RELIC_F_NO_GROUP_REDUCTION, false,
-		STRATEGY_NONE, 0, FAULT_NONE },
-	[STRATEGY_GROUP_RULES_NO_GROUP_REDUCTION] = {
-		"group-rules+no-group-reduction",
-		RELIC_F_GROUP_RULES | RELIC_F_NO_GROUP_REDUCTION, false,
-		STRATEGY_NONE, 0, FAULT_NONE },
 	[STRATEGY_MATERIALIZED] = {
-		"materialized",
-		RELIC_F_GROUP_RULES | RELIC_F_NO_GROUP_REDUCTION, true,
+		"materialized", RELIC_F_GROUP_RULES, true,
 		STRATEGY_GROUP_RULES_NO_MAGIC, 0, FAULT_NONE },
 };
 

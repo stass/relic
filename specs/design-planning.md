@@ -38,11 +38,6 @@ recursion; the executor runs it with an explicit-level loop
 
 ### The operations
 
-`EMIT` carries head terms and the output arity validated against its
-taker's schema. Its destination is the taker's, whether a relation, answer
-sink or reducer. It has no input-relation handle; static analysis reads
-its schema directly, while relational read operations require relations.
-
 There are nine operations (see `lib/plan.h`). **Generators** can succeed
 more than once, leaving new bindings each time. **Tests** read only
 constants and bound slots and succeed at most once; two of them also bind a
@@ -113,7 +108,9 @@ inserted without a plan; only rules with bodies are planned.
 
 The executor relies on these without checking them:
 
-* **The last operation is `EMIT`, and it is the only one.**
+* **The last operation is `EMIT`, and it is the only one.** It carries
+  head terms, arity and the logical predicate, with no relation pointer.
+  Evaluation pairs that schema with its insertion or delivery destination.
 * **Every slot a bound term, a postfix program or a fold reads is bound by
   an earlier operation (a generator, an `ASSIGN` or an `AGGREGATE`) or by
   an earlier column of the same operation.**
@@ -271,32 +268,16 @@ literals reject bindings that never reach the head. Placing it later would
 need group-size estimates the planner does not have. Placement changes the
 work, never the answer.
 
-A fold reaches its rows as a positive literal with the same key columns
-would: the whole relation when there is no key, the index on exactly the
-key columns when there are some, one probe of the canonical index when
-every column is a key column. The key columns are a group relation's
+An unkeyed count reads the complete source view's cardinality without
+visiting tuples. Other folds reach rows as a positive literal with the
+same key columns would: the whole relation when there is no key, the index
+on exactly the key columns when there are some, one probe of the canonical
+index when every column is a key column. The key columns are a group relation's
 leading columns, or, for an atom folded in place, whichever columns hold
 the shared variables -- a set, not a prefix, as indexes are keyed on sets.
-The case is written into the operation. Under `-X no-index` the fold walks
-the whole relation matching key columns, so the reference has no index the
-default lacks.
-
-### Summary access for aggregates
-
-An aggregate resolves its source through the evaluation's physical source
-bindings. It can read ordinary rows or an immutable
-[group summary](design-group-reduction.md). A summary operation retains
-the original key-slot mapping, function, result kind and bind-or-compare
-behavior, but probes completed group state instead of walking row chains.
-It requests no secondary index. An unkeyed count of stored rows can use
-the source's exact tuple count.
-
-Summary construction is a scheduled caller operation over complete input,
-never a side effect of an aggregate step. Ordinary atom planning requests
-a row source and cannot receive a summary. The producer-removal certificate
-reuses `relic_plan_derives_distinct()` on the completed producer plan;
-source usage, schedule and lifetime checks belong to the reduction scope.
-Neither a column's observed cardinality nor an estimate proves uniqueness.
+The case is written into the operation. Under `-X no-index` keyed folds
+walk the whole relation matching key columns; an unkeyed count still reads
+cardinality. The reference has no index the default lacks.
 
 ## Dead variables and existence checks
 
@@ -809,12 +790,6 @@ Each nesting level is four spaces.
   has examples.
 
 ### Operation lines
-
-[Group reduction](design-group-reduction.md#explain-counters-and-the-reference-strategy)
-adds source-reduction and key-projection action lines to the component
-layout, and a `summary` annotation to an aggregate using completed state.
-These describe physical access while keeping the original rule, aggregate
-signature and key-column spelling. They contain no worker-specific data.
 
 An operation is its kind followed by what it reads, as a program writes
 it:

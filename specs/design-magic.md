@@ -106,21 +106,6 @@ A predicate is read completely when any of these holds:
   keeps binds a column, every predicate it adorned is read completely and
   nothing is drafted ([subsumption](#free-adornments-subsume-bound-ones)).
 
-[Direct group reduction](design-group-reduction.md#scheduling-and-magic-sets)
-can also promote reached, exact key projections of a candidate source to
-the complete part before evaluation. The source is already reached through
-an aggregate. Its physical plan supplies complete group state, and the
-projections expose ordinary key relations, so no generated rule needs the
-omitted source rows. If the producer's final distinctness check fails,
-those components compute ordinary complete relations instead. A copied
-aggregate keeps its source and signature while only outer slots are
-renumbered, and reads the same completed summary.
-
-Completeness is logical; the reduction scope separately controls physical
-row availability. Its typed source bindings prevent a positive or negative
-atom from reading a summary as an empty relation. Whole-program fallback
-destroys those bindings before discard and retains actual named rows.
-
 Everything else the query reaches through positive literals is read on
 demand.
 

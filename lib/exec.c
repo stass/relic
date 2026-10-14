@@ -1420,8 +1420,6 @@ resolve_views(relic_scratch_t *scratch, const relic_exec_env_t *env,
 			    &op->u.atom);
 			break;
 		case RELIC_OP_AGGREGATE:
-			if (op->u.aggregate.access == RELIC_FOLD_SUMMARY)
-				break;
 			scratch->states[level].view = relic_relation_all(
 			    op->u.aggregate.relation);
 			break;
@@ -1925,7 +1923,6 @@ fold_row(const relic_exec_env_t *env, const relic_op_aggregate_t *aggregate,
 		fold->extreme_view = value;
 		break;
 	case RELIC_FOLD_KEPT:
-	case RELIC_FOLD_TIED:
 		break;
 	}
 
@@ -1941,13 +1938,8 @@ fold_row(const relic_exec_env_t *env, const relic_op_aggregate_t *aggregate,
  * and the relation is complete, so nothing inserts into it while the walk
  * runs.  A fold cannot pause part way, since its running value lives in
  * its caller's frame, so it charges the rows it reads to the call's reads
- * and goes on, and the call pauses once its step returns.
- *
- * A fold of a summary reads no row: the group's count and accumulator
- * were completed when the source was reduced, and a key no row holds
- * leaves the fold empty, as a walk that matches nothing does.  Nor does
- * an unkeyed count, whose group is the whole view: its count is the
- * view's length.
+ * and goes on, and the call pauses once its step returns. An unkeyed
+ * count reads only the view's cardinality and visits no tuple.
  */
 static void
 fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
@@ -1958,26 +1950,14 @@ fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	const relic_dom_t *tuple;
 	relic_dom_t key[RELIC_MAX_ARITY];
 	relic_tuple_id_t id;
-	size_t group;
-	uint16_t k;
-
-	if (aggregate->access == RELIC_FOLD_SUMMARY) {
-		for (k = 0; k < aggregate->key_count; k++)
-			key[k] = scratch->frame[aggregate->key_slots[k]];
-		scratch->counters.summary_probes++;
-		group = relic_summary_find(aggregate->summary, key);
-		if (group == RELIC_SUMMARY_NONE)
-			return;
-		if (aggregate->fn != RELIC_AGG_COUNT)
-			fold->state = *relic_summary_state(aggregate->summary,
-			    group, aggregate->signature, &fold->extreme);
-		fold->rows = relic_summary_rows(aggregate->summary, group);
-		return;
-	}
 
 	gather_fold_key(scratch, aggregate, key);
 
 	switch (aggregate->access) {
+	case RELIC_FOLD_CARDINALITY:
+		fold->rows = view->end > view->first ?
+		    view->end - view->first : 0;
+		return;
 	case RELIC_FOLD_SCAN:
 		for (id = view->first; id < view->end; id++) {
 			charge_unresumable_read(scratch);
@@ -2010,12 +1990,6 @@ fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		tuple = relic_relation_tuple(aggregate->relation, id);
 		(void)fold_row(env, aggregate, fold, tuple);
 		return;
-	case RELIC_FOLD_CARDINALITY:
-		fold->rows = view->end > view->first ?
-		    view->end - view->first : 0;
-		return;
-	case RELIC_FOLD_SUMMARY:
-		break;
 	}
 }
 

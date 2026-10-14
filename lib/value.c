@@ -67,8 +67,6 @@ static const char *context_bytes(const void *source, uint32_t id,
 static bool	 value_held(const relic_t *ctx, const relic_value_t *value);
 static void	 report_foreign(relic_t *ctx, const relic_value_t *foreign);
 static void	 account_value_table(relic_t *ctx);
-static void	 append_values(relic_valtab_t *table,
-		    const relic_pending_map_t *map);
 static int	 cover_symbol_uses(relic_t *ctx, uint32_t symbol);
 static bool	 decode_integer(const relic_valtab_t *table, uint32_t position,
 		    relic_value_t *value);
@@ -78,7 +76,6 @@ static bool	 decode_symbol_value(const relic_valtab_t *table,
 static relic_dom_t dom_type_bits(enum relic_type type);
 static int	 intern_bytes(relic_t *ctx, enum relic_type type,
 		    const char *bytes, size_t length, relic_value_t *value);
-static int	 intern_pending(relic_t *ctx, relic_pending_map_t *map);
 static int	 intern_integer(relic_t *ctx, int64_t integer,
 		    relic_dom_t *domp);
 static int	 intern_symbol_value(relic_t *ctx, enum relic_type type,
@@ -845,10 +842,7 @@ relic_pending_map_init(relic_pending_map_t *map, relic_arena_t *arena,
 	map->fresh = relic_arena_allocarray(arena, room, sizeof(*map->fresh));
 	map->strings = relic_arena_allocarray(arena, room,
 	    sizeof(*map->strings));
-	map->stripes.list = relic_arena_allocarray(arena, room,
-	    sizeof(*map->stripes.list));
-	if (map->ids == NULL || map->fresh == NULL || map->strings == NULL ||
-	    map->stripes.list == NULL)
+	if (map->ids == NULL || map->fresh == NULL || map->strings == NULL)
 		return (-1);
 
 	return (0);
@@ -868,7 +862,7 @@ relic_pending_map_bytes(size_t room)
 	assert(room <= RELIC_DOM_INDEX_MASK);
 
 	per_entry = sizeof(*map->ids) + sizeof(*map->fresh) +
-	    sizeof(*map->strings) + sizeof(*map->stripes.list);
+	    sizeof(*map->strings);
 
 	return (relic_saturating_product(room, per_entry));
 }
@@ -884,9 +878,7 @@ relic_pending_map_open(relic_pending_map_t *map, size_t room)
 	map->ids = calloc(room, sizeof(*map->ids));
 	map->fresh = calloc(room, sizeof(*map->fresh));
 	map->strings = calloc(room, sizeof(*map->strings));
-	map->stripes.list = calloc(room, sizeof(*map->stripes.list));
-	if (map->ids == NULL || map->fresh == NULL || map->strings == NULL ||
-	    map->stripes.list == NULL) {
+	if (map->ids == NULL || map->fresh == NULL || map->strings == NULL) {
 		relic_pending_map_close(map);
 		return (-1);
 	}
@@ -900,7 +892,6 @@ relic_pending_map_close(relic_pending_map_t *map)
 	free(map->ids);
 	free(map->fresh);
 	free(map->strings);
-	free(map->stripes.list);
 	bzero(map, sizeof(*map));
 }
 
@@ -965,7 +956,7 @@ relic_pending_probe_close(relic_pending_probe_t *probe)
 	bzero(probe, sizeof(*probe));
 }
 
-uint64_t
+uint32_t
 relic_pending_hash(const relic_t *ctx, const relic_pending_t *value,
     const char *bytes)
 {
@@ -1004,8 +995,7 @@ relic_pending_find(const relic_t *ctx, const relic_pending_batch_t *batch,
 		if (ids[position] != RELIC_ID_NONE)
 			continue;
 
-		for (slot = relic_hash_low(batch->hashes[position]) & mask;
-		    slots[slot] != 0;
+		for (slot = batch->hashes[position] & mask; slots[slot] != 0;
 		    slot = (slot + 1) & mask) {
 			if (pending_equal(batch, marker_position(slots[slot]),
 			    position))
@@ -1061,7 +1051,7 @@ find_assigned(const relic_t *ctx, const relic_pending_batch_t *batch,
 	value = &batch->values[position];
 	if (value->kind == RELIC_PENDING_INTEGER) {
 		id = find_integer(&ctx->values, value->u.integer,
-		    relic_hash_low(batch->hashes[position]));
+		    batch->hashes[position]);
 		return (id == RELIC_ID_NONE ? RELIC_ID_NONE :
 		    RELIC_DOM_INTEGER | id);
 	}
@@ -1167,12 +1157,10 @@ relic_pending_number(const relic_t *ctx, const relic_pending_batch_t *batch,
 			map->highest_use = id & RELIC_DOM_INDEX_MASK;
 	}
 
-	relic_symbol_list(map->strings, map->string_count, &map->stripes);
-
 	return (relic_saturating_sum(value_table_bytes_after(&ctx->values,
 	    map->fresh_count, map->highest_use),
 	    relic_symbol_pool_bytes_after(ctx, map->strings,
-	    map->string_count, &map->stripes)));
+	    map->string_count)));
 }
 
 /*
@@ -1296,7 +1284,7 @@ relic_pending_reserve(relic_t *ctx, relic_pending_map_t *map)
 		return (-1);
 
 	return (relic_symbol_reserve(ctx, map->strings, map->string_count,
-	    &map->stripes, &map->copies));
+	    &map->copies));
 }
 
 void
@@ -1309,24 +1297,16 @@ relic_pending_unreserve(relic_t *ctx, relic_pending_map_t *map)
 void
 relic_pending_append(relic_t *ctx, const relic_pending_map_t *map)
 {
-	relic_symbol_append(ctx, map->strings, map->string_count,
-	    &map->stripes);
-	append_values(&ctx->values, map);
-}
-
-/*
- * Append the map's new integers to the table, and record the use of every
- * symbol and string it promised, into room reserved for them.
- */
-static void
-append_values(relic_valtab_t *table, const relic_pending_map_t *map)
-{
+	relic_valtab_t *table;
 	relic_dom_t id;
 	size_t i;
 
+	table = &ctx->values;
 	for (i = 0; i < map->fresh_count; i++)
 		append_integer(table, map->fresh[i],
 		    relic_hash_int64(table->hash_seed, map->fresh[i]));
+
+	relic_symbol_append(ctx, map->strings, map->string_count);
 
 	for (i = 0; i < map->count; i++) {
 		id = map->ids[i];
@@ -1353,14 +1333,14 @@ relic_pending_fits(const relic_t *ctx, const relic_pending_map_t *map)
 }
 
 /*
- * A commit fails for one of three reasons, which the diagnostic tells
+ * A reservation fails for one of three reasons, which the diagnostic tells
  * apart: the integer table, or the pool, holds as many values as an
  * identifier can name, or the allocator refused a growth.
  */
 int
 relic_pending_commit(relic_t *ctx, relic_pending_map_t *map)
 {
-	if (intern_pending(ctx, map) != 0) {
+	if (relic_pending_reserve(ctx, map) != 0) {
 		if (!integers_can_number(&ctx->values, map->fresh_count))
 			relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
 			    "too many distinct integers");
@@ -1372,31 +1352,7 @@ relic_pending_commit(relic_t *ctx, relic_pending_map_t *map)
 		return (-1);
 	}
 
-	return (0);
-}
-
-/*
- * Intern the map's new values, reporting nothing.  The integer table and
- * the record of uses grow first and the pool last, reserved and appended
- * in one relic_symbol_add(), so that the pool may defer its stripes'
- * growth to the parts placing them; the rest is appended once every
- * growth has succeeded.  Returns 0, or -1 with every part's contents as
- * they were and whatever grew counted.
- */
-static int
-intern_pending(relic_t *ctx, relic_pending_map_t *map)
-{
-	if (reserve_integers(ctx, map->fresh_count) != 0)
-		return (-1);
-
-	if (cover_symbol_uses(ctx, map->highest_use) != 0)
-		return (-1);
-
-	if (relic_symbol_add(ctx, map->strings, map->string_count,
-	    &map->stripes) != 0)
-		return (-1);
-
-	append_values(&ctx->values, map);
+	relic_pending_append(ctx, map);
 
 	return (0);
 }

@@ -49,7 +49,6 @@ typedef struct relic_account relic_account_t;
 typedef struct relic_builder relic_builder_t;
 typedef struct relic_index relic_index_t;
 typedef struct relic_relation relic_relation_t;
-typedef struct relic_summary relic_summary_t;
 typedef struct relic_tuple_range relic_tuple_range_t;
 
 /*

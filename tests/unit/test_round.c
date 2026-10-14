@@ -1014,12 +1014,11 @@ reservation_declines(const relic_t *ctx)
 }
 
 /*
- * Whether a deferred context counted its merged rounds, and its shared
- * producer reductions, as shared exactly when it had threads to share
- * them with: every one of them on a pool of more than one worker, and
- * none on the calling thread alone, where no task can have run on a
- * thread of the pool.  A build without threads has one worker whatever
- * it is configured with.
+ * Whether a deferred context counted its merged rounds as shared exactly
+ * when it had threads to share them with: every one of them on a pool of
+ * more than one worker, and none on the calling thread alone, where no
+ * task can have run on a thread of the pool.  A build without threads has
+ * one worker whatever it is configured with.
  */
 static bool
 shared_as_expected(relic_t *deferred, size_t threads)
@@ -1028,8 +1027,7 @@ shared_as_expected(relic_t *deferred, size_t threads)
 
 	relic_stats(deferred, &stats);
 	if (relic_pool_size(threads) > 1)
-		return (stats.parallel_rounds == merged_rounds(deferred) +
-		    deferred->counters.reductions_shared);
+		return (stats.parallel_rounds == merged_rounds(deferred));
 
 	return (stats.parallel_rounds == 0 && thread_tasks(deferred) == 0);
 }

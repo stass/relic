@@ -23,7 +23,7 @@ stratum 2, component 4: largest/1
         emit largest(M)
 stratum 2, component 5: leaves/1
     rule leaves(N) :- N = count { node(X), not has_out(X) }.
-        aggregate N = count agg$leaves$1$0$1(X) cardinality
+        aggregate N = count agg$leaves$1$0$1(X)
         emit leaves(N)
 query $q0(Dir, S) :- dir_size(Dir, S).
     scan dir_size(Dir, S)

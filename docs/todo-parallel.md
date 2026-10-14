@@ -10,7 +10,10 @@ named. M3 observations refer to the
 [comparison matrix](../bench/compare/recorded/m3-max/results.tsv) and
 [diagnostic probes](../bench/compare/recorded/m3-max/optimization-probes/results.json).
 Cross-subsystem sequencing and acceptance criteria are in the
-[benchmark performance plan](todo-benchmark-performance.md).
+[benchmark performance plan](todo-benchmark-performance.md). Targets and
+candidate remedies below motivate measurements; they do not approve new
+execution protocols. Keep improvements local to the retained pool, tasks
+and merge until a separate design earns its complexity.
 
 ## Candidate replication makes large rounds expensive
 
@@ -20,16 +23,13 @@ Souffle's 13.616 s and 1.49 GiB; relic's serial peak is 1.46 GiB.
 Per-worker screening bounds candidates by workers times distinct new
 tuples, and merge staging and scratch add further storage. Measure live
 candidates, cross-worker repeats and each merge allocation separately
-from allocator retention. Implement
-[bounded candidate routing](../specs/design-round-routing.md): bounded
-producer packets, value canonicalization and global tuple ownership in
-barrier-separated phases, then ordering by minimum logical positions.
-The bound includes distinct pending payload and all sorting/resolution
-scratch, with no full-round candidate or value table per worker. Private
-output allowances and the conservative serial scratch floor preserve
-limit behavior. The scale-8 all-pairs tree, which peaks at 109.1 GiB at
-sixteen threads, is a capacity gate alongside closure timings and the
-low-duplicate controls in the implementation plan.
+from allocator retention on the retained implementation. Compare smaller
+capacity and lifetime changes before proposing another collection
+protocol. Global value owners, tuple owners, resumable routing waves and
+new private handle formats are not implementation commitments. A design
+must demonstrate why the measured waste cannot be removed more locally.
+The recorded scale-8 all-pairs tree peak of 109.1 GiB is another capacity
+control, alongside low-duplicate workloads that can lose to routing work.
 
 ## The targets
 
@@ -65,8 +65,9 @@ many pieces as its driver visits tuples, so the round's 45 million
 derivations fall in two tasks. On sixteen threads it takes 5.7 to 5.9 s
 against 3.6 to 3.7 s on one, the fastest of five runs on a loaded machine;
 with `-X no-reorder`, which starts it at the delta, 1.43 s against 4.95 s.
-Cut such a plan by its second operation, or let the planner weigh how a
-first operation can be cut when it picks one.
+Measure driver skew and useful suffix work before proposing second-driver
+slicing or making the planner choose orders for parallelism. Validate the
+existing first-driver path before extending its state machine.
 
 ## Rounds that insert what they derive
 
@@ -106,8 +107,8 @@ could not separate.
 ## A job of few parts wakes every worker
 
 [Medium, component: `lib/pool.c`] `relic_pool_for()` wakes the whole pool
-whatever the job's part count, so a load's commit or a window's symbol
-placement, sixteen parts each, wakes 64 or 128 workers at `-j 64` and
+whatever the job's part count, so a load's commit or a window's canonical
+stripe fill, sixteen parts each, wakes 64 or 128 workers at `-j 64` and
 `-j 128` (`-j 0` on a 128-thread machine). Measured on a 64-core
 Threadripper, that wake costs a flat 0.26-0.7 ms per job whatever the
 work, even right after a job while the workers should still be spinning,
@@ -121,16 +122,15 @@ test first.
 
 ## Deferred growth of a few stripes is slower than growing them at once
 
-[Low, component: `lib/relation.c`, `lib/symbol.c`] When a shared commit
+[Low, component: `lib/relation.c`] When a shared commit
 grows only one or two canonical stripes, the part that completes each
 growth rehashes the whole stripe alone, some three times slower than the
 calling thread does it: appending 1 024 tuples to a store at the edge of
 doubling took 5.1 ms deferred against 3.0 ms serial at `-j 16` and `-j 32`,
 still slower with four stripes growing, and faster from twelve (8.8 against
-19.9 ms). The symbol pool's batches defer under the same rule. Deferring
-only when enough stripes grow, or growing a lone stripe at once, would
-keep the gain without the loss; measure on the commit and on the pool's
-batches before choosing.
+19.9 ms). Measure whether the existing immediate-growth path is preferable for
+small appends before adding a stripe-count threshold. Keep this inquiry
+confined to relation appends; the symbol pool has one ordinary index.
 
 ## Driver slicing is not validated beyond its target
 

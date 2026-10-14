@@ -408,12 +408,10 @@ inside a whole-plan task.
 ## Counters, notes and commit order
 
 Task enumeration is `(item ordinal, slice ordinal)`, independent of which
-worker finishes first. Each slice uses the ordinary serial join order
-within its boundaries. [Bounded routing](design-round-routing.md) can
-pause a lane repeatedly and collect tuples out of order; the task ordinal
-and within-task emission ordinal preserve the logical sequence. Tuple
-owners retain minimum positions, and finalization orders those positions
-before first-occurrence numbering of tuples and pending values.
+worker finishes first. Each worker claims tasks in increasing order, and
+each slice uses the ordinary serial join order within its boundaries.
+No change is needed to the merge's ordering of candidate runs or its
+first-occurrence numbering of tuples and pending values.
 
 The successful round's public read counters are the sum of each item's
 prefix contribution once and every task's suffix contribution. Derivations
@@ -445,9 +443,9 @@ preparation counters are exposed as language or API behavior.
 | `lib/exec.h`, `lib/exec.c` | Run prefix preparation and bounded suffixes through the same dispatcher; preserve cursor and lower-level state across every yield; observe actual driver visits. |
 | `lib/slice.c` | Prepare an item behind the frozen-store boundary: run its prefix on worker 0's scratch, open and count its driving sequence, and locate its slices' starts, each walk interruptible. |
 | `lib/round.h`, `lib/round.c` | Own prepared-item records, charge preparation to scheduling, construct all ordered tasks before publication, and commit or discard prefix counts and notes with the round. |
-| `lib/task.c` | Consume the task's whole-plan, empty or prepared-slice form; retain continuations while filling bounded candidate packets. |
+| `lib/task.c` | Consume the task's whole-plan, empty or prepared-slice form; gather candidates with existing screens. |
 | `lib/eval.c` | Record serial driver/suffix observations and keep the selected plan on fallback. |
-| `lib/merge.c` | Consume unique candidates in logical position order and include prefix scratch peaks in the ordinary admission floor. |
+| `lib/merge.c` | Consume candidate runs in the established task order and include prefix scratch peaks in the ordinary admission floor. |
 
 The task's execution form identifies which startup contract applies. A
 prepared slice always names an eligible item's driver; an ordinary task
@@ -501,9 +499,9 @@ J(S[0]) ++ J(S[1]) ++ ... ++ J(S[M-1])
 
 Ordinal boundaries divide this concatenation without permuting or
 duplicating an element. The frozen-store rule makes each `J(x)` independent
-of when other tasks run. Ordering unique tuples by their minimum
-task/emission positions therefore gives the serial derivation order with
-only duplicates removed. The routing and merge proofs then apply
+of when other tasks run. Concatenating task candidates in slice order
+therefore gives the serial derivation order with only the duplicates the
+existing screens are allowed to remove. The merge's proof then applies
 unchanged to tuple identifiers, secondary chains, pending-value numbering,
 storage capacities and output order.
 
@@ -595,7 +593,7 @@ improves without a repeatable unexplained regression on controls. The
 second traversal and the first count on a declined round are explicit
 costs that measurements must justify. The combined bulk-load and slicing
 result is judged against the competitive target for the complete command.
-Candidate collection and serial merge work remain separate constraints;
+Candidate replication and serial merge work remain separate constraints;
 more scheduled tasks alone is not a performance result.
 
 ## Alternatives not taken

@@ -186,17 +186,12 @@ replacement. Admission asks the final size, which is what interning or
 inserting one key at a time reaches, so a batch is admitted exactly when
 its keys one at a time would be. Whether the growth is deferred is
 decided after, once per operation -- a window's publication, a load's
-commit, a round's merge -- on the calling thread, by a pure test that
-reports nothing and sets no refusal state: every deferrable growth of the
-operation defers when its parts run on a pool and its whole admitted
-footprint, every table and destination it reserves, plus every table
-those growths would replace fits the limit, and none does otherwise. An
-operation reserves its deferrable growths last, together, so that the
-test can ask what is already charged plus what they add and replace, and
-no reservation after them can be refused for the replaced tables they
-hold. The pool's batch makes that hold by construction: it defers only
-when one call reserves and places it, and a caller that reserves the
-batch apart from its append grows the stripes at once. Parts that all run on the
+commit, a round's merge -- on the calling thread, before the operation's
+first reservation, by a pure test that reports nothing and sets no
+refusal state: every deferrable growth of the operation defers when its
+parts run on a pool and its whole admitted footprint, every table and
+destination it reserves, plus every table those growths would replace
+fits the limit, and none does otherwise. Parts that all run on the
 calling thread gain nothing from deferral, which would only hold every
 replaced table at once. A growth that does not defer completes at once,
 stripe by stripe, each old table freed as its replacement is filled, and its
@@ -243,20 +238,9 @@ halving the integers' index space and moving nothing else.
 ## The symbol pool
 
 The pool (`lib/symbol.c`) maps a byte string to a symbol identifier through a
-tagged, striped identifier table over its entries. A byte string's wide
-hash folds its bytes keyed and unkeyed in one pass: the unkeyed half
-chooses the stripe and the keyed half the slot and the tag. An entry
-records a pointer to the bytes, their length, and the keyed half it was
-placed under, which is what the rehash callback returns and what the tag
-is cut from; a stripe only ever rehashes its own entries, so no entry
-records its stripe. Every lookup is given the wide hash, and whatever
-keeps a byte value's hash for a later lookup or placement -- a pending
-value, a window's dictionary, a new string awaiting its entry -- keeps the
-wide one, so the stripe is never recomputed from the bytes and cannot
-disagree with the one the entry was placed in. Private dictionaries that
-partition values among their own parts keep choosing those parts from
-the keyed half. The frozen store's string lookup hashes its argument
-itself. A collected result's symbol table is the same striped table.
+tagged identifier table over its entries. An entry records a pointer to the
+bytes, their length, and the hash it was placed under, which is what the
+rehash callback returns and what the tag is cut from.
 
 * **The length is explicit**, because a string may contain NUL bytes; a
   terminator is stored after it anyway, for callers that want a C string. A
@@ -273,32 +257,6 @@ itself. A collected result's symbol table is the same striped table.
   behind, and clears the arena's failure flag -- the one exception to the
   sticky-flag contract
   ([the sticky failure flag](design-memory.md#the-sticky-failure-flag)).
-* **A batch of new symbols is placed a stripe to a part.** A reservation
-  is an owned receipt: the arena mark its byte copies follow, each
-  stripe's growth for that stripe's count of new symbols, and the list of
-  the new symbols by stripe. The pool holds the prepared tables, one
-  beside each stripe it replaces, so its bytes count them; the caller
-  holds the list, built once from the batch's wide hashes before the
-  pool's size is projected, so that the projection and the placement read
-  the same counts. A reservation grows the entry array and copies the
-  bytes, as a reservation of one does. When the batch is reserved and
-  placed in one call, as a window's publication and an evaluator's commit
-  place theirs, it defers the stripes' growth when the test allows
-  (above); a round's merge reserves its values with its relations and
-  appends them later, so its stripes grow at once. Publication appends the
-  entries in identifier order on the calling thread; then each stripe, as
-  a part of its own, completes any deferred growth and places its new
-  identifiers in identifier order, and the account is reconciled after
-  the barrier. A caller with a pool runs the parts on it, and one without
-  runs them itself; the parts write disjoint tables, so the result is the
-  same. Each stripe reaches the capacity interning its symbols one at a
-  time would reach. A failed reservation or an unreserve releases the
-  receipt -- the copies rewound to the mark, the prepared tables freed --
-  and reconciles what grew. No pointer into the entry array survives a
-  reservation's growth.
-* **The integer table's index is one table.** Striping it would add
-  growth receipts and admission terms that only a measured placement cost
-  would repay.
 * **The pool is charged to `max_memory` whole**, as are the integer table and
   the use bits.
 
@@ -415,8 +373,8 @@ three steps that mirror an insertion:
    highest identifier the map holds, precisely so that setting a bit at
    append time cannot need a growth. A caller that declines after a
    successful reservation unreserves, releasing the pool's receipt. The
-   new symbols are placed a stripe to a part after the append, as the
-   pool places any batch.
+   new symbols are placed in the pool's keyed lookup index on the
+   calling thread, in their assigned order.
 
 **Serially**, the evaluator measures, asks the memory limit and refuses as an
 insertion refuses, naming the predicate being derived into, and otherwise
@@ -430,21 +388,17 @@ nothing changes the tables until the merge cannot fail. A shared round is a
 deferred round, one whose insertions wait for its end, whose work is divided
 among threads; it reads the **frozen store**, the store as it stood when the
 round began ([parallel evaluation](design-parallel.md#model)). During the
-round, a candidate with a pending column is new against the frozen store:
-its value is absent from every stored tuple. Bounded packets route private
-values by semantic payload to one owner per partition. Its exact dictionary
-gives equal values one canonical round handle, enabling tuple owners to
-deduplicate across all producers before publication. No public identifier
-is assigned by routing, and no producer retains a full-round value table.
-
-The merge orders unique tuples by minimum logical position and collects
-one descriptor per referenced canonical handle in tuple/column order.
-It *measures* that compact sequence through the ordinary resolver, and
-the projected bytes join relation growth in admission. Owned candidate
-columns retain private handles until one *rewrite* composes the compact
-map with promised identifiers. Routing hashes are recomputed from final
-words before persistent stripe classification. Global tables remain
-untouched throughout these private phases.
+round, a candidate with a pending column is new against the frozen store --
+a value the
+context lacked when the round began is in no relation the round reads -- and
+is screened against the worker's own candidates by value, a pending column
+hashing and comparing by its integer or bytes. The merge collects one
+descriptor per referenced worker-local value in task, candidate and column
+order, preserving semantic first occurrence. It *measures* that compact
+sequence through the same value resolver into one map, and the projected
+bytes join the relations' growth in the admission check. Candidates retain
+their local markers until a single *rewrite* composes the local-to-descriptor
+map with the promised identifiers. The tables remain untouched throughout.
 A round that does not fit is declined and run serially. Reservation occurs
 beside the relations' reservations; *append* publishes values in the phase
 that cannot fail. The descriptor bound, mapping and byte lifetimes are in
@@ -454,10 +408,9 @@ that cannot fail. The descriptor bound, mapping and byte lifetimes are in
 **The identifiers are the same at every thread count.** The serial evaluator
 interns a value at the commit of the first batch holding it; the merge
 interns it under its rank in first-occurrence order among the candidates in
-task order. The unique tuples ordered by their minimum positions are the
-serial derivation order with duplicates removed. Stored tuples already
-have their values, and a duplicate's earliest copy contains every value
-the later copy contains at an earlier logical position, so
+task order. Candidates in task order are the serial derivation order with
+duplicates removed -- duplicates of stored tuples, whose values were interned
+already, or of earlier candidates of the same worker, which come first -- so
 the first occurrence is the same tuple in both, each table gains the same
 values in the same order, and, both reserving the stepwise capacity, holds the
 same bytes. `relic_stats()` reports the same counts and storage, and every

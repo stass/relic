@@ -759,16 +759,11 @@ every write to the pool's entries and arena there. Empty strings have a valid de
 copies are skipped. Review every `bcopy(src, dst, n)` for source-first
 order.
 
-The coordinator appends dictionary entries in the promised order and
-records symbol/string uses. New integers are placed in the integer
-table's index there too. New pool entries are placed in the pool's
-striped index a stripe to a part on the pool, each part placing its
-stripe's entries in identifier order
-([the symbol pool](design-values.md#the-symbol-pool)). The window
-carries each new byte value's wide hash from decoding, so no part hashes
-bytes again. Identifier layout is unchanged: a stripe holds identifiers,
-and which stripe holds one depends on its bytes alone. Numbering and
-entry append stay a measurable serial phase.
+The coordinator appends dictionary entries, places them in the existing
+lookup indexes and records symbol/string uses in the promised order.
+Workers have already parsed, hashed and reconciled the values. Numbering
+and index publication remain serial phases, with ordinary global
+identifiers and one symbol lookup index.
 
 With values live, append the admitted new rows into the builder's reserved
 positions. Copying columns precedes canonical-index placement, and each
@@ -969,7 +964,7 @@ independent checks rather than comparing two uses of the same new helper.
 | Transport and callbacks | Failed short reads discard their returned bytes, successful short reads end input, close failures precede commit, caller-mutated descriptions cannot affect copied plans, and interrupts preserve the existing non-interruptible import contract |
 | Allocation failure | Nth-allocation sweeps cover private decline, value/builder reservation, pool copies, manifest preparation and late destination reserve; a window declined for a refused private allocation is replayed and every window after it is staged; the context can load/query again afterward |
 | Concurrency | 1, 2, 4, 8 and 16 workers and disabled-thread builds agree on IDs, capacities, diagnostics and output; instrumentation proves both bulk apply and replay paths actually execute |
-| Striping | Symbol-pool and append capacities agree across hash seeds and thread counts, with deferred and immediate stripe growth alike; input crowded into one stripe keeps its answers, capacities and bounded probes |
+| Striping | Append capacities agree across hash seeds and thread counts, with deferred and immediate stripe growth alike; input crowded into one stripe keeps its answers, capacities and bounded probes |
 | Framing ahead | Windows framed ahead and framed in place give the same windows and pieces under every schedule of framing steps, the end of input and quoted records around the horizon included, and so do windows the record cap ends, at the end of input or short of it; a table of records shorter than eight bytes is staged in windows of at most the cap's records; a job whose other workers finish while framing remains completes, the framing finishing later; a declined window discards the framing ahead and replays its records from the buffered bytes, with the scalar diagnostic and retained values, and a table whose first record is longer than a window is staged in windows after it; a refused import has read at most two windows and one transport chunk past its last accepted boundary |
 | Streaming inputs | A producer that writes one transport chunk holding a malformed record and keeps its pipe open sees the error reported without a window's worth of input or EOF, with the scalar diagnostic order, retained values and no facts added; a FIFO named by path, a stream without a descriptor and forced batching are all read by the scalar consumer; a test build that takes a failing stream for a regular file shows windows staged before the failed read, so the batch path's read errors stay covered |
 | Small-input cost | Tiny, empty, header-only, duplicate-heavy and one-fact inputs avoid unnecessary dispatch and keep their established behavior |

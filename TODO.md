@@ -19,39 +19,17 @@ of which `contrib/` holds only the homebrew formula, so
 `contrib/pkgsrc/devel/relic/` are to write; and the
 [release procedure](specs/design-release.md#the-release-procedure).
 
-**Direct grouped reduction is enabled but not releasable as the default.**
-[High, component: `lib/reduce.c`, `lib/eval.c`] `files-grouped` is 15 per
-cent faster at one worker, with 22 per cent less memory. At `-j 16` on
-the M3 the shared path is 1.5 times the reference (1.07 s and 329 MB
-against 0.71 s and 721 MB), which is still too large to ship as the
-default. A release enables it by default only once
-the serial gain, the parallel time and bounded memory are revalidated on
-the p620 as well;
-[step 6 of the plan](docs/todo-benchmark-performance.md#6-reduce-eligible-grouped-pipelines-directly)
-has the measurements and the remaining work.
-
-**Close the comparison gaps.** [Medium, component: `bench/compare/`,
-`cmd/relic/output.c`] Six changes were made to close relic's gaps against
-the other engines of `bench/compare/run.sh`, each with a target, and three
-targets are missed. The row writer's share of `chain-closure`'s profile
-is 11 per cent against a target under 5; what remains is formatting 24 MB
-of rows, and no cheaper formatting is designed. The peak above the live
-heap is the item on a growth's slack and transient under Benchmarks, and
-the import's time and peak the item on importing facts there. Record each
-improvement on an idle machine with the same output sink and compiler
-conditions, exact answer checks and peak memory. The
-[M3 diagnostic evidence](bench/compare/recorded/m3-max/optimization-probes/results.json)
-and [losing cells](bench/compare/recorded/m3-max/optimization-probes/losses.tsv)
-also identify priorities in recursive planning, bound-query factoring,
-bulk loading, [indexed driver slicing](specs/design-driver-slicing.md),
-[direct grouped reduction](specs/design-group-reduction.md) and
-[bounded candidate routing](specs/design-round-routing.md); the parallel work is in
-[docs/todo-parallel.md](docs/todo-parallel.md).
-[Canonical membership locality](specs/design-membership-locality.md)
-defines the subsequent measured choice of tags or cached hashes, with
-retention of the compact index when neither earns its cost. The
-[implementation plan](docs/todo-benchmark-performance.md) orders these
-changes and defines their design, regression and performance gates.
+**Measure the remaining performance gaps.** [Medium, component:
+`bench/compare/`, `lib/eval.c`, `lib/import.c`, `lib/merge.c`]
+Validate the retained implementation with comparable binaries, exact
+answers and separate loading, planning, evaluation and memory measurements.
+The [performance plan](docs/todo-benchmark-performance.md) records the
+stages kept, the aggregate and symbol-layout experiments removed, and the
+evidence required before another design is selected. Candidate replication,
+canonical membership and import peak memory are investigations; no new
+routing or summary framework is queued. The
+[comparison matrix](bench/compare/recorded/m3-max/results.tsv) and
+[parallel work](docs/todo-parallel.md) supply controls and known gaps.
 
 **Parallel evaluation misses its speed-up targets.** [Medium, component:
 `lib/round.c`, `docs/todo-parallel.md`] With the pool, `tc-cyclic` should
@@ -65,14 +43,6 @@ built, and parallel loading misses its target. The causes and what to try
 are sorted in `docs/todo-parallel.md`.
 
 ## Engine
-
-**A reduced source's derived relation is created before it is stored.**
-[Medium, component: `lib/eval.c`] `plan_members()` resolves every component
-member through `relic_relation_written()` while a source is still promised.
-A producer the certificate admits never writes that relation, and
-`relic_relation_read()` refuses it, so no plan answers from the empty
-store. The relation should be created only when the source is selected to
-materialize.
 
 **A table's growth hashes every tuple again.** [Low, component:
 `lib/util.c`, `lib/relation.c`] `relic_idtab_complete_growth()` rehashes
@@ -99,10 +69,9 @@ in the design's alternatives with the benchmark artifact.
 set, which works only if every type test goes through the accessors that
 split an identifier into type and index
 ([the identifier](specs/design-floats.md#the-identifier)). Before floats
-land, route these through a third-bit-aware accessor: `lib/exec.c` masks
-`RELIC_DOM_TYPE_MASK` itself at 765 and 794 and in `cell_type()` at 816,
-and in the min/max fold's mixed-type check at 1881, which would treat a
-group mixing integers and floats as one type; `lib/rule.c` does at 840.
+land, route the executor's type tests and `cell_type()`, and the term-type
+checks in `lib/rule.c`, through third-bit-aware accessors. Ordinary folds
+compare decoded types through `lib/fold.c`.
 
 **A Magic rewrite found unstratified reports user errors first.** [Low,
 component: `lib/eval.c`, `lib/stratify.c`] `evaluate_rewrite()` treats an
@@ -133,35 +102,6 @@ relation read-only, which `-Wcast-qual` keeps a single walk of the finished
 draft from undoing, so the draft's accesses cannot be derived from its
 operations. A missed call fails loudly, preparation reporting an internal
 error, but undercharges acquisition until then.
-
-**A group table's bulk steps run between interrupt polls.** [Medium,
-component: `lib/reduce.c`, `lib/relation.c`] The producer reducer and the
-stored-relation summary builder look for the interrupt every
-`RELIC_REDUCE_CHUNK` rows, but a group array's growth copies every group,
-the key table's growth rehashes all of it, a finished summary's table and
-accumulators are laid down in one pass before the polled walk, and the
-distinct counts summary selection estimates from (`count_distinct()`) walk
-a relation unpolled. Each is linear in the groups or rows, so a large
-table delays an interrupt by that much. Bound them as the row walk is
-bounded, or poll inside them, and test an interrupt landing in each.
-
-**Ordering reduced groups can take quadratic work.** [Medium, component:
-`lib/reduce.c`, `fill_summary()`] Finalization insertion-sorts every group
-by its first source occurrence. Parallel partials drained in several waves
-can insert later slices' groups before earlier slices' remaining groups,
-so many distinct keys cause quadratic shifts; the inner shift loop also
-does not poll for interruption. Use a bounded-work sort and cover
-interleaved partial drains with many distinct keys and interruption.
-
-**Reduction workers bypass the frozen-store interface.** [Medium,
-component: `lib/eval.c`, `lib/reduce.c`, `lib/reduce.h`] `advance_lane()`
-passes a mutable context to `relic_reducer_take()`, compiled with the full
-internal interface. Worker-safe accounting and diagnostic suppression
-depend on the reducer's finite budget and report flag, rather than the
-compiler boundary used by the executor and ordinary tasks. Expose private
-partial updates through the frozen interface, with explicit round
-accounting and caller-owned failure reporting; keep publication and
-context mutation on the coordinator.
 
 ## Benchmarks
 
@@ -256,21 +196,15 @@ limit does not count the transient either: an insertion or a round's merge
 admitted at the limit holds one array's or one table's old generation
 beside the new one while it is copied, one at a time.
 
-**Importing facts misses its target.** [Medium, component:
-`lib/import.c`, `lib/symbol.c`, `lib/relation.c`,
-`bench/compare/facts-join`] The target is `facts-join` at scale 10, three
-million ternary rows naming three million distinct symbols, under 2 s and
-120 MB. Bulk loading builds private payloads that an empty store adopts
-and batches large tables over the pool; at scale 8 the import alone takes
-0.93 s at one thread and 0.46 s at sixteen on the p620, and 0.34 s at
-sixteen on the M3, against DuckDB's complete sixteen-thread median of
-0.191 s ([step 4](docs/todo-benchmark-performance.md#4-build-and-load-base-relations-in-bulk)).
-With the symbol index striped and placed over the pool, scale 10 imports
-in 1.62 s at one thread and 0.95 s at sixteen on the p620, meeting the
-time, but peaks at 282 MB and 355 MB, about three times the memory
-target; account where the peak goes before choosing what to shrink.
-Pool-entry packing remains a separate memory-layout candidate and must
-preserve byte-pointer lifetime, addressable range and affordable rehash.
+**Attribute the remaining import peak.** [Medium, component:
+`lib/import.c`, `lib/relation.c`, `bench/compare/facts-join`] Transferable
+builders and bounded parallel import meet the scale-10 time goal on p620
+without a striped symbol index: 1.57 s at one thread and 1.04 s at
+sixteen. The 120 MB peak target remains unmet. Measure live payload,
+capacity slack and allocator retention separately on the simplified tree
+before selecting another layout. The
+[performance plan](docs/todo-benchmark-performance.md#4-build-and-load-base-relations-in-bulk)
+records the retained gains and the rejected symbol-index tradeoff.
 
 ## Testing and CI
 

@@ -2,14 +2,14 @@
 
 A context may share the work of evaluation among threads it owns. The unit
 of sharing is a round of the evaluator: its plans run on a worker pool over a
-store nothing modifies while they run. Round-owned partitions retain what
-they derive, and the result is merged in the order the serial evaluator
-would have inserted it. A successful evaluation gives the same relations,
+store nothing modifies while they run, what they derive is gathered per
+worker, and the result is merged in the order the serial evaluator would
+have inserted it. So a successful evaluation gives the same relations,
 identifiers, answers, diagnostics and counters at every thread count, and a
 shared round never fails: anything that stops it runs the round again
 serially, where every refusal is the serial evaluator's. This document
 covers the pool, which rounds are shared and how they are cut into tasks,
-the routing that bounds candidates by globally distinct new tuples, the
+the screen that bounds a worker's buffer by its distinct new tuples, the
 cost model of a deferred round, the ordered and striped merge, what the
 store promises a concurrent reader, and the target design for parallel
 loading and for components side by side. It sits inside the evaluator,
@@ -84,10 +84,9 @@ enumerated in serial order and the merge inserts by the serial rules
 
 **A shared round never fails, because it can always be run again
 serially.** Until the merge applies, the store is exactly as the round found
-it and all packets, candidates and pending values are private attempt state.
-A worker that cannot go on abandons the job; the calling thread drops
-private data, forgets the workers' counters and runs the same round
-serially. Whatever that run
+it and the candidates are the round's only state. A worker that cannot go on
+abandons the job; the calling thread drops every candidate, forgets the
+workers' counters and runs the same round serially. Whatever that run
 meets, it meets as the serial evaluator does: the same tuple refused by the
 same limit with the same message, or the same evaluation error. The
 parallel path adds no failure, no diagnostic, and no dependence of any
@@ -101,24 +100,23 @@ boundary, so a component may mix them from round to round.
 
 ## Invariants
 
-* From cursor preparation through the round's final production barrier,
-  no relation, index, value table or symbol pool is modified. The only shared words a task
+* From cursor preparation through the job's barrier, no relation, index,
+  value table or symbol pool is modified. The only shared words a task
   writes are the job's coordination words, index frontiers, and the memory
   account's total for its own buffers.
-* Tasks are enumerated in serial order. Every candidate retains its minimum
-  logical task/emission position, independent of when it arrives.
-* A tuple owner retains one copy per distinct new target tuple; a value
-  owner retains one copy per distinct pending value. Producer state is
-  bounded transport, never a full candidate history per worker.
+* Tasks are enumerated in serial order and each worker claims them in
+  increasing order, so each worker's candidates are in serial order.
+* A worker's candidates are the tuples the frozen store lacked that it had
+  not gathered earlier in the round: at most its distinct new tuples.
 * Every step of a round that can fail precedes every step that modifies the
   store; any failure before then reruns the round serially.
 * Every diagnostic, limit refusal and caller callback happens on the
   calling thread, in serial order.
 * What a table holds and costs is independent of the thread count.
 * Nothing the pool holds for itself can fail an evaluation.
-* Transport has one total byte ceiling. Private owner arrays grow in
-  batches under the round account; no per-worker reservation replicates
-  a round-sized candidate or value set.
+* Nothing is allocated per task or per tuple: a worker's data-sized buffers
+  are reserved before the job and grow, by doubling, only when a round
+  exceeds its reservation.
 
 ## The worker pool
 
@@ -160,10 +158,9 @@ different architectures. A pool with more workers than processors online
 parks at once: a spinner there would occupy the processor the working thread
 needs.
 
-**What a worker runs.** Parts of a job -- production lanes, private owner
-partitions or a step of the merge -- and nothing else: no planning,
-no relation-index build, no discard, diagnostic or caller callback.
-Caller code runs only inside the operation
+**What a worker runs.** Parts of a job -- a round's tasks or a step of its
+merge -- and nothing else: no planning, no index build, no discard, no
+diagnostic, no caller callback. Caller code runs only inside the operation
 that called it and only on the thread that called it, so an embedder that
 installed a callback without a thought for threads is right not to have had
 one ([design-api.md](design-api.md)).
@@ -174,10 +171,10 @@ wait-free; an **abandon word**, set by a worker that cannot go on and read
 between tasks; a **completion count**, one `fetch_add` per worker as it
 leaves for whatever reason, so the barrier never waits for a worker that
 failed; the **generation word** that publishes a job; the **account total**,
-on the rare growth of private buffers; and the index **frontiers**
+on the rare growth of a worker's buffers; and the index **frontiers**
 ([the benign frontier race](#the-benign-frontier-race)).
-Everything else a part writes belongs to its lane or owner for that phase,
-including scratch, candidates and counters. Worker 0 reads them after the
+Everything else a task writes is its own -- its worker's scratch, candidates
+and counters, its own task record -- and worker 0 reads them after the
 barrier, whose acquire covers them.
 
 A job is published under the pool's mutex: worker 0 stores it, advances the
@@ -229,14 +226,18 @@ no I/O
 ([framing ahead](design-bulk-load.md#framing-ahead)). No job that
 publishes carries a filler.
 
-**Abandoning.** A private allocation refusal, an exact unique count beyond
-admissible tuples, an oversized transport row, an evaluation error or an
-interrupt abandons the attempt. A full packet that can drain is ordinary
-backpressure, not abandonment. Parts observe the abandon flag at bounded
-progress points and all reach their completion barrier. Worker 0 releases
-private data, discards counters and runs the selected round serially; no
-worker diagnostic escapes. That run finds the same error or an earlier
-one in logical order, so the reported error is independent of scheduling.
+**Abandoning.** A worker abandons when its candidate buffer cannot grow, for
+memory or the memory limit; when its candidates exceed what the tuple limit
+could admit; when its plan meets an evaluation error (overflow, zero
+divisor, a string too long, an invalid pattern, a refused string buffer);
+or when the context is interrupted, which every worker checks after each
+return of the executor. It sets the abandon word and leaves; others finish
+the task they hold and leave, bounding the wait at one task, or one executor
+quantum when interrupted. Nothing records why, since nothing is reported:
+worker 0 releases the candidates, discards the workers' counters and runs
+the round serially. That run meets the same error or one before it in serial
+order, so an evaluation error names the first error in serial order at every
+thread count.
 
 ## Rounds and tasks
 
@@ -325,79 +326,152 @@ It changes only cost, which is all a debug switch may change.
 
 ## Running a task
 
-A running task belongs to a resumable lane: its executor scratch, current
-slice, partially consumed batch, counters and first note stay together
-across production waves. A pool part exclusively runs the lane for one
-phase; a different thread can resume it after the barrier. Sliced tasks
-start at their prepared driver and cannot backtrack into the once-executed
-prefix. Uncut tasks use ordinary whole-plan startup. Views stay fixed for
-the entire round, including all routing waves.
+For several workers to run one plan, the executor's state belongs to whoever
+runs it: an **executor scratch** per worker holds the frame, operation
+states and the batch of derived tuples, and a running plan is read-only.
+Every task resolves the same view ranges, fixed before the job was
+published. A sliced task runs the ordinary executor from its prepared
+driver cursor through its suffix; an unsliced task runs the whole plan.
+Prefix records and task records together describe the serial execution.
+A full batch's destination differs: serially it is inserted;
+in a deferred round it is **screened**.
 
-### Frozen screening and round ownership
+### The two-stage screen
 
-[Bounded candidate routing](design-round-routing.md) defines the collector:
+1. **Against the frozen store.** The batch is hashed and probed in the
+   frozen canonical index, in the batch insertion's own overlapping passes.
+   A tuple the store holds is counted as a derivation and dropped -- exactly
+   one the merge would have found present.
+2. **Against the worker's own candidates.** A tuple the store lacks is
+   looked up in the worker's **screen**, one identifier table keyed by the
+   tuple's hash folded with its relation's identifier and holding positions
+   in the worker's candidate buffer, so a component of many members costs a
+   worker one table. A tuple the screen holds repeats a candidate this
+   worker gathered earlier in the round, and so earlier in serial order; it
+   is counted and dropped. Otherwise it is placed in the screen and appended,
+   with its 64-bit hash, to the worker's **candidate buffer**.
 
-1. The taker counts a consumed head and screens assigned words against the
-   frozen canonical index with ordinary batched hashing and prefetching.
-   An already stored tuple is dropped. A head containing a value absent
-   from the frozen context cannot already be stored.
-2. A bounded packet-local screen can coalesce repeated outgoing tuples.
-   Local value markers are meaningful only with that packet's dictionary.
-3. At the production barrier, value-owner parts give packet pending values
-   canonical round handles. A second barrier precedes tuple-owner parts,
-   which retain one copy per new target tuple and its earliest logical
-   task/emission position.
-4. After acknowledgment, packets can be reused and lanes resume. The
-   store remains frozen. Nothing is appended until the entire round ends.
+**The distinct-tuple bound.** The second stage keeps a worker's candidates
+proportional to its distinct new tuples rather than its derivations.
+Without it, a round whose target starts empty -- round 0, a
+non-recursive component, a gathered query -- would buffer every derivation,
+since the frozen store screens nothing: `q(X) :- edge(X, _)` over fifty
+million edges and a thousand distinct `X` would hold fifty million
+candidates where the serial evaluator holds a thousand tuples. With it each
+worker holds at most a thousand, and a round's candidates are bounded by the
+workers times its distinct new tuples; a tuple several workers derive is
+resolved by the merge. The store is asked first because on a dense closure it
+holds the answer for almost every derivation.
 
-The global candidate bound follows distinct new tuples, not workers times
-that count. A separate fixed byte ceiling covers transport, including
-pending head bytes and routing lists. A full packet drains; a head too
-large for empty transport declines the attempt for serial execution.
-Producer dictionaries and screens retain no history across waves.
+**Pending values are screened by value.** A head column holding a computed
+value the context has not assigned -- an integer, or a string with its
+bytes -- holds a pending marker. The worker renumbers it as its position
+among the distinct pending values it derived this round, through a
+per-worker table keyed by value, so equal values hold equal markers and the
+screen compares by value. Such a candidate is new to the frozen store
+without a lookup, since a value the context lacked when the round began is
+in no relation the round reads ([design-values.md](design-values.md)).
 
-**Counters and notes.** Every consumed head counts, including frozen hits
-and duplicates. A row paused for space retains its batch position and is
-not counted again on resume. Successful work is summed per task, with
-prefix counters once per item. Notes are reported in item/task order,
-prefix before suffix, with the existing once-per-rule suppression. The
-minimum witness of a retained tuple determines its insertion credit,
-not which task reached the owner first. Abandoned work and notes are
-forgotten before serial retry.
+A worker runs its tasks one after another, so its buffer holds their
+candidates contiguously in task order, each task recording its offset and
+count.
+
+**Counters and notes.** Suffix executor counters are per worker, summed by
+worker 0 after the barrier when the round is merged, with each prepared
+item's prefix counters added once. The sum is the serial count: a piece
+reads exactly the tuples the serial plan read while its driving cursor
+was inside it, and every derivation is counted whether screened out or kept.
+A mixed-type comparison noted under `RELIC_F_NOTE_MIXED` is recorded in
+the prefix or task record. Worker 0 reports notes in item order, the prefix
+before its tasks, using the existing once-per-rule suppression, so the
+comparison named is the serial evaluator's first. Within the task where a
+tuple limit refuses, it may
+name a comparison the serial run reaches only after the refused tuple -- the
+same latitude a batch already has.
 
 ## The cost of a deferred round
 
-The ordinary serial evaluator inserts batches directly. A deferred round
-adds bounded packet collection, owner-table probes, barriers, ordering
-references and the reserved append. A fully assigned tuple held by the
-frozen store uses its ordinary probe and creates no owner record. A new
-tuple is retained once globally; repeats can cause traffic and owner
-probes without creating more retained copies. Pending values require a
-value-owner phase, skipped entirely when packets contain no new values.
+On one thread a deferred round does what a serial round does -- runs the
+executor, probes the canonical index for every derivation, appends and
+indexes new tuples -- and besides:
 
-The fixed transport ceiling bounds memory, not traffic. If many distinct
-heads recur across waves, owners see them again. A packet-local screen
-coalesces nearby repetition, while its storage remains bounded. Owner
-skew and the number of barriers therefore join suffix work and append cost
-in the sharing decision. A predicted unprofitable round runs serially.
-There is no unbounded parallel collector selected for a cheaper estimate.
+* **per derivation the frozen store holds: nothing**, since the store probe
+  is the insertion's own probe without the insertion;
+* **per derivation the store lacks: one screen probe**, which the serial
+  evaluator does not pay, its earlier insertion having put the tuple in the
+  store;
+* **per new tuple: a fixed handful** of places and copies -- the screen
+  entry and candidate copy, then in the merge a place among a stripe's
+  firsts, the copy into staging, and a place among each index's new keys;
+* **per round: setup** -- reserving buffers, the barrier, and a few
+  allocations for the merge's scratch.
 
-Indexed slicing also pays positioning, count and boundary walks before
-production, as the [driver scheduling model](design-driver-slicing.md#scheduling-by-useful-work)
-states. A routing wave does not change that plan selection or task coverage.
+Indexed slicing also pays serial chain-positioning, counting and boundary
+walks before task execution. These costs depend on driver visits even when
+few new tuples result and are included in the
+[scheduling decision](design-driver-slicing.md#pieces-and-the-preparation-charge).
 
-Private owners allocate from actual traffic. Insertion history belongs to
-a logical variant and can inform a bounded total capacity hint, without
-replicating it per worker or eagerly allocating every empty partition.
-Capacity grows with distinct tuples and values. Transport and owner data
-are released at round end; retaining them uncharged would hide data from
-the limit, and retaining them charged would change later serial admission.
+The merge's floor is proportional to a round's **new tuples**, not its
+derivations or its number of rounds: a round inserting one tuple in hundreds
+costs about its serial self, and one inserting a large share of what it
+derives costs a multiple of it on one thread and gains only once its work
+outweighs that.
 
-The append still stores unique new rows and updates every required index.
-Its staging, new-key classification and final relation growth remain real
-costs even when candidate replication disappears. Measurements separate
-production, local screening, ownership, final ordering and append rather
-than treating all private memory as candidate columns.
+**What deferral requires.** Three costs are what deferral is. A tuple
+several workers derive is gathered by each and resolved by the merge -- the
+choice that keeps workers from sharing a table -- so the merge's table of
+firsts stays. The staging assigns identifiers in serial order before any
+part applies them, so its copy stays. A worker that could not screen its own
+repeats would buffer every derivation, so the screen stays. Everything else
+is representation and is kept cheap: the screen is probed in overlapping
+passes as the canonical index is, and a tuple it lacks is placed by
+re-probing from its hash, since a growth can intervene
+([design-memory.md](design-memory.md)).
+
+**A round's buffers are sized once, from history.** A screen grown from a
+minimal table moves every candidate one and a half to two times. So each
+worker's buffers are
+**reserved before the job is published** for the round's expected
+candidates, and grow only past the estimate, from the estimate. Each item
+records the tuples its last run **inserted** -- serially, the change in the
+context's inserted count across its turn; deferred, the firsts the merge
+counted for its tasks. The record belongs to what derives the tuples, so the
+two plans of a delta variant share one and a round that switches plans is
+predicted as well. A worker gets room for all expected candidates when the
+pool has one worker, and twice its even share otherwise, since a worker
+claims whatever tasks it reaches.
+
+* **Why unscaled.** The work estimate scales with the delta; the inserted
+  count does not. A recursive component's new tuples do not follow its
+  delta -- a round can read many times the previous delta and insert a
+  fraction as much -- and the previous count predicts the next within a
+  small factor, where scaling would overshoot by orders of magnitude.
+* **Why an item that has not run expects nothing.** Its first view bounds
+  neither what it derives nor what of that is new; a rule that reads a
+  hundred million tuples to keep ten would reserve gigabytes on that view's
+  word. Such an item pays the growth cascade instead.
+* **Why buffers are not kept across rounds.** They hold data, and
+  data-sized memory is charged while it exists. Kept uncharged, they would
+  hold memory the limit cannot see; kept charged, they would make what the
+  limit refuses in a later serial round depend on whether an earlier round
+  was deferred, breaking the identity across thread counts. They are
+  released at every round's end, memory and charge alike.
+
+A reservation the limit or the allocator refuses **declines the round
+before it begins**, and it runs serially; a round predicted too large near
+the memory limit therefore costs time, never a different answer. When
+nothing grows, adding a candidate does no accounting arithmetic; the cost
+projection runs only when an array must grow. A round whose plans call
+string functions also gives each worker its own data-sized text buffers
+([design-expressions.md](design-expressions.md)), charged to the round,
+released once the job completes and before the merge asks the limit for
+room, and declined like the rest if refused.
+
+**The threshold model.** A round's deferred time is its serial time less its
+insertions, divided by the workers, plus its new tuples at the merge's
+per-tuple rate, plus the barrier. It is worth deferring when that is below
+its serial time, and the threshold sits where the two cross for real
+workloads.
 
 ## Admission and the ordered merge
 
@@ -413,22 +487,25 @@ reports and never fails part way.
 exactly the storage the serial insertions would reach, with the tables the
 growth replaces held beside their replacements and the merge's scratch
 charged, so an admitted merge cannot be refused while it applies. The
-executor scratch floor survives every wave and includes prefix scratch.
-Transport allowances can split batches, so pending bytes use the
-[conservative serial batch bound](design-round-routing.md#preserve-the-serial-refusal-contract),
-not merely the observed packet peak. A conservative refusal runs the round
-serially, where the limit judges exactly.
+workers' text buffers count as the serial run's would: admission adds, per
+buffer, the largest capacity any worker reached, which is at least the
+serial capacity because a buffer doubles until it fits
+([growable arrays](design-memory.md#growable-arrays)). It can exceed it for
+pending bytes -- a string the serial run interned earlier in the round is
+not pending there -- and a merge declined on that excess runs serially,
+where the limit judges exactly.
 
-**Order and resolve.** After sealing the round, order globally unique
-candidates by their minimum derivation positions. Walk those candidates
-and their columns to collect one descriptor per referenced canonical
-pending handle. Partition-local maps reuse that descriptor at later
-references. The ordinary resolver promises identifiers in semantic
-first-occurrence order, and a parallel rewrite replaces owned handles
-directly with those promises, recomputing affected hashes and stripes.
-Temporary maps and descriptors end at the rewrite barrier; the resolution
-map and copied bytes remain live through reserve and apply, as
-[pending value compaction](design-pending-values.md) specifies.
+**Pending values are resolved first.** Worker 0 walks candidates in task,
+candidate and column order and collects one descriptor per referenced
+worker-local value. A map per worker reuses that descriptor for later
+occurrences, so value measurement consumes the compact sequence without
+expanding it per column. The ordinary value resolver promises identifiers
+in semantic first-occurrence order. Workers rewrite local markers directly
+to those promises and recompute affected hashes and stripes before the
+tuple merge reads them. Temporary compaction storage is released at that
+barrier; the resolution map and the bytes it borrows remain live through
+reservation and apply. These mappings and lifetimes are specified in
+[pending value compaction](design-pending-values.md).
 
 The value table's and symbol pool's growth joins the relations' in the
 admission question; values are appended in the steps that cannot fail,
@@ -436,12 +513,16 @@ before the tuples naming them. A merge declined after reserving gives the
 reservation back, rewinding the pool so no uncommitted copy of a new
 string remains.
 
-**The order.** The ordered unique vector is exactly the sequence of new
-tuples serial insertion observes. Its task positions assign insertion
-credit and per-target append offsets. A seed follows the same path as a
-one-row task. No second cross-worker duplicate table is needed after
-ownership. Fully assigned tuples retain their ordinary hashes; pending
-routing hashes are replaced with stored-tuple hashes before staging.
+**The order.** Candidates are inserted task by task in task-array order,
+into each task's relation, by the serial insertion's rules; a seed's tuple
+is screened as a batch of one and is a candidate like any other. Newness is
+counted as tuples inserted, and a relation that gained is recorded as
+having gained, which is what the next round's deltas advance from. A
+candidate another worker's candidate already inserted is found as a
+duplicate in the ordinary way: that is the whole treatment of cross-worker
+duplicates. Candidates whose columns already hold final identifiers reuse
+the hashes computed during screening. Resolving pending columns recomputes
+their hashes and stripes before any merge stripe list is built.
 
 ## The parallel merge
 
@@ -481,19 +562,22 @@ reach.
 Steps are separated by the pool's barrier; *parallel* steps are cut into
 parts, each writing only what its stripe, task or worker owns.
 
-1. **Order** (caller and bounded sorting work). Seal the unique owner
-   blocks and build candidate references sorted by minimum logical
-   position. No production or owner mutation remains.
-2. **Resolve** (worker 0, then parallel). Compact referenced canonical
-   pending handles in that order and measure them through the ordinary
-   resolver. Rewrite disjoint candidate spans to promises and recompute
-   final hashes and stripes. Release temporary compaction state at the
-   completion barrier.
-3. **Count** (worker 0). Each task's unique tuples get positions in its
-   target's append, in task order; new tuples are summed per stripe.
+1. **Resolve** (worker 0, then parallel). Compact pending descriptors in
+   logical first-occurrence order and measure them through the value
+   resolver. Rewrite each worker's candidates to promised identifiers and
+   recompute their hashes and stripes. Release temporary compaction storage
+   at the completion barrier.
+2. **Find new tuples** (parallel). Each worker lists its candidates by
+   canonical stripe, a counting sort over counts kept while screening. Then
+   part *s* walks, task by task, the stripe-*s* candidates of each task's
+   worker list and marks each *first* or *repeat* with a table keyed by
+   target and tuple, counting each task's firsts. The firsts in task order
+   are exactly the tuples the serial evaluator inserts.
+3. **Count** (worker 0). Each task's firsts get positions in its target's
+   append, in task order; each target's new tuples are summed per stripe.
    The tuple limit and identifier space are asked of the exact total.
-4. **Stage** (parallel). Each task's ordered unique tuples are copied,
-   with their hashes and key hashes, into target staging; staging offset *i*
+4. **Stage** (parallel). Each task's firsts are copied, with their hashes
+   and their keys' hashes, into their target's staging; staging offset *i*
    becomes tuple *count + 1 + i*. Each target's staged tuples are then
    listed per stripe of each secondary index.
 5. **Classify keys** (parallel). A part per index stripe walks its staged
@@ -518,20 +602,25 @@ accounted. The rehash, the largest part of a growth, is what step 7 does in
 parallel. Identifiers are assigned in serial order in steps 3 and 4, so the
 relations, and the storage total byte for byte, are the serial evaluator's.
 
-**Stripe lists.** Index classification and apply read staged tuples through
-counting-sort lists for their canonical or secondary-key stripe, rather
-than every part scanning every tuple. Those stripes come from final domain
-words; routing partitions are a different private organization. Candidate
-references supply logical order, independently of which owner stored them.
+**Stripe lists.** Parallel steps read their stripe's items through lists
+made by counting sort, rather than every part walking every item and testing
+its stripe. The sort copies one position per item, once and sequentially;
+what it removes is all but one in *stripe-count* of each parallel step's
+reads. A part finds a task's run in a worker's list by searching for the
+task's first position, so it reads exactly that task's candidates whatever
+order the workers ran tasks in.
 
-**Scoped workspace.** Ordering references and their sort scratch are
-charged by unique candidate count. After staging takes the normalized
-columns and insertion attribution, owner blocks and references can be
-released. New-key classification blocks end once their receipts are ready;
-staging and resolver payload remain through reservation and apply. Each
-step sizes and owns its checked block, and a refusal leaves cleanup with
-one owner for every live allocation. No workspace is sized by all emitted
-derivations or by workers times global distinct tuples.
+**One scratch block per step.** Every count a step's scratch is sized by is
+known from the steps before it, so the step sums them, charges one block,
+allocates once and carves it by part: a part opens nothing, frees nothing
+and cannot fail. Tables made in a block take their slots from it, and each
+part clears its own, so clearing is parallel too. The firsts' block is
+released once they are counted and the new keys' once they are classified,
+so neither is held beside the other or at admission; staging is held until
+the merge ends. One block cannot serve the whole merge, since new-key counts
+exist only once staging does. A block holds every part's tables at once, so
+near the memory limit a merge may be declined that part-by-part tables would
+have fitted; its round runs serially, slower and the same.
 
 ## What the store guarantees a concurrent reader
 
@@ -610,35 +699,6 @@ round end and are released before a serial rerun and before the next round,
 so no serial growth ever asks the limit for room they hold; the check that
 an operation gave back every charged byte covers them.
 
-## Grouped reduction
-
-[Direct group reduction](design-group-reduction.md) uses ordinary executor
-batches with a reducer taker in place of candidate collection. Certified
-producer rows are already distinct, so their contributions combine into
-group state without retaining a tuple per derivation. A source already
-stored as a complete relation supplies distinct rows directly.
-
-Parallel reduction uses resumable lanes and a fixed total budget for
-partial maps. Each pool part exclusively owns one lane's scratch for a
-wave; it need not run on the same physical thread on the next wave.
-At barriers the caller drains partials into one private global builder.
-The state bound is groups plus the partial budget and retained payload,
-not one complete group table per worker. Logical first occurrences,
-rather than drain order, determine key and retained-value publication.
-
-A configured memory limit selects serial summary construction, even under
-forced deferral. The same logical reduction still runs; this scheduling
-rule preserves serial admission when partial combination changes transient
-payload lifetimes. Completed summary consumers remain eligible for the
-ordinary shared-round path.
-
-No global values or readable summaries are published until construction
-and reservation succeed. A failed parallel attempt releases all private
-state and reruns the same physical reduction serially. A completed summary
-is a frozen read source for ordinary outer-plan aggregate operations;
-those operations report type-invalid or overflowing outcomes only when
-reached. Outer result tuples still use the ordinary ordered merge.
-
 ## Loading in parallel
 
 [Bulk loading](design-bulk-load.md) preserves the ordinary global
@@ -715,9 +775,10 @@ A successful evaluation gives identical output at every thread count,
   once, and everything below the driver is a function of its binding and
   the frozen store. The round's rule makes that store the one the serial
   plan reads.
-* The ordered unique candidates are the serial derivation order with
-  duplicates removed: frozen-store hits and copies whose owner retains an
-  earlier logical witness. Owner arrival order changes no first position.
+* The tasks' candidates in task order are the serial derivation order with
+  duplicates removed -- those the frozen store held, duplicates serially too,
+  and those a worker's screen caught, repeats of its own earlier, and so
+  serially earlier, candidates.
 * The merge gives the firsts of that sequence identifiers in order, so every
   new tuple takes its serial identifier; chains are built in identifier
   order, deltas are identifier ranges, and rows stream in identifier order.
@@ -765,9 +826,14 @@ evaluation discards.
   it records; a handler would be global state.
 * **C11 `<threads.h>`.** Not on every platform relic builds for; POSIX
   threads are.
-* **Only a bounded local screen.** Forgetting a repeat is safe when a round
-  owner retains the global set. Without that owner, buffered candidates
-  can grow with all derivations rather than distinct tuples.
-* **Skipping ownership with one worker.** Packets can repeat earlier
-  packets even on one thread. Forced deferral exercises the same canonical
-  values, global uniqueness and ordered publication as a shared round.
+* **A screen that forgets.** A fixed-size screen needs no sizing or charge,
+  and an evicted repeat reaches the merge, which finds it; but candidates
+  would be bounded by the eviction rate, not the distinct new tuples, and a
+  round deriving millions of repeats of thousands of tuples would gather
+  millions.
+* **Skipping the table of firsts with one worker.** Every candidate is then a
+  first, but the single-worker deferred round exists to test the merge that
+  runs with many; a different path alone would test something else.
+* **A threshold weighing expected new tuples.** It follows from the cost
+  model, but a single work bound already separates the two shapes of round,
+  and a second term is one more estimate that can mispredict.

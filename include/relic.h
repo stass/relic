@@ -357,18 +357,6 @@ struct relic_config {
 #define	RELIC_F_NO_BATCH_IMPORT	0x0400u
 
 /*
- * Fold every aggregate by walking its source relation's stored rows, and
- * store every relation the program names, rather than reducing a source
- * that a query's run proves distinct and finds read only by folds and by
- * rules projecting its grouping key straight into one state per group,
- * building a summary over a complete relation that folds read repeatedly,
- * or counting an unkeyed group by its relation's size.  The answers are
- * the same; a reduced source holds its groups' state instead of its rows,
- * so a limit may refuse one of the two ways and not the other.
- */
-#define	RELIC_F_NO_GROUP_REDUCTION	0x0800u
-
-/*
  * Create a context.  Returns NULL when the configuration asks for more than
  * RELIC_THREADS_MAX threads, when memory is exhausted, or when getentropy(2)
  * cannot supply the random bytes the context keys its hash tables with, as
@@ -977,9 +965,8 @@ typedef struct relic_stats relic_stats_t;
  *			tuples read while looking up relations through an
  *			index on the bound arguments of a literal
  *	parallel_rounds	rounds of evaluation shared among more than one
- *			thread, and a grouped source whose producer ran
- *			that way, the one counter that depends on the
- *			number of threads
+ *			thread, the one counter that depends on the number
+ *			of threads
  *
  * The rest describe the context when the counters are read: the tuples held
  * across every relation -- answers are transient, so only a row callback finds

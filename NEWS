@@ -35,7 +35,8 @@ relic 1.0.0 (unreleased)
     from a regular file on eight threads or more, and the adding of a
     large load's facts to relations that already hold some, can be shared
     among threads, with the same answers in the same order whatever their
-    number.
+    number. An unkeyed count over a complete relation reads its tuple
+    count without scanning its rows.
   * Optional limits on the tuples held, on the memory relations, values,
     plans and rewrites occupy, and on the bytes of one program text or one
     field of an imported table: a load, an import, an evaluation or a query
