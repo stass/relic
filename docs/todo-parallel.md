@@ -21,11 +21,16 @@ and merge until a separate design earns its complexity.
 at sixteen threads takes 22.512 s and peaks at 23.46 GiB, against
 Souffle's 13.616 s and 1.49 GiB; relic's serial peak is 1.46 GiB.
 Per-worker screening bounds candidates by workers times distinct new
-tuples, and merge staging and scratch add further storage. Measure live
-candidates, cross-worker repeats and each merge allocation separately
-from allocator retention on the retained implementation. Compare smaller
-capacity and lifetime changes before proposing another collection
-protocol. Global value owners, tuple owners, resumable routing waves and
+tuples, and merge staging and scratch add further storage. The
+[retained scale-2 diagnostic](../bench/compare/recorded/m3-max/retained-attribution/README.md)
+finds about 14 worker copies per unique tuple in the peak round. Its
+candidate-finding barrier holds 1.324 GB of accounted storage, including
+167.8 MB of worker screening tables no longer read after gathering.
+Measure releasing those tables before merge scratch is allocated; their
+capacity is a 12.7% upper bound on that sampled accounted peak's reduction,
+not a measured RSS saving. Releasing all candidates after staging misses
+the peak. Keep allocator retention separate and compare low-duplicate
+controls before accepting a lifetime change. Global value owners, tuple owners, resumable routing waves and
 new private handle formats are not implementation commitments. A design
 must demonstrate why the measured waste cannot be removed more locally.
 The recorded scale-8 all-pairs tree peak of 109.1 GiB is another capacity

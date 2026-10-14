@@ -11,6 +11,9 @@ and the maintenance cost across subsystems are part of the decision.
 
 Related: [open work](../TODO.md), [comparison tables](../BENCHMARKS.md),
 [parallel work](todo-parallel.md), [testing](../specs/design-testing.md).
+The [retained-baseline measurements](../bench/compare/recorded/retained-baseline.md)
+record the simplification's throughput tradeoff and the remaining merge
+workspace, with raw samples from both hosts.
 
 ## Decisions from the implementation work
 
@@ -19,7 +22,7 @@ Related: [open work](../TODO.md), [comparison tables](../BENCHMARKS.md),
 | 1. Recursive plan selection | Keep the two-candidate policy and lazy index acquisition; do not add more policies or index-lifetime machinery without evidence. | Removes a large work cliff with one deterministic choice per round. |
 | 2. Pending-value compaction | Keep. | Workspace follows referenced local values instead of repeated tuple columns, with explicit ownership and no second interner. |
 | 3. Bound query factoring | Keep its narrow certificate. | Removes orders of magnitude of redundant derivations and memory on eligible recursion. |
-| 4. Bulk loading | Keep transferable builders, bounded batching, regular-file selection, framing overlap and input limits. Remove permanent symbol-index striping. | Builders improve the default path; batching and framing have substantial measured gains. Symbol striping taxes scalar interning and memory for a smaller parallel gain. |
+| 4. Bulk loading | Keep transferable builders, bounded batching, regular-file selection, framing overlap and input limits. Use one symbol index as the retained baseline. | Builders, batching and framing have measured gains. The simpler composition regresses parallel import throughput; isolate that loss before reconsidering symbol striping, separately from grouped reduction. |
 | 5. Indexed driver slicing | Keep the bounded first-driver extension; finish validation before expanding it. | Shares useful work without abandoning indexed selection or adding per-match storage. |
 | 6. General grouped reduction | Withdraw from the production plan. Keep ordinary fold semantics, the stored-count shortcut and a separate EMIT schema. | The reduction framework adds source-removal state, summary selection, value ownership and a separate parallel lifecycle across the engine. Its measured gains do not justify that scope. |
 | Candidate routing and index layouts | Investigations, not scheduled implementations. | Establish the remaining bottleneck and compare smaller changes before accepting another permanent representation or execution protocol. |
@@ -168,13 +171,23 @@ workers from 1.67 to 0.87 s and M3 sixteen-worker import from 0.69 to
 from worker-read cache lines and classify counters local until publication.
 These changes remove observed serialization and false sharing.
 
-The permanent striped symbol index is rejected. Its p620 sixteen-worker
-scale-10 `facts-join` gain was 1.04 to 0.95 s, while one-thread time grew
-from 1.57 to 1.62 s. Scalar inputs paid 1-6%; peak RSS grew 16-26 MB on
-FreeBSD. It adds wide byte hashes, stripe lists, deferred growth and a
-parallel publication lifecycle to ordinary interning. Keep one keyed
-symbol index and ordered publication; do not add allocation bundling or
-stripe scheduling to repair this tradeoff.
+The retained implementation uses one keyed symbol index. Earlier p620
+measurements of symbol-index striping showed a sixteen-worker scale-10
+`facts-join` gain from 1.04 to 0.95 s, while one-thread time grew from 1.57
+to 1.62 s. Scalar inputs paid 1-6%; peak RSS grew 16-26 MB on FreeBSD.
+The striped index adds wide byte hashes, stripe lists, deferred growth
+and a parallel publication lifecycle to ordinary interning.
+
+The ten-pair retained-baseline comparison shows a larger cost on M3:
+sixteen-worker files/facts imports have paired wall ratios 1.310/1.253,
+and complete commands 1.170/1.113. Every pair loses in those four cells.
+The contended p620 cohort points in the same direction. Default complete
+commands are broadly stable; RSS changes are not uniformly better.
+This is a measured complexity/throughput tradeoff, not a free simplification.
+Before choosing another publication design, isolate this loss and compare
+its cost with the archived striped implementation. Do not restore the
+grouped-reduction framework to address an import result, or add allocation
+bundling and scheduling machinery without their own evidence.
 
 Remaining work is validation of the retained composition: serial/default
 throughput, large regular files, small imports, malformed or stalled
@@ -239,20 +252,28 @@ retain every experimental capability. No replacement framework is queued.
 [Medium, components: `lib/task.c`, `lib/merge.c`, `lib/relation.c`,
 `lib/util.c`, `bench/compare/`]
 
-First validate the retained implementation as one baseline, including the
-simplification's default serial path. Then select one measured bottleneck:
+The retained-baseline cohort completes ten interleaved pairs per cell on
+both hosts with exact answers and unchanged work/final-storage counters.
+Residual Mac activity and substantial p620 contention limit release timing
+claims. It identifies the next local experiment:
 
-* **Candidate replication.** The recorded scale-8 closure peaks at
-  23.46 GiB in parallel against 1.46 GiB serially. Measure actual unique
-  candidates, worker copies, pending values and each merge allocation on
-  the retained tree. Compare smaller lifetime/capacity changes before
-  committing to value owners, tuple owners and resumable routing waves.
-* **Membership and growth.** Separate hashing, successful/failed probes,
+* **Candidate workspace first.** On retained scale-2 closure, round 3
+  holds 16.16 million worker copies for 1.15 million unique tuples.
+  Its sampled accounted peak is 1.324 GB: 893 MB of candidates and
+  362 MB of candidate-finding scratch dominate. Worker screening tables
+  account for 167.8 MB and are unused after gathering. Test releasing
+  those tables at that boundary, preserving candidate rows and ordinary
+  serial replay. Their capacity bounds the possible accounted reduction
+  at 12.7%; RSS savings remain unmeasured. Releasing all candidates only
+  after staging misses this peak. Compare time, accounted peaks and RSS
+  on duplicate-heavy and low-duplicate controls, including pending values,
+  allocation refusal and interrupts, before accepting the change.
+* **Membership and growth remain diagnostic work.** Separate hashing, successful/failed probes,
   secondary maintenance and growth rehashing. Compare isolated compact,
   tagged and cached-hash layouts under identical stripe and growth policies.
   A permanent wider entry needs a complete-run gain that simpler choices
   cannot provide; retain the compact representation when none earns its cost.
-* **Import peak memory.** Establish live ownership, capacity slack and
+* **Import peak memory remains diagnostic work.** Establish live ownership, capacity slack and
   allocator retention independently. An RSS target alone does not justify
   another persistent index representation.
 

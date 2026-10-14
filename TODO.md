@@ -21,11 +21,14 @@ of which `contrib/` holds only the homebrew formula, so
 
 **Measure the remaining performance gaps.** [Medium, component:
 `bench/compare/`, `lib/eval.c`, `lib/import.c`, `lib/merge.c`]
-Validate the retained implementation with comparable binaries, exact
-answers and separate loading, planning, evaluation and memory measurements.
+Measure a local release of worker screening tables after gathering, before
+candidate-finding scratch reaches the merge's memory peak. The
+[retained-baseline evidence](bench/compare/recorded/retained-baseline.md)
+also records the parallel import cost of the retained composition; keep
+that tradeoff separate from the rejected aggregate framework.
 The [performance plan](docs/todo-benchmark-performance.md) records the
 stages kept, the aggregate and symbol-layout experiments removed, and the
-evidence required before another design is selected. Candidate replication,
+evidence required before another design is selected. Candidate workspace,
 canonical membership and import peak memory are investigations; no new
 routing or summary framework is queued. The
 [comparison matrix](bench/compare/recorded/m3-max/results.tsv) and
