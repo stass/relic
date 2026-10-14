@@ -395,11 +395,17 @@ is an internal constant, independent of source size and configured worker
 count. The number of active lanes is also bounded by the budget needed
 for each lane's minimum table; no empty lane allocation can exceed it.
 
-One wave advances each lane through a bounded execution quantum or until
-its partial map needs draining. The lane returns with its cursor and any
-unconsumed batch intact. At the barrier, the caller combines the partials
-into the global builder, clears them, and assigns the next ordered slice
-to lanes that finished. Lanes with a paused slice resume that same slice.
+One wave advances each lane through several executor batches, until its
+partial refuses another row, its slice finishes, or it has reduced a
+fixed quantum of rows. The quantum does not depend on how many workers
+the context has. The lane returns with its cursor and any unconsumed
+batch intact. A return at the quantum keeps the partial: the barrier
+combines a partial only once it is full or its slice has finished, then
+clears it. A cleared partial drops its groups and the extreme text they
+retained, and keeps the group array, key table and key buffer it has
+already charged, so later rows of the same slice reuse them. The lanes
+together stay within the partial budget. A paused slice resumes as it
+was; a finished lane is not given another slice.
 The caller may combine parts in any completion-independent fixed order:
 arithmetic and validity combine by group, and occurrence positions use
 their minimum, not arrival order.
@@ -407,10 +413,13 @@ their minimum, not arrival order.
 Admission of a row into a partial is all or nothing, across every family
 updated from that source row. Required key/payload space is checked before
 any count or accumulator changes; if the row does
-not fit, its batch position remains unconsumed for the next wave. A single
-row that cannot fit even an empty partial declines the parallel attempt
-and uses serial reduction, whose ordinary charged builder can hold a
-large key. This prevents an endlessly empty drain cycle. An already
+not fit, its batch position remains unconsumed for the next wave. A
+cleared partial that still holds its arrays and cannot take the next
+row gives those arrays back and tries the row once more, against a
+partial that holds nothing but itself. A single row that cannot fit
+even that empty partial declines the parallel attempt and uses serial
+reduction, whose ordinary charged builder can hold a large key. This
+prevents an endlessly empty drain cycle. An already
 accepted contribution is never replayed into the global builder.
 
 The global builder grows under the memory account at barriers. A private

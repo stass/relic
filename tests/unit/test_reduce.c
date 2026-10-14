@@ -1476,9 +1476,9 @@ a_limited_builder_leaves_an_oversized_row(void)
 }
 
 /*
- * A row that updates a sum and then cannot retain a longer maximum must
- * not be left for another take: the sum has already changed.  The limited
- * builder fails instead, so the caller runs the rows serially.
+ * A row that would update a sum and then cannot retain a longer maximum
+ * is left untaken, and the sum stays the rows already admitted.  Another
+ * take of that row still does not apply it.
  */
 static void
 a_limited_take_does_not_apply_a_row_twice(void)
@@ -1488,14 +1488,23 @@ a_limited_take_does_not_apply_a_row_twice(void)
 	relic_dom_t rows[6];
 	relic_reduced_source_t source;
 	relic_reduce_batch_t batch;
+	const relic_fold_state_t *state;
 	relic_relation_t *relation;
 	relic_reducer_t *reducer;
+	relic_reducer_t *dest;
+	relic_summary_t *summary;
+	relic_dom_t extreme;
 	relic_t *ctx;
 	char short_text[64];
 	char long_text[4096];
 	char both[64 + 4096];
+	int64_t total;
 	size_t taken;
 	size_t fitted;
+
+	dest = NULL;
+	summary = NULL;
+	total = 0;
 
 	ctx = context_flagged(PIPELINE, 0);
 	if (ctx == NULL)
@@ -1563,13 +1572,42 @@ a_limited_take_does_not_apply_a_row_twice(void)
 	batch.bytes = both;
 	batch.byte_count = sizeof(both);
 	taken = SIZE_MAX;
-	checkf(relic_reducer_take(ctx, reducer, relation, &batch, &taken) != 0 &&
-	    relic_reducer_failed(reducer) && taken == 1 &&
-	    relic_reducer_rows(reducer) == 1, SCENARIO_PARTIAL_ROW,
-	    "the second row should fail after one taken, not taken=%zu "
-	    "rows=%" PRIu64 " failed=%d", taken, relic_reducer_rows(reducer),
+	checkf(relic_reducer_take(ctx, reducer, relation, &batch, &taken) == 0 &&
+	    !relic_reducer_failed(reducer) && relic_reducer_full(reducer) &&
+	    taken == 1 && relic_reducer_rows(reducer) == 1, SCENARIO_PARTIAL_ROW,
+	    "the second row should stay untaken after one, not taken=%zu "
+	    "rows=%" PRIu64 " full=%d failed=%d", taken,
+	    relic_reducer_rows(reducer), relic_reducer_full(reducer),
 	    relic_reducer_failed(reducer));
 
+	batch.rows = &rows[3];
+	batch.count = 1;
+	checkf(relic_reducer_take(ctx, reducer, relation, &batch, &taken) == 0 &&
+	    taken == 0 && relic_reducer_rows(reducer) == 1 &&
+	    !relic_reducer_failed(reducer), SCENARIO_PARTIAL_ROW,
+	    "taking the refused row again should change nothing, not "
+	    "taken=%zu rows=%" PRIu64, taken, relic_reducer_rows(reducer));
+
+	if (relic_reducer_open(ctx, &source, 3, &dest) != 0 ||
+	    relic_reducer_combine(ctx, dest, reducer) != 0 ||
+	    relic_reducer_finish(ctx, dest, relation, &summary) != 0) {
+		checkf(false, SCENARIO_PARTIAL_ROW, "the admitted row should "
+		    "finish: %s", relic_error(ctx));
+		relic_reducer_close(ctx, dest);
+		relic_reducer_close(ctx, reducer);
+		relic_destroy(ctx);
+		return;
+	}
+	state = relic_summary_state(summary, 0, 0, &extreme);
+	checkf(relic_summary_groups(summary) == 1 &&
+	    relic_summary_rows(summary, 0) == 1 && state != NULL &&
+	    relic_fold_outcome(RELIC_AGG_SUM, state, 1, &total) ==
+	    RELIC_FOLD_VALUE && total == 1, SCENARIO_PARTIAL_ROW,
+	    "the sum should stay the first row's, not %" PRId64 " over %"
+	    PRIu64 " rows", total, relic_summary_rows(summary, 0));
+
+	relic_summary_destroy(ctx, summary);
+	relic_reducer_close(ctx, dest);
 	relic_reducer_close(ctx, reducer);
 	relic_destroy(ctx);
 }
@@ -1823,8 +1861,9 @@ fail_intern:
 /*
  * The file pipeline's producer is cuttable.  Under RELIC_F_PARALLEL_ALWAYS
  * it reduces through bounded partials, at one thread and at two, and
- * answers as the serial reference does: one source, the same groups, and
- * a wave count.  A memory limit on the same switch keeps the serial path.
+ * answers as the serial reference does.  The pipeline's groups fit in a
+ * lane, so the producer finishes each slice in one wave rather than one
+ * wave per batch.  A memory limit on the same switch keeps the serial path.
  */
 static void
 a_shared_producer_answers_as_the_reference(void)
@@ -1861,13 +1900,14 @@ a_shared_producer_answers_as_the_reference(void)
 		    threads[t], answer, relic_error(ctx));
 		checkf(ctx->counters.sources_reduced == 1 &&
 		    ctx->counters.reductions_shared == 1 &&
-		    ctx->counters.reduction_waves >= 1 &&
+		    ctx->counters.reduction_waves == 1 &&
 		    ctx->counters.reduced_rows == FILES &&
 		    ctx->counters.reduced_groups == GROUPS, SCENARIO_SHARED,
-		    "at %zu thread(s) one source should be shared in %"
-		    PRIu64 " waves, not reduced=%" PRIu64 " shared=%" PRIu64
-		    " waves=%" PRIu64 " rows=%" PRIu64 " groups=%" PRIu64,
-		    threads[t], ctx->counters.reduction_waves,
+		    "at %zu thread(s) the groups fit a lane, so the slice "
+		    "should finish in one wave, not reduced=%" PRIu64
+		    " shared=%" PRIu64 " waves=%" PRIu64 " rows=%" PRIu64
+		    " groups=%" PRIu64,
+		    threads[t],
 		    ctx->counters.sources_reduced,
 		    ctx->counters.reductions_shared,
 		    ctx->counters.reduction_waves,

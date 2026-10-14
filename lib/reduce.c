@@ -232,6 +232,7 @@ struct relic_stored_builder {
 static bool	 charge(relic_t *ctx, relic_reducer_t *reducer, size_t bytes);
 static void	 release(relic_t *ctx, relic_reducer_t *reducer, size_t bytes);
 static void	 report_no_memory(relic_t *ctx, relic_reducer_t *reducer);
+static void	 release_extremes(relic_t *ctx, relic_reducer_t *reducer);
 static void	 release_groups(relic_t *ctx, relic_reducer_t *reducer);
 static void	 see_held(const relic_t *ctx, const char *bytes,
 		    const relic_held_t *held, relic_seen_t *seen);
@@ -264,6 +265,9 @@ static void	 hold(relic_held_t *held, const relic_seen_t *seen,
 		    size_t offset);
 static int	 retain_extreme(relic_t *ctx, relic_reducer_t *reducer,
 		    relic_extreme_t *extreme, const relic_seen_t *seen);
+static int	 admit_row(relic_t *ctx, relic_reducer_t *reducer,
+		    const relic_reduce_batch_t *batch, const relic_dom_t *row,
+		    size_t group, const relic_seen_t *key);
 static int	 take_row(relic_t *ctx, relic_reducer_t *reducer,
 		    const relic_reduce_batch_t *batch, const relic_dom_t *row);
 static void	 refuse_rows(relic_t *ctx, const relic_relation_t *relation);
@@ -448,11 +452,11 @@ relic_reducer_close(relic_t *ctx, relic_reducer_t *reducer)
 }
 
 /*
- * Give back the groups, their table, their key bytes and every extreme's
- * buffer, leaving the builder as relic_reducer_open() made it.
+ * Give back every extreme's buffer.  The group array that holds the
+ * extreme records stays.
  */
 static void
-release_groups(relic_t *ctx, relic_reducer_t *reducer)
+release_extremes(relic_t *ctx, relic_reducer_t *reducer)
 {
 	size_t extremes;
 	size_t i;
@@ -461,8 +465,18 @@ release_groups(relic_t *ctx, relic_reducer_t *reducer)
 	for (i = 0; i < extremes; i++) {
 		free(reducer->groups.extremes[i].bytes);
 		release(ctx, reducer, reducer->groups.extremes[i].capacity);
+		bzero(&reducer->groups.extremes[i], sizeof(relic_extreme_t));
 	}
+}
 
+/*
+ * Give back the groups, their table, their key bytes and every extreme's
+ * buffer, leaving the builder as relic_reducer_open() made it.
+ */
+static void
+release_groups(relic_t *ctx, relic_reducer_t *reducer)
+{
+	release_extremes(ctx, reducer);
 	release(ctx, reducer, relic_idtab_bytes(&reducer->table));
 	relic_idtab_reset(&reducer->table);
 	free(reducer->key_bytes);
@@ -512,8 +526,15 @@ relic_reducer_reset(relic_t *ctx, relic_reducer_t *reducer)
 void
 relic_reducer_clear(relic_t *ctx, relic_reducer_t *reducer)
 {
-	release_groups(ctx, reducer);
-	relic_idtab_init(&reducer->table, true);
+	release_extremes(ctx, reducer);
+	relic_idtab_clear(&reducer->table);
+	reducer->key_bytes_used = 0;
+	reducer->group_count = 0;
+	reducer->rows_seen = 0;
+	reducer->next_ordinal = 0;
+	reducer->full = false;
+	reducer->oversized = false;
+	reducer->failed = false;
 }
 
 void
@@ -1155,6 +1176,217 @@ relic_reducer_take(relic_t *ctx, relic_reducer_t *reducer,
 }
 
 /*
+ * Whether `charged` can take `more` bytes without passing the builder's
+ * budget.  `more` of SIZE_MAX is a size that cannot be counted.
+ */
+static bool
+within_budget(const relic_reducer_t *reducer, size_t charged, size_t more)
+{
+	if (more == SIZE_MAX)
+		return (false);
+	if (charged >= reducer->budget || more > reducer->budget - charged)
+		return (false);
+
+	return (true);
+}
+
+/*
+ * Whether a clear left the group array, key table or key buffer charged.
+ * A builder that still holds one of them is not empty: a row that misses
+ * the residual budget may fit once those arrays are given back.
+ */
+static bool
+retains_shell(const relic_reducer_t *reducer)
+{
+	return (reducer->group_capacity > 0 || reducer->table.capacity > 0 ||
+	    reducer->key_bytes_capacity > 0);
+}
+
+/*
+ * Leave the row untaken.  Oversized means it would not fit a builder that
+ * holds nothing but itself, so the caller abandons the parallel attempt
+ * instead of draining an empty partial forever.  A cleared partial that
+ * still holds its arrays is only full: the caller gives those arrays back
+ * and tries the row once more.
+ */
+static int
+refuse_admission(relic_reducer_t *reducer)
+{
+	reducer->full = true;
+	if (reducer->group_count == 0 && !retains_shell(reducer))
+		reducer->oversized = true;
+
+	return (-1);
+}
+
+/*
+ * The bytes a new group block would hold, or SIZE_MAX when the size
+ * cannot be counted.  Nothing is allocated.
+ */
+static size_t
+next_group_block(const relic_reducer_t *reducer)
+{
+	relic_groups_t grown;
+	size_t capacity;
+
+	capacity = relic_grow_array_capacity(reducer->group_capacity,
+	    reducer->group_count + 1);
+	if (capacity == 0)
+		return (SIZE_MAX);
+
+	return (lay_out_groups(reducer, capacity, NULL, &grown));
+}
+
+/*
+ * The bytes retain_extreme() would charge to hold `seen`, or zero when
+ * the extreme's buffer already can.
+ */
+static size_t
+extreme_growth(const relic_extreme_t *extreme, const relic_seen_t *seen)
+{
+	size_t capacity;
+
+	if (seen->dom != 0 || seen->view.type == RELIC_INTEGER)
+		return (0);
+	if (seen->view.length <= extreme->capacity)
+		return (0);
+
+	capacity = relic_grow_array_capacity(extreme->capacity,
+	    seen->view.length);
+	if (capacity == 0 || capacity < extreme->capacity)
+		return (SIZE_MAX);
+
+	return (capacity - extreme->capacity);
+}
+
+/*
+ * Whether a limited builder can take the row of an existing `group`, or
+ * of a new one when `group` is SIZE_MAX, without passing its budget.
+ * The charges are the ones add_group() and retain_extreme() would make,
+ * asked on copies of the accumulators before either changes a count or
+ * a real accumulator.  A row that does not fit is left untaken.  Returns
+ * 0 when it fits, or -1 with the builder full, and oversized when it
+ * holds no group.  A size that cannot be counted fails the builder
+ * instead, so the caller does not drain and retry it.
+ */
+static int
+admit_row(relic_t *ctx, relic_reducer_t *reducer,
+    const relic_reduce_batch_t *batch, const relic_dom_t *row,
+    size_t group, const relic_seen_t *key)
+{
+	const relic_reduce_signature_t *signature;
+	relic_fold_state_t state;
+	relic_extreme_t extreme;
+	relic_value_view_t extreme_view;
+	relic_seen_t value;
+	size_t charged;
+	size_t bytes;
+	size_t old_bytes;
+	size_t growth;
+	size_t text;
+	size_t needed;
+	size_t capacity;
+	uint64_t rows;
+	size_t at;
+	size_t s;
+	uint16_t k;
+
+	charged = reducer->charged;
+	if (group == SIZE_MAX) {
+		if (reducer->group_count == reducer->group_capacity) {
+			/*
+			 * grow_groups() charges the replacement block
+			 * while the old one is still held, then releases
+			 * the old size.  Ask the budget for the whole
+			 * replacement; keep only the difference.
+			 */
+			bytes = next_group_block(reducer);
+			if (bytes == SIZE_MAX || bytes < reducer->block_bytes) {
+				reducer->failed = true;
+				return (-1);
+			}
+			if (!within_budget(reducer, charged, bytes))
+				return (refuse_admission(reducer));
+			charged += bytes - reducer->block_bytes;
+		}
+
+		if (!relic_idtab_has_room(&reducer->table, 1)) {
+			/*
+			 * add_group() charges the new table while the old
+			 * one is still held, then releases the old size.
+			 * The budget is asked for that peak; what stays
+			 * charged is only the growth.
+			 */
+			old_bytes = relic_idtab_bytes(&reducer->table);
+			bytes = relic_idtab_bytes_after_reserve(&reducer->table,
+			    1);
+			if (bytes <= old_bytes) {
+				reducer->failed = true;
+				return (-1);
+			}
+			growth = relic_saturating_sum(bytes - old_bytes,
+			    old_bytes);
+			if (!within_budget(reducer, charged, growth))
+				return (refuse_admission(reducer));
+			charged += bytes - old_bytes;
+		}
+
+		text = 0;
+		for (k = 0; k < reducer->key_count; k++) {
+			if (key[k].dom == 0 &&
+			    key[k].view.type != RELIC_INTEGER)
+				text = relic_saturating_sum(text,
+				    key[k].view.length);
+		}
+		if (text > reducer->key_bytes_capacity -
+		    reducer->key_bytes_used) {
+			needed = relic_saturating_sum(reducer->key_bytes_used,
+			    text);
+			capacity = needed == SIZE_MAX ? 0 :
+			    relic_grow_array_capacity(
+			    reducer->key_bytes_capacity, needed);
+			if (capacity == 0 ||
+			    capacity < reducer->key_bytes_capacity) {
+				reducer->failed = true;
+				return (-1);
+			}
+			growth = capacity - reducer->key_bytes_capacity;
+			if (!within_budget(reducer, charged, growth))
+				return (refuse_admission(reducer));
+			charged += growth;
+		}
+	}
+
+	rows = group == SIZE_MAX ? 0 : reducer->groups.rows[group];
+	for (s = 0; s < reducer->signature_count; s++) {
+		signature = &reducer->signatures[s];
+		if (group == SIZE_MAX) {
+			relic_fold_init(&state);
+			bzero(&extreme, sizeof(extreme));
+		} else {
+			at = group * reducer->signature_count + s;
+			state = reducer->groups.states[at];
+			extreme = reducer->groups.extremes[at];
+		}
+		see_value(ctx, batch, row[signature->column], &value);
+		held_view(ctx, extreme.bytes, &extreme.value, &extreme_view);
+		if (relic_fold_add(signature->fn, &state, rows, &extreme_view,
+		    &value.view) != RELIC_FOLD_REPLACED)
+			continue;
+		growth = extreme_growth(&extreme, &value);
+		if (growth == SIZE_MAX) {
+			reducer->failed = true;
+			return (-1);
+		}
+		if (growth > 0 && !within_budget(reducer, charged, growth))
+			return (refuse_admission(reducer));
+		charged += growth;
+	}
+
+	return (0);
+}
+
+/*
  * Reduce one row into the group of its key, made when it is the key's
  * first: its row count, and each signature's accumulator, a min's or a
  * max's extreme replaced when the row's value is the new one.
@@ -1169,6 +1401,7 @@ take_row(relic_t *ctx, relic_reducer_t *reducer,
 	relic_extreme_t *extreme;
 	relic_fold_state_t *state;
 	relic_seen_t value;
+	uint64_t ordinal;
 	uint64_t rows;
 	uint32_t hash;
 	size_t group;
@@ -1180,6 +1413,24 @@ take_row(relic_t *ctx, relic_reducer_t *reducer,
 		see_value(ctx, batch, row[reducer->key_columns[k]], &key[k]);
 	hash = key_hash(reducer, key);
 	group = find_group(ctx, reducer, hash, key);
+	if (reducer->budget != SIZE_MAX &&
+	    admit_row(ctx, reducer, batch, row, group, key) != 0) {
+		/*
+		 * A cleared partial can refuse a row only because its
+		 * retained arrays still occupy the budget.  Give them
+		 * back once and ask again.  The occurrence stays, so the
+		 * row keeps its place in the source.
+		 */
+		if (reducer->failed || reducer->oversized ||
+		    reducer->group_count != 0)
+			return (-1);
+		ordinal = reducer->next_ordinal;
+		relic_reducer_reset(ctx, reducer);
+		reducer->next_ordinal = ordinal;
+		group = SIZE_MAX;
+		if (admit_row(ctx, reducer, batch, row, group, key) != 0)
+			return (-1);
+	}
 	if (group == SIZE_MAX &&
 	    add_group(ctx, reducer, hash, key, &group) != 0)
 		return (-1);

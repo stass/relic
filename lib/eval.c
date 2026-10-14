@@ -3316,20 +3316,28 @@ reduce_source(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 #define	RELIC_REDUCE_PARTIAL_BUDGET	((size_t)4 * 1024 * 1024)
 #define	RELIC_REDUCE_LANE_MIN		((size_t)4096)
 
+/*
+ * Rows one lane reduces before it returns, whether or not its partial
+ * is full.  A return at this count keeps the partial; only a full or
+ * finished partial is combined.  The count does not depend on how many
+ * workers the context has.
+ */
+#define	RELIC_REDUCE_LANE_QUANTUM	((uint64_t)RELIC_EXEC_QUANTUM)
+
 typedef struct relic_reduce_lane relic_reduce_lane_t;
 typedef struct relic_reduce_job relic_reduce_job_t;
 
 /*
  * One lane of a shared reduction: the scratch that runs its slice, the
  * bounded partial it reduces into, the slice itself, how many of the
- * last batch remain to take, and the occurrence of its first row.
+ * last batch remain to take, and the occurrence its next row will record.
  */
 struct relic_reduce_lane {
 	relic_scratch_t		 scratch;
 	relic_reducer_t		*partial;
 	relic_tuple_range_t	 slice;
 	size_t			 leftover;
-	uint64_t		 ordinal;	/* next occurrence to assign */
+	uint64_t		 ordinal;	/* occurrence of the next row */
 	bool			 started;	/* start_slice has run */
 	bool			 finished;	/* the executor returned */
 	bool			 done;		/* finished and no leftover */
@@ -3380,10 +3388,11 @@ static int	 finish_reduction(relic_evaluation_t *eval,
  * Run a certified producer's plan into `reducer` and make the summary of
  * what it derived.  When no memory limit is set and the context shares
  * rounds, the plan's driver is cut into lanes that reduce into bounded
- * partials and drain them into `reducer` at each wave; a plan with no
- * driver, a prefix that does not reach it, a row no empty partial can
- * hold, or a private refusal leaves `reducer` empty and runs the same
- * plan serially, which is the reference.
+ * partials.  A partial is combined when it is full or its slice has
+ * finished, not at every return.  A plan with no driver, a prefix that
+ * does not reach it, a row no empty partial can hold, or a private
+ * refusal leaves `reducer` empty and runs the same plan serially, which
+ * is the reference.
  */
 static int
 run_reduction(relic_evaluation_t *eval, const relic_component_plans_t *plans,
@@ -3591,10 +3600,13 @@ close_reduce_lanes(relic_reduce_job_t *job)
 }
 
 /*
- * Advance one lane by one quantum, or until its partial is full.  A
- * leftover of the last batch is taken first, so the executor does not
- * overwrite it.  Nothing is reported: a failure is the lane's, and the
- * caller runs the same rows serially.
+ * Advance one lane until its partial is full, its slice finishes, or it
+ * has reduced RELIC_REDUCE_LANE_QUANTUM rows since this call began.  The
+ * check is between batches, so the last batch may run it past the quantum
+ * by fewer than RELIC_INSERT_BATCH rows.  A leftover of the last batch is
+ * taken first, so the executor does not overwrite it.  A return at the
+ * quantum keeps the partial.  Nothing is reported: a failure is the
+ * lane's, and the caller runs the same rows serially.
  */
 static void
 advance_lane(void *argument, size_t part, size_t worker RELIC_UNUSED)
@@ -3602,18 +3614,51 @@ advance_lane(void *argument, size_t part, size_t worker RELIC_UNUSED)
 	relic_reduce_job_t *job;
 	relic_reduce_lane_t *lane;
 	enum relic_exec_status status;
+	uint64_t began;
 
 	job = argument;
 	lane = &job->lanes[part];
 	if (lane->done || lane->failed)
 		return;
-	if (relic_signal_flag_raised(&job->ctx->interrupted)) {
-		lane->failed = true;
-		return;
-	}
 
-	if (lane->leftover > 0) {
-		if (take_lane_batch(job, lane, true) != 0) {
+	began = lane->ordinal;
+	for (;;) {
+		if (relic_signal_flag_raised(&job->ctx->interrupted)) {
+			lane->failed = true;
+			return;
+		}
+
+		if (lane->leftover > 0) {
+			if (take_lane_batch(job, lane, true) != 0) {
+				lane->failed = true;
+				return;
+			}
+			if (lane->leftover > 0)
+				return;
+			if (lane->finished) {
+				lane->done = true;
+				return;
+			}
+		}
+
+		if (lane->ordinal - began >= RELIC_REDUCE_LANE_QUANTUM)
+			return;
+
+		if (!lane->started) {
+			relic_exec_start_slice(&lane->scratch, job->env,
+			    job->plan, lane->slice);
+			lane->started = true;
+		}
+
+		status = relic_exec_run(&lane->scratch);
+		if (lane->scratch.error.failed ||
+		    relic_signal_flag_raised(&job->ctx->interrupted)) {
+			lane->failed = true;
+			return;
+		}
+		if (status != RELIC_EXEC_PAUSED)
+			lane->finished = true;
+		if (take_lane_batch(job, lane, false) != 0) {
 			lane->failed = true;
 			return;
 		}
@@ -3624,27 +3669,6 @@ advance_lane(void *argument, size_t part, size_t worker RELIC_UNUSED)
 			return;
 		}
 	}
-
-	if (!lane->started) {
-		relic_exec_start_slice(&lane->scratch, job->env, job->plan,
-		    lane->slice);
-		lane->started = true;
-	}
-
-	status = relic_exec_run(&lane->scratch);
-	if (lane->scratch.error.failed ||
-	    relic_signal_flag_raised(&job->ctx->interrupted)) {
-		lane->failed = true;
-		return;
-	}
-	if (status != RELIC_EXEC_PAUSED)
-		lane->finished = true;
-	if (take_lane_batch(job, lane, false) != 0) {
-		lane->failed = true;
-		return;
-	}
-	if (lane->finished && lane->leftover == 0)
-		lane->done = true;
 }
 
 /*
@@ -3734,10 +3758,11 @@ record_shared_counts(relic_evaluation_t *eval, relic_reduce_job_t *job,
 }
 
 /*
- * Cut a certified producer's driver into lanes, reduce each slice into a
- * bounded partial, and drain the partials into `reducer` at every wave.
- * Returns 0 when the summary is made, 1 when the same plan should run
- * serially, or -1 when a refusal has already been reported.
+ * Cut a certified producer's driver into lanes and reduce each slice into
+ * a bounded partial.  A wave combines a partial only once it is full or
+ * its slice has finished, and the cleared partial keeps the room it has
+ * already charged.  Returns 0 when the summary is made, 1 when the same
+ * plan should run serially, or -1 when a refusal has already been reported.
  */
 static int
 run_reduction_shared(relic_evaluation_t *eval,
@@ -3844,6 +3869,15 @@ run_reduction_shared(relic_evaluation_t *eval,
 			    lane->failed) {
 				close_reduce_lanes(&job);
 				return (1);
+			}
+			/*
+			 * A quantum checkpoint leaves the partial in
+			 * place.  Combining it would free the groups a
+			 * later batch of the same slice still wants.
+			 */
+			if (!relic_reducer_full(lane->partial) && !lane->done) {
+				done = false;
+				continue;
 			}
 			if (relic_reducer_combine(eval->ctx, reducer,
 			    lane->partial) != 0) {

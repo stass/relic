@@ -448,6 +448,18 @@ relic_idtab_reset(relic_idtab_t *table)
 }
 
 void
+relic_idtab_clear(relic_idtab_t *table)
+{
+	if (table->slots == NULL)
+		return;
+
+	bzero(table->slots, table->capacity * sizeof(*table->slots));
+	if (table->tags != NULL)
+		bzero(table->tags, table->capacity);
+	table->count = 0;
+}
+
+void
 relic_idtab_drop_tags(relic_idtab_t *table)
 {
 	/* A given table's tags are part of its owner's block. */

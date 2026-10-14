@@ -182,9 +182,12 @@ struct relic_reduction {
  * sets the occurrence the next taken row will record.
  * relic_reducer_quiet() says whether a refusal is reported.
  * relic_reducer_combine() folds another builder's groups into this one
- * as taking its rows after these would have.  relic_reducer_reset() and
- * relic_reducer_clear() give the groups back and leave the builder
- * empty.  relic_reducer_finish() makes the summary of every row taken:
+ * as taking its rows after these would have.  relic_reducer_reset()
+ * gives the groups back and leaves the builder as open made it.
+ * relic_reducer_clear() gives the groups and their extreme text back
+ * but keeps the group array, key table and key buffer, so the next
+ * rows reuse what the builder has already charged.  relic_reducer_finish()
+ * makes the summary of every row taken:
  * it gives the values the groups retain that the context has not
  * assigned their identifiers, the memory limit asked first as it is asked
  * about values derived into `relation`, the source's.
