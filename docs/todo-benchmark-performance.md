@@ -37,7 +37,7 @@ peak RSS, in decimal units.
 | --- | --- | --- |
 | 1 | Files/facts throughput | Grouped files is 2.72/5.16 times behind DuckDB at one/sixteen threads; facts join is 1.74/2.52 times behind. Another proposal needs a material removal of work beyond the examined placement and validation shortcuts, with an explicit ownership contract before coding. |
 | 2 | Parallel working memory | Cyclic closure peaks at 8.45 GB against Souffle's 0.42 GB in the rival comparison. Both worker-screen reuse and shared collection lose useful parallel speed. A new design must remove copies without recreating the observed synchronization cost. |
-| 3 | Remaining closure time | Serial cyclic/acyclic closure is 11%/20% behind compiled Souffle; parallel cyclic is 16% behind. Retain the accepted 29%/19% serial gains. Another change needs attribution of specific work it removes. |
+| 3 | Remaining closure time | Serial cyclic/acyclic closure is 11%/20% behind compiled Souffle; parallel cyclic is 16% behind. Retain the accepted 29%/19% serial gains and the existing wide-hash call boundary. Another change needs a different measured removal of work that also preserves default import performance. |
 
 Eligible bound-recursion losses have reversed. Keep those gains as regression
 controls. Near ties and the roughly 2 ms serial chain-left gap do not justify
@@ -141,10 +141,21 @@ test matrix. Report optional-build gains separately from default-engine
 improvements. The source-ownership audit and installed-path issues remain
 separate correctness work in [open work](../TODO.md).
 
-Keep the selected probe helpers and table representation fixed during
-attribution. Another closure intervention needs new attribution
-and one bounded removal of work; the earlier helper profiles do not select
-another container or a sequence of speculative inlining changes.
+Keep the selected probe helpers, table representation and hash calculation
+fixed. The [retained wide-hash samples](../bench/compare/recorded/m3-max/wide-hash-pc/README.md)
+locate arithmetic, constant setup and caller work separately; they do not
+turn sampled instruction locations into removable time.
+
+The [wide-hash inlining screen](../bench/compare/recorded/m3-max/wide-hash-inline/README.md)
+removes the per-tuple call and moves constant setup outside the nonempty tuple
+loops with three net runtime source lines. In this cohort, serial cyclic/acyclic
+wall medians fall 0.83%/0.90% and same-generation recursion falls 2.55%, but
+import rises 1.78% and is slower in nine of ten pairs. Keep the existing
+out-of-line wide hash.
+That tradeoff closes this candidate; it does not select a layout adjustment,
+forced inlining or a specialized batching path. Another closure proposal needs
+a different measured removal of work with a useful complete-command gain and
+acceptable default-path controls.
 
 ## Require a focused design for remaining throughput
 
