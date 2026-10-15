@@ -1,20 +1,21 @@
 # Performance plan
 
 [Medium, components: `lib/round.c`, `lib/task.c`, `lib/merge.c`,
-`lib/relation.c`, `lib/exec.c`, `lib/import.c`, `bench/compare/`]
+`lib/relation.c`, `lib/exec.c`, `lib/import.c`, `lib/value.c`, `bench/compare/`]
 
 Reduce the remaining cost of useful commands while keeping one understandable
 execution and ownership model. Derived-relation hash tags and inline probe
-helpers are part of the working reference, with native compilation. Next
-compare that combination directly with the initial control and relevant
-rivals.
+helpers are part of the working reference, with native compilation. Their
+[combined comparison](../bench/compare/recorded/m3-max/composition/README.md)
+establishes the current gains, costs and remaining gaps. Next test one
+private-builder absence proof against the measured scalar input cost.
 Parallel memory remains the largest resource gap, with a design gate before
 further implementation. A candidate belongs to a gap; it does not create
 another implementation track.
 
 ## Remaining gaps and execution order
 
-The [rough rival comparison](../bench/compare/recorded/m3-max/rough-rivals/README.md)
+The [combined rival comparison](../bench/compare/recorded/m3-max/composition/README.md#remaining-rival-gaps)
 identifies the large differences. Its two fixed-order runs rank questions;
 they do not establish release performance or explain allocation ownership.
 Times include loading, evaluation and output. Memory figures are process
@@ -22,9 +23,10 @@ peak RSS, in decimal units.
 
 | Next work | Remaining gap | Evidence and decision |
 | --- | --- | --- |
-| 1 | Composition and remaining gaps | Compare the accepted native engine directly with the original control and relevant rivals. Inline probes bring serial cyclic/acyclic scale-4 medians to 25.45/8.06 s in their own cohort; the older rival times are 23.4/6.76 s. Establish the combined changes and remaining gaps under one output policy. |
-| Design gate | Files and facts throughput | The rough refresh puts grouped files 2.9/5.3 times behind DuckDB at one/sixteen threads and facts join 1.9/2.6 times behind. Profiles identify input, expressions and materialization as the main costs. A literal-prefix prototype does not establish a useful files gain; larger interventions need a focused ownership and reuse design. |
-| Design gate | Parallel working memory | At sixteen threads cyclic closure peaks at 8.47 GB against Souffle's 0.42 GB. Reusing worker screens lowers a matched comparison's peak to 6.66 GB but slows it 31%; that prototype is rejected. Actual worker candidate copies remain the dominant storage problem. |
+| 1 | Scalar input membership work | Builder membership lookups account for at most 8.3% of serial files CPU and 11.0% of serial facts CPU in the profiles. Test one first-column identifier bound that proves some tuples absent; hashing and placement still remain. |
+| Design gate | Larger files/facts throughput gaps | Grouped files is 2.72/5.16 times behind DuckDB at one/sixteen threads; facts join is 1.74/2.52 times behind. Input, expressions and materialization dominate. Larger interventions need a focused ownership and reuse design. |
+| Design gate | Parallel working memory | At sixteen threads cyclic closure peaks at 8.45 GB against Souffle's 0.42 GB. The rejected screen-reuse prototype saves memory but slows the target 31%. Actual worker candidate copies remain the dominant storage problem. |
+| Attribution gate | Remaining closure time | Serial cyclic/acyclic closure is 11%/20% behind compiled Souffle; parallel cyclic is 16% behind. The accepted bundle already saves 29%/19% of serial time against the initial engine. Another change needs fresh attribution of work it removes. |
 
 Eligible bound-recursion losses have reversed. Keep those gains as regression
 controls. Near ties and the roughly 2 ms serial chain-left gap do not justify
@@ -42,18 +44,20 @@ uses derived-relation tags and inline probe helpers with native compilation.
 The [tag](../bench/compare/recorded/m3-max/derived-tags/README.md) and
 [inlining](../bench/compare/recorded/m3-max/probe-inline/README.md) comparisons
 retain exact answers, controls and resource costs. Use the inlining cohort's
-selected binary for the composition comparison.
-Measure the final combination directly against the initial control; separate
-cohorts' improvements do not multiply into a measured combined result.
+selected binary for the next candidate's control. The direct composition
+retains the 32/16/104 MiB additional final storage for cyclic, acyclic and
+CSPA respectively; it does not infer a memory saving from varying process
+RSS. Separate cohorts' improvements do not multiply into a measured result.
 
 Use the [measurement protocol](todo-performance-measurements.md): reuse the
 [completed investigations](../bench/compare/recorded/focused-investigations.md),
 resolve the specific missing attribution, test one candidate, then keep or
 reject it. Record the expected removed work/bytes and the rejection condition
 before implementation. A stronger architecture requires stronger evidence.
-M3 work can proceed while p620 is unusable; retain the outstanding p620 trim
-comparison and validate selected scheduling/allocation changes there when
-conditions permit. A busy-host result remains exploratory.
+Use either host when it is usable; retain the outstanding p620 trim comparison.
+The [quiet FreeBSD check](../bench/compare/recorded/freebsd-5995wx/probe-inline-fresh/README.md)
+covers inlining only. Validate selected scheduling/allocation changes on
+both hosts when conditions permit. A busy-host result remains exploratory.
 
 ## Reduce parallel working memory
 
@@ -80,8 +84,8 @@ Any such candidate must retain useful parallel speed on dense closure and a
 large low-duplicate computed-value control. Check acyclic closure and Linux
 CSPA before acceptance. A lower scratch charge alone, a peak shifted into
 another phase or serial replay concealing failed admission is insufficient.
-Until a concrete design meets this boundary, proceed with composition
-validation.
+Until a concrete design meets this boundary, proceed with the bounded input
+experiment below.
 
 ## Hold the closure and build decisions fixed
 
@@ -101,10 +105,39 @@ improvements. The source-ownership audit and installed-path issues remain
 separate correctness work in [open work](../TODO.md).
 
 Keep the selected probe helpers and table representation fixed during the
-composition comparison, which determines the
-remaining closure gap. Another closure intervention needs new attribution
+input experiment. Another closure intervention needs new attribution
 and one bounded removal of work; the earlier helper profiles do not select
 another container or a sequence of speculative inlining changes.
+
+## Remove justified scalar builder lookups
+
+Test one conservative upper bound on the first column's opaque identifier
+inside a private fact builder. If a proposed tuple exceeds the bound, it
+cannot already be stored, so membership needs no canonical probe. Other
+tuples use the ordinary lookup. This compares identifiers only; it assumes
+neither logical value order nor monotone input.
+
+Keep one word per private builder, not bounds for every column or metadata
+on published relations. All scalar appends go through one helper that raises
+the bound. Before the factory exposes any mutable stripe-fill handle, it
+saturates the bound, so arbitrary bulk writes cannot invalidate it and no
+batch caller or worker has to maintain it. Reset or payload adoption may
+retain a conservative overestimate. Allocation, placement, publication and
+retry retain their existing paths.
+
+The profiles' builder-membership stacks cover 96 weighted ms in each serial
+command: 8.3% of files CPU and 11.0% of facts CPU. These are ceilings, not
+predicted gains. Hashing and placement still run; removing an earlier probe
+can shift cold-access latency into placement rather than remove it.
+
+Use complete files/facts scale-8 commands at one worker as targets and sixteen
+workers as controls. Add repeated/nonmonotone first columns, duplicate-heavy
+and numeric input, and small commands. Verify zero-arity NULL tuples,
+same-first-column distinct tuples, a duplicate after bulk filling, and failed
+reserve/retry behavior. Measure actual private-object padding and peak memory.
+Keep the candidate only for a repeatable complete-command gain without a
+persistent control regression. Rejecting this bound closes the idea; it does
+not justify adding more columns, policies or builder representations.
 
 ## Require a focused design for remaining throughput
 
@@ -120,7 +153,7 @@ model for relic.
 The [literal-prefix screen](../bench/compare/recorded/m3-max/regex-prefix-screen/README.md)
 does not establish a useful complete-files gain, so its prototype is not
 adopted. Its large synthetic near-match improvement does not select another
-optimization track. Keep the current matcher for composition validation.
+optimization track. Keep the current matcher during the input experiment.
 
 Further throughput work needs another specific removal of measured work with
 an explicit ownership and reuse contract. Replacing a first lookup with a
@@ -131,6 +164,12 @@ in its own cohort and no consistent serial gain. It does not explain the
 current 2-5 times gaps. A publication or aggregate proposal must earn its
 maintenance cost through the work it removes and a smaller ownership boundary
 than the withdrawn general reducer.
+
+Keep `object(M, O) :- source(M, S), O = cat(substr(S, 0, length(S) - 2),
+".o")` as a low-duplicate computed-value control. Further work on computed
+strings starts with direct attribution of expression work and ordered value
+publication, choosing a change from the work it removes and its ownership
+cost.
 
 Retain ordinary fold/EMIT semantics, deterministic value numbering, input
 limits, stream liveness and refusal behavior. Use an integer-only import,
@@ -143,21 +182,19 @@ no further implementation work.
 
 ## Preserve gains and validate the composition
 
-After selected changes, compare the combined engine with the initial reference
-and relevant rivals under one output policy. Include the three target families,
-a fast bound-recursion case, sparse/same-generation controls, Linux CSPA and
-small commands. Add larger sizes or a second platform to answer a specific
-scaling or portability question, rather than rerunning every old stage matrix.
-Reuse the bounded Andersen/nonlinear comparison for the unchanged paths;
-it does not settle every larger scale. Compiler policy stays fixed during
-engine comparisons.
+Use the [accepted composition](../bench/compare/recorded/m3-max/composition/README.md)
+as the frozen reference. Its fifteen paired cells, twelve rival comparisons
+and the bounded Andersen/nonlinear refresh cover the three target families,
+bound recursion, sparse/same-generation, Linux CSPA and small commands. Reuse
+that evidence for unchanged paths. An accepted input change requires a direct
+composition check on its affected targets and controls, not another full
+ranking. Add sizes or a second platform to resolve a specific scaling or
+portability question; compiler policy and output policy stay fixed.
 
-Use a bounded descriptive comparison with the already validated immutable
-binaries: two alternating pairs against the initial engine and the existing
-two-run rival protocol. Keep exact independent answers for the engine pair
-and normalized-set checks for rivals. This reports the combined tradeoff and
-remaining large gaps; it is not another adoption decision or a cross-host
-release claim. Do not infer small regressions from the rough rival ordering.
+Keep exact independent answers for engine comparisons and normalized-set
+checks for rivals. Descriptive composition reports do not become adoption
+or cross-host release claims. Do not infer small regressions from the rough
+rival ordering or multiply separate cohorts' gains into a measured result.
 
 Reuse the full normal/sanitizer validation of unchanged paths; run the required
 checks for each actual change. Preserve correctness at plan/index refusal,

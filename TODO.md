@@ -21,11 +21,11 @@ of which `contrib/` holds only the homebrew formula, so
 
 **Close the measured performance gaps.** [Medium, components:
 `lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/relation.c`, `lib/exec.c`,
-`lib/import.c`, `bench/compare/`]
+`lib/import.c`, `lib/value.c`, `bench/compare/`]
 Use the tagged engine with inline probe helpers and native compilation as
-the working reference. Next compare the accepted combination directly with
-the initial control and relevant rivals. ThinLTO remains
-an explicit build option. Parallel working memory remains a larger structural
+the working reference. Next test a single private bound that can prove a
+builder tuple absent before a membership lookup. ThinLTO remains an explicit
+build option. Parallel working memory remains a larger structural
 gap: further implementation needs a design that reduces or bounds
 actual worker copies without the rejected screen-reuse prototype's slowdown. The
 [performance plan](docs/todo-benchmark-performance.md) sets each remaining
@@ -79,23 +79,12 @@ error, but undercharges acquisition until then.
 
 **Refresh published comparisons with consistent output and host coverage.**
 [Medium, component: `bench/compare/`]
-The [rough rival refresh](bench/compare/recorded/m3-max/rough-rivals/README.md)
+The [composition check](bench/compare/recorded/m3-max/composition/README.md)
 uses stdout for every timed engine; it does not replace the full
 [file-output tables](BENCHMARKS.md). When publishing a broader comparison,
 keep those cohorts separate, validate second-host coverage, and distinguish
 OS/compiler/engine-version differences from core-count effects. The selected
 performance-plan comparisons take precedence over a full publication sweep.
-
-**Check the remaining dense-analysis cases before assigning an optimization.**
-[Medium, components: `lib/eval.c`, `bench/compare/andersen`,
-`bench/compare/tc-nonlinear`]
-Older dense Andersen and nonlinear-reachability observations are not covered
-by the rough refresh; the current parallel Linux CSPA win does not settle them.
-Use one bounded representative comparison under the
-[composition validation](docs/todo-benchmark-performance.md#preserve-gains-and-validate-the-composition)
-before reopening a general per-derivation optimization. Membership tags are
-a closure candidate with their own controls, not evidence for a new container
-on every analysis.
 
 ## Testing and CI
 
@@ -145,35 +134,6 @@ and floating point; what stays out on purpose is in
 that have it and what a relic program does without it; the verdicts are
 provisional until a design exists.
 
-* string operations, specified in
-  [functions](specs/language.md#functions) and
-  `specs/design-expressions.md`, are built; what remains:
-  * [Medium, performance, `lib/exec.c`, `lib/value.c`] the serial cost is
-    above its target. Over a million sources, `object/2`, `object(M, O)
-    :- source(M, S), O = cat(substr(S, 0, length(S) - 2), ".o")`, adds
-    0.60 s to the load where the same join assigning a constant adds
-    0.13 s, 4.6 times against a target of twice. Each computed string is
-    probed in the pool twice, when its text slot is bound and again by the
-    measure, which is most of the 0.32 s `str(M)` over the same sources
-    costs; interning a million new strings is most of the rest. Probing
-    only for a slot some later operation reads as a key, and not for one
-    only an `EMIT` or an expression reads, would halve the probes without
-    changing what the measure decides; it is a planner decision that
-    changes [slots and cells](specs/design-expressions.md#slots-and-cells),
-    which probes at every assignment.
-  * [Medium, performance, `lib/merge.c`] `object/2` should scale as
-    `tc-cyclic` does at sixteen threads: over a million sources it
-    evaluates in 0.60 s past the load on one thread and 0.33 s on sixteen,
-    1.8 times, where `tc-cyclic` scales 5.3 times (2.66 s to 0.50 s). At
-    sixteen threads the tasks take 0.059 s, gathering the candidates
-    0.025 s, applying them 0.070 s, and the measure of the pending strings
-    0.163 s, serially: it probes the pool for each gathered string and
-    numbers the new ones in order of first occurrence. Striping the measure
-    by the string's hash, as the apply is striped by the tuple's, would run
-    the probes in parallel and leave only the numbering serial, over the
-    new strings alone; that changes
-    [interning computed values](specs/design-values.md#interning-computed-values),
-    which specifies one serial measure.
 * incremental insertion maintenance [Medium, component: `lib/eval.c`]: any
   change to the program after an evaluation discards every derived relation
   and computes the fixed point again from the facts, so an embedder or a

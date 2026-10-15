@@ -34,8 +34,9 @@ capacity, charged storage and process RSS distinct.
 
 ## Account for the work behind parallel elapsed time
 
-In the current cyclic comparison, relic uses about 70.5 s of user CPU against
-Souffle's 29.6 s at sixteen workers, while elapsed time is 5.94/4.70 s.
+In the [current cyclic comparison](../bench/compare/recorded/m3-max/composition/README.md#remaining-rival-gaps),
+relic uses about 63.5 s of user CPU against Souffle's 29.5 s at sixteen
+workers, while elapsed time is 5.43/4.67 s.
 This does not identify spinning or duplicated useful work. If a candidate's
 performance depends on that distinction, separate executor/screen work,
 ordered merge work, pool waiting and task imbalance in the profile.
@@ -55,4 +56,4 @@ speed. Require a successful shared merge, so serial replay cannot conceal
 failed admission. Preserve ordinary retry, interruption, value numbering and
 output order, including computed values and allocation refusal. Reopening
 memory implementation needs a concrete design that meets this boundary;
-the next admitted work is composition validation in the main plan.
+the next admitted work is the bounded scalar input experiment in the main plan.
