@@ -1857,6 +1857,11 @@ a_builder_grows_as_insertions_grow_a_relation(void)
 		for (i = 0; i < count && grew; i++) {
 			grew = relic_value_intern_integer(ctx, (int64_t)i,
 			    &tuple[0]) == 0;
+			if (!grew) {
+				check(false, SCENARIO_BUILDER_GROWTH,
+				    "the tuple's value can be interned");
+				break;
+			}
 			tuple[1] = tuple[0];
 			hash = relic_tuple_hash(builder.hash_seed, tuple,
 			    arities[a]);
