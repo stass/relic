@@ -55,4 +55,4 @@ speed. Require a successful shared merge, so serial replay cannot conceal
 failed admission. Preserve ordinary retry, interruption, value numbering and
 output order, including computed values and allocation refusal. Reopening
 memory implementation needs a concrete design that meets this boundary;
-the next admitted work is the remaining closure/build cost in the main plan.
+the next admitted work is composition validation in the main plan.
