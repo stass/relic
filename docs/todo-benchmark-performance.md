@@ -15,12 +15,13 @@ lower dense peak RSS came with 2.54 times the parallel elapsed time. All three
 parallel computed-value/duplicate controls also lost. The
 [thread-stack diagnostic](../bench/compare/recorded/m3-max/shared-collection-waits/README.md)
 finds substantial direct tuple-mutex waiting under sampling. Keep the existing
-engine; this result selects no lock tuning, alternate collector or atomic-table
-rewrite.
+engine. The [FreeBSD cycle diagnostic](../bench/compare/recorded/freebsd-5995wx/shared-collection-pmc/README.md)
+shows substantial kernel synchronization work amid competing host activity. Its
+process-specific samples include both user and kernel execution; the requested
+user-only qualifier did not take effect. Neither diagnostic selects lock tuning,
+an alternate collector or an atomic-table rewrite.
 
-Next finish the bounded FreeBSD process-specific CPU attribution, keeping
-busy-host evidence exploratory and separate from the Mac screen. Then require
-a concrete removal of input/expression work before another throughput
+Require a concrete removal of input/expression work before another throughput
 prototype. Remaining gaps are design and attribution gates, not an automatic
 queue of implementations.
 
@@ -34,10 +35,9 @@ peak RSS, in decimal units.
 
 | Priority | Remaining gap | Next gate |
 | --- | --- | --- |
-| 1 | Synchronization attribution on FreeBSD | Use one source-bound cyclic4 j16 user-cycle profile per variant, with exact answers/counters and bounded target-only thread observations. A saturated host cannot establish a wall-time ranking. This diagnoses the rejected design; it cannot override the Mac loss. |
-| Design gate | Files/facts throughput | Grouped files is 2.72/5.16 times behind DuckDB at one/sixteen threads; facts join is 1.74/2.52 times behind. Use the retained input/expression profiles to identify one repeated or avoidable operation and its ownership contract before coding. |
-| Design gate | Parallel working memory | Cyclic closure peaks at 8.45 GB against Souffle's 0.42 GB in the rival comparison. Both worker-screen reuse and shared collection lose useful parallel speed. A new design must remove copies without recreating the observed synchronization cost. |
-| Attribution gate | Remaining closure time | Serial cyclic/acyclic closure is 11%/20% behind compiled Souffle; parallel cyclic is 16% behind. Retain the accepted 29%/19% serial gains. Another change needs attribution of specific work it removes. |
+| 1 | Files/facts throughput | Grouped files is 2.72/5.16 times behind DuckDB at one/sixteen threads; facts join is 1.74/2.52 times behind. Use the retained input/expression profiles to identify one repeated or avoidable operation and its ownership contract before coding. |
+| 2 | Parallel working memory | Cyclic closure peaks at 8.45 GB against Souffle's 0.42 GB in the rival comparison. Both worker-screen reuse and shared collection lose useful parallel speed. A new design must remove copies without recreating the observed synchronization cost. |
+| 3 | Remaining closure time | Serial cyclic/acyclic closure is 11%/20% behind compiled Souffle; parallel cyclic is 16% behind. Retain the accepted 29%/19% serial gains. Another change needs attribution of specific work it removes. |
 
 Eligible bound-recursion losses have reversed. Keep those gains as regression
 controls. Near ties and the roughly 2 ms serial chain-left gap do not justify

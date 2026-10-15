@@ -57,11 +57,13 @@ These are perturbed stack appearances with unequal coverage, not CPU shares,
 blocked durations or an attributed fraction of the original slowdown. The
 cyclic rule propagates assigned values and bypasses the global value lock.
 
-Finish one bounded exploratory FreeBSD user-cycle profile per variant using
-process-specific PMCs, with exact work/source bindings and explicit sample
-loss/unwinding limits. CPU samples cannot measure sleeping time; any target
-thread-state observations remain a separate measure. Do not rank wall times
-under host saturation or expand this diagnostic into a tuning cohort.
+The [FreeBSD process-specific cycle profiles](../bench/compare/recorded/freebsd-5995wx/shared-collection-pmc/README.md)
+also find substantial kernel synchronization work in the shared collector.
+Raw records show both user and kernel samples despite the requested user-only
+qualifier; every sample belongs to the intended process. This busy-host
+diagnostic supplies no controlled wall-time ranking or blocked duration.
+Keep its mode, loss and unwinding limits explicit, and thread-state observations
+separate from CPU samples. It does not reopen the rejected implementation.
 
 The [synchronization review](../bench/compare/recorded/m3-max/shared-collection-synchronization.md)
 explains why atomics need safe publication/growth, and why single-writer routing

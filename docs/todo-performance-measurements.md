@@ -33,6 +33,8 @@ Diagnostic binaries never supply performance timings. A high inclusive
 sample count does not identify the work beneath it: separate hashing from
 growth placement, expressions from publication, and waiting from useful
 worker work. Count software operations and hardware samples separately.
+Check hardware event metadata and sampled user/kernel modes against the
+requested scope; a command accepting a qualifier does not prove it applied it.
 
 ## Select cells by the question
 

@@ -24,12 +24,12 @@ of which `contrib/` holds only the homebrew formula, so
 `lib/import.c`, `lib/value.c`, `bench/compare/`]
 Keep the tagged engine with inline probe helpers and native compilation as
 reference. The shared collector's memory/source savings do not justify its
-parallel slowdown; thread-stack sampling identifies substantial tuple-mutex
-waiting. Finish the bounded exploratory FreeBSD CPU attribution without
-changing that rejection. Further throughput work needs one concrete removal
-of input/expression work; further memory work needs a fresh ownership and
-capacity design. No atomic-table or alternate-collector implementation is
-selected. The [performance plan](docs/todo-benchmark-performance.md) sets these
+parallel slowdown; Mac thread-stack sampling identifies substantial tuple-mutex
+waiting, and exploratory FreeBSD cycle samples expose kernel synchronization
+work. Keep that replacement rejected. Further throughput work needs one
+concrete removal of input/expression work; further memory work needs a fresh
+ownership and capacity design. No atomic-table or alternate-collector
+implementation is selected. The [performance plan](docs/todo-benchmark-performance.md) sets these
 gates; the [measurement protocol](docs/todo-performance-measurements.md) keeps
 rough ranking separate from implementation decisions, and
 [parallel questions](docs/todo-parallel.md) feed the same work.
