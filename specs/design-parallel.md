@@ -2,8 +2,8 @@
 
 A context may share the work of evaluation among threads it owns. The unit
 of sharing is a round of the evaluator: its plans run on a worker pool over a
-store nothing modifies while they run, what they derive is gathered per
-worker, and the result is merged in the order the serial evaluator would
+store nothing modifies while they run, what they derive is gathered privately
+for the round, and the result is merged in the order the serial evaluator would
 have inserted it. So a successful evaluation gives the same relations,
 identifiers, answers, diagnostics and counters at every thread count, and a
 failure before publication runs the round again serially, where every
@@ -100,25 +100,36 @@ is chosen per round, and a round that would not benefit runs serially even
 with many threads. Both ways leave the store in the same state at the round
 boundary, so a component may mix them from round to round.
 
+**Candidate representation is private to the round.** The general collector
+described below keeps each worker's distinct candidates and resolves their
+first occurrences during merging. For an eligible binary target,
+[dense collection](design-dense-rounds.md) keeps occurrence ranks in a fixed
+array instead. Both run the same tasks and supply the same ordered append to
+the common classification, reservation and application steps. Dense ranks
+contain no computed values or pointers, and introduce no concurrent writer
+to the frozen store.
+
 ## Invariants
 
 * From cursor preparation through the job's barrier, no relation, index,
   value table or symbol pool is modified. The only shared words a task
-  writes are the job's coordination words, index frontiers, and the memory
-  account's total for its own buffers.
+  writes are the job's coordination words, index frontiers, the memory
+  account's total for its own buffers, and fixed atomic occurrence ranks
+  when the dense collector is selected.
 * Tasks are enumerated in serial order and each worker claims them in
   increasing order, so each worker's candidates are in serial order.
-* A worker's candidates are the tuples the frozen store lacked that it had
-  not gathered earlier in the round: at most its distinct new tuples.
+* In the general collector, a worker's candidates are the tuples the frozen
+  store lacked that it had not gathered earlier: at most its distinct new
+  tuples. A dense collector keeps no per-worker tuple buffer.
 * Every step of a round that can fail precedes every step that modifies the
   store; any failure before then reruns the round serially.
 * Every diagnostic, limit refusal and caller callback happens on the
   calling thread, in serial order.
 * What a table holds and costs is independent of the thread count.
 * Nothing the pool holds for itself can fail an evaluation.
-* Nothing is allocated per task or per tuple: a worker's data-sized buffers
-  are reserved before the job and grow, by doubling, only when a round
-  exceeds its reservation.
+* Nothing is allocated per task or per tuple. General candidate buffers grow
+  by doubling when a round exceeds its reservation; dense collection has
+  fixed room before gathering and exact ordering room after its barrier.
 
 ## The worker pool
 
@@ -168,13 +179,15 @@ installed a callback without a thought for threads is right not to have had
 one ([design-api.md](design-api.md)).
 
 **Synchronization.** No lock is taken on any path that touches data. The
-shared words are few: a **claim word**, advanced by one `fetch_add` per part,
-wait-free; an **abandon word**, set by a worker that cannot go on and read
+shared coordination words are few: a **claim word**, advanced by one
+`fetch_add` per part; an **abandon word**, set by a worker that cannot go on and read
 between tasks; a **completion count**, one `fetch_add` per worker as it
 leaves for whatever reason, so the barrier never waits for a worker that
 failed; the **generation word** that publishes a job; the **account total**,
 on the rare growth of a worker's buffers; and the index **frontiers**
-([the benign frontier race](#the-benign-frontier-race)).
+([the benign frontier race](#the-benign-frontier-race)). Dense collection also
+updates fixed occurrence words through atomic minimum; their layout and
+lifetime are established before the job is published.
 Everything else a task writes is its own -- its worker's scratch, candidates
 and counters, its own task record -- and worker 0 reads them after the
 barrier, whose acquire covers them.

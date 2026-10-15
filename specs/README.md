@@ -26,6 +26,10 @@ A newcomer should read:
 
 ## Documents
 
+The [research and methods index](../docs/research.md) links mechanisms to
+papers, implementation references and local adaptations, distinguishing
+runtime use from proposals and related work.
+
 **Overview**
 
 * [Architecture](architecture.md) -- the system as a whole: goals and
@@ -75,6 +79,8 @@ A newcomer should read:
   and shared rounds over a frozen store, and the serial-order merge.
 * [Pending value compaction](design-pending-values.md) -- compact worker
   markers, deterministic value resolution and merge workspace ownership.
+* [Dense round collection](design-dense-rounds.md) -- fixed occurrence ranks
+  for binary candidates over a bounded assigned-value domain.
 
 **Interfaces**
 

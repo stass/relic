@@ -370,6 +370,7 @@ linear form.
 | [specs/architecture.md](specs/architecture.md) | the target design of the system |
 | [specs/language.md](specs/language.md) | the specification of the language |
 | [specs/style.md](specs/style.md) | code style, binding on all relic-owned code |
+| [docs/research.md](docs/research.md) | papers, reference implementations and local methods behind the design |
 | [NEWS](NEWS) | what changed in each release |
 | [TODO.md](TODO.md) | open work, by severity |
 

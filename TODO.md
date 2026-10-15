@@ -19,23 +19,17 @@ of which `contrib/` holds only the homebrew formula, so
 `contrib/pkgsrc/devel/relic/` are to write; and the
 [release procedure](specs/design-release.md#the-release-procedure).
 
-**Close the measured performance gaps.** [Medium, components:
-`lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/relation.c`, `lib/exec.c`,
-`lib/import.c`, `lib/value.c`, `bench/compare/`]
-Keep the tagged engine with inline probe helpers and native compilation as
-reference. The shared collector's memory/source savings do not justify its
-parallel slowdown; Mac thread-stack sampling identifies substantial tuple-mutex
-waiting, and exploratory FreeBSD cycle samples expose kernel synchronization
-work. Keep that replacement rejected. The input placement and symbol-validation
-investigations select no change. Wide-hash inlining's small closure gains come
-with an import penalty in the measured cohort; keep the existing call boundary.
-Further throughput work needs a material removal of input/expression work;
-further memory work needs a fresh ownership and capacity design. No atomic-table
-or alternate-collector implementation is selected. The
-[performance plan](docs/todo-benchmark-performance.md) sets these
-gates; the [measurement protocol](docs/todo-performance-measurements.md) keeps
-rough ranking separate from implementation decisions, and
-[parallel questions](docs/todo-parallel.md) feed the same work.
+**Bound dense recursive working memory.** [Medium, components:
+`lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/atomic.h`]
+Implement and assess [dense candidate collection](specs/design-dense-rounds.md):
+a fixed array of first-occurrence ranks replaces worker tuple copies for
+eligible binary targets. Preserve the ordinary executor and ordered append,
+with a 600-line runtime budget and a measured target of 90% lower dense
+parallel RSS without a speed regression. The
+[performance work](docs/todo-benchmark-performance.md) and
+[acceptance steps](docs/todo-parallel.md) bound this proposal. The
+[completed pass](bench/compare/recorded/performance-pass.md) retains prior
+decisions and the other rival gaps; it has no experiments still queued.
 
 ## Engine
 

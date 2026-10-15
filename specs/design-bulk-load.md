@@ -13,7 +13,7 @@ Related: [architecture](architecture.md#facts), [facts](design-facts.md),
 [storage](design-storage.md), [memory](design-memory.md#the-memory-limit),
 [parallel loading](design-parallel.md#loading-in-parallel),
 [pending values](design-pending-values.md), [testing](design-testing.md),
-[performance plan](../docs/todo-benchmark-performance.md).
+[measurement rules](../docs/todo-performance-measurements.md).
 
 ## Model
 
@@ -990,9 +990,9 @@ design, and forced batching at each worker count against the scalar
 importer, with serial time, parallel time and peak memory reported
 separately. `RELIC_IMPORT_BATCH_WORKERS` is the least worker count at
 which forced batching beats the scalar importer on most large tables on
-both machines. A table may still lose at that count; the stage's entry in
-[the benchmark plan](../docs/todo-benchmark-performance.md) records the
-measurements and that trade-off.
+both machines. A table may still lose at that count; the
+[benchmark investigations](../bench/compare/recorded/focused-investigations.md)
+record the measurements and trade-offs.
 
 Acceptance requires lower first-load peak memory and serial load time,
 then a substantial measured parallel gain on large imports without a

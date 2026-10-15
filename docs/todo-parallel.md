@@ -1,89 +1,65 @@
-# Parallel memory and execution questions
+# Dense recursive memory: implementation and acceptance
 
-[Medium, components: `lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/pool.c`]
+[Medium, components: `lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/atomic.h`]
 
-Use these questions within the [performance plan](todo-benchmark-performance.md),
-which sets priority and acceptance. The target is useful parallel speed with
-controlled working memory, rather than a fixed speed-up ratio or another
-scheduling feature queue.
+Implement and assess the [dense collection design](../specs/design-dense-rounds.md)
+under the [performance work](todo-benchmark-performance.md). The old
+[performance pass](../bench/compare/recorded/performance-pass.md) is closed.
 
-## Reduce the stored worker copies
+## Prototype boundary
 
-The [scale-4 attribution](../bench/compare/recorded/m3-max/merge-screen-reuse/README.md)
-places the sixteen-worker dense round's sampled charged peak at find:
-5.18 GB of candidate capacity plus 2.57 GB of scratch. Its 102.4 million
-worker candidates represent 8.52 million new tuples, about twelve copies
-each. All sixteen workers run eight tasks and hold about 6.4 million
-candidates each. The dominant copies are not unused reservation for idle
-workers. Candidate slack is still measurable, especially at four workers,
-but occupied representation alone is 3.89 GB at sixteen.
+One target relation, two columns, and EMIT terms that name assigned values.
+The finite value-domain rectangle must fit checked 32-bit cell positions.
+Collection uses a fixed atomic rank array and one scalar sequence per worker.
+It adds no per-worker tuple or bitmap copy, value namespace, shared growable
+hash table, executor opcode, input cursor, second execution pass or CLI flag.
+The existing serial evaluator and general collector remain the fallbacks.
 
-Worker-screen reuse removes redundant find tables and lowers process peak RSS
-about 21%, but slows the target 31% and leaves candidate copies intact. That
-prototype is rejected. Earlier screen release changes admission more than
-RSS. Neither experiment justifies another lifetime tweak, filter policy or
-lookup variant as the next memory intervention.
+Keep the implementation within **600 net runtime C/header lines**, including
+integration and atomic wrappers. Use at most one collector module. Count
+tests and diagnostic code separately. A budget miss requires a design review;
+minifying code does not satisfy the readability requirement.
 
-The [shared collector](../bench/compare/recorded/m3-max/shared-collection/README.md)
-reduces the dense process peak from 8.48 to 2.02 GB and runtime source by 813
-lines, but takes 13.65 rather than 5.37 seconds at sixteen workers. Its three
-parallel controls also slow by 35-70%. The exact proofs and timed counters
-confirm successful shared work. This replacement is rejected as well.
+## Work sequence
 
-A new proposal must reduce or bound stored copies within one understandable
-ownership model while retaining useful parallel speed. Preserve occurrence
-order, value identity and whole-round serial retry. Derive simultaneous
-capacity through gathering, growth, merge and refusal. Keep occupied bytes,
-capacity, charged storage and process RSS distinct; do not inherit deletion
-credits for mechanisms a new design restores.
+1. Implement the rank collector and bounded stable ordering. Add tests for
+   arbitrary task-to-worker assignments, a later task finishing first,
+   repeated tuples, preexisting tuples, mixed assigned value types, empty
+   tasks, integer bounds and source-schema rejection. The model is supporting
+   evidence, not a substitute for C concurrency and ownership tests.
+2. Feed ordered rows into existing append preparation, classification,
+   reservation and application. Keep one all-or-nothing publication path.
+   Exercise refusal and interrupt at initialization, gathering, compaction,
+   ordering, staging and reservation; require ordinary serial retry and exact
+   cleanup. Verify the default one-thread and thread-disabled paths.
+3. In an isolated build, record phase capacities and selection on every round
+   of cyclic scale 4. The second and third rounds must avoid worker tuple
+   buffers; reducing only the largest round can leave an earlier peak.
+   Record atomic attempts/successes, ordering work and abandoned-round replay
+   in private diagnostics, never in timing binaries.
+4. Run two alternating complete-command pairs for cyclic scale 4 at sixteen
+   workers, with serial cyclic, acyclic, bound recursion and a large
+   computed-value case as controls. Full exact answers, ordered hashes,
+   counters and final storage precede timing. Keep source/build/input/output
+   policies fixed and retain every observation.
+5. Only a successful screen advances to ten paired observations on the target
+   and affected controls, plus the supported-host comparison. Run full normal,
+   ASan, UBSan and TSan suites and appropriate thread-disabled checks before
+   adoption. Review correctness, design, security and readability before tests,
+   as the working agreement requires.
 
-## Account for the work behind parallel elapsed time
+## Decision
 
-In the [current cyclic comparison](../bench/compare/recorded/m3-max/composition/README.md#remaining-rival-gaps),
-relic uses about 63.5 s of user CPU against Souffle's 29.5 s at sixteen
-workers, while elapsed time is 5.43/4.67 s.
-The [selected-engine CPU profiles](../bench/compare/recorded/m3-max/cyclic-profile/README.md)
-put 29.0% of parallel sampled CPU in frozen-store screening, 21.8% in the
-merge's parallel first-occurrence checks and 21.6% in local candidate
-screening/growth/append. General executor work remains 20.1%. No sample gets
-the explicit pool synchronization/spin owner; unknown callback work and
-unsampled blocked time prevent a claim of zero waiting or spinning. These
-CPU shares do not predict a replacement's elapsed gain.
+The target is **parallel memory amplification** in dense recursion. Aim for
+at least a 90% reduction from the retained 8.45 GB peak and no repeatable
+elapsed-time regression against the selected native engine. The rough
+reference implies about 0.85 GB, close to twice Souffle's measured peak.
+A fresh comparison must establish the actual ratio; the design's charged-byte
+ledger is not an RSS prediction.
 
-The [separate thread-stack diagnostic](../bench/compare/recorded/m3-max/shared-collection-waits/README.md)
-finds direct collector tuple-mutex waits in 17,866 of 38,289 shared observations,
-versus none of 14,946 native observations. Pool condition waits are separate.
-These are perturbed stack appearances with unequal coverage, not CPU shares,
-blocked durations or an attributed fraction of the original slowdown. The
-cyclic rule propagates assigned values and bypasses the global value lock.
-
-The [FreeBSD process-specific cycle profiles](../bench/compare/recorded/freebsd-5995wx/shared-collection-pmc/README.md)
-also find substantial kernel synchronization work in the shared collector.
-Raw records show both user and kernel samples despite the requested user-only
-qualifier; every sample belongs to the intended process. This busy-host
-diagnostic supplies no controlled wall-time ranking or blocked duration.
-Keep its mode, loss and unwinding limits explicit, and thread-state observations
-separate from CPU samples. It does not reopen the rejected implementation.
-
-The [synchronization review](../bench/compare/recorded/m3-max/shared-collection-synchronization.md)
-explains why atomics need safe publication/growth, and why single-writer routing
-needs buffers or execution waves. Partition-local values are coherent but add
-namespaces, copying and up to P-fold occupied payload before capacity slack.
-None is an approved implementation. Retain exclusive ownership in the existing
-post-gather phases and avoid a new scheduler without a demonstrated need and
-replacement budget.
-
-## Acceptance
-
-Follow the [memory decision](todo-benchmark-performance.md#reduce-parallel-working-memory):
-reduce the dominant working-storage term while retaining useful parallel
-speed. Require a successful shared merge, so serial replay cannot conceal
-failed admission. Preserve ordinary retry, interruption, value numbering and
-output order, including computed values and allocation refusal. Reopening
-memory implementation needs a concrete design that meets this boundary.
-A different ownership design must earn a fresh source, byte and lifetime gate;
-neither the CPU profile nor the existence of an atomic primitive selects one.
-The working engine already relies on deferred pending values being fresh as
-their type. Keep that derived invariant instead of adding state for arbitrary
-pending inputs at a collector restricted to frozen execution. Generic serial
-and import descriptors retain their broader normalization contract.
+Reject a modest reduction that leaves multi-gigabyte staging, a speed loss,
+an unexplained control regression, new public behavior, or dependence on
+serial fallback. If it passes, report the remaining difference from Souffle
+explicitly; reducing twenty times the rival's memory to roughly twice does
+not mean exact parity. No general relation-store replacement is part of this
+candidate.

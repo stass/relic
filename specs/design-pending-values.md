@@ -11,7 +11,7 @@ Related: [architecture](architecture.md#parallel-evaluation),
 [ordered merge](design-parallel.md#admission-and-the-ordered-merge),
 [memory](design-memory.md#round-scoped-buffers),
 [testing](design-testing.md),
-[implementation plan](../docs/todo-benchmark-performance.md).
+[measurement rules](../docs/todo-performance-measurements.md).
 
 ## Model
 

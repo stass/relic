@@ -534,6 +534,16 @@ and commit. This preserves value identity without another interner and
 bounds resolution descriptors by local distinct values rather than column
 occurrences.
 
+Candidate representation does not determine publication. A dense binary
+target over assigned values can use a fixed array of atomic occurrence ranks
+instead of worker tuple copies. It supplies exactly the same serially ordered
+append to the storage layer and releases its collection arrays before final
+reservation. The executor, frozen views, counters and failure boundary are
+common to both representations. The
+[dense collection design](design-dense-rounds.md) defines eligibility,
+ordering and ownership; its fixed domain avoids concurrent growth and pointer
+publication.
+
 See [design-parallel.md](design-parallel.md) and
 [pending value compaction](design-pending-values.md).
 

@@ -11,7 +11,7 @@ Related: [architecture](architecture.md#planning),
 [evaluation](design-eval.md#the-semi-naive-fixed-point),
 [storage](design-storage.md), [parallel evaluation](design-parallel.md),
 [testing](design-testing.md),
-[implementation plan](../docs/todo-benchmark-performance.md).
+[measurement rules](../docs/todo-performance-measurements.md).
 
 ## Model
 
