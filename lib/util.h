@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <strings.h>
 
 /*
  * Storage primitives shared by the symbol table, the value table and the
@@ -563,8 +564,29 @@ relic_idtab_peek(const relic_idtab_t *table, uint32_t hash)
 /*
  * Begin walking the candidates for hash.
  */
-void	 relic_idprobe_open(relic_idprobe_t *probe, const relic_idtab_t *table,
-	    uint32_t hash);
+static inline void
+relic_idprobe_open(relic_idprobe_t *probe, const relic_idtab_t *table,
+    uint32_t hash)
+{
+	if (table->capacity == 0) {
+		bzero(probe, sizeof(*probe));
+		return;
+	}
+
+	/*
+	 * The table is held rather than its slot array, so that a cursor left
+	 * open across a growth reads the current array instead of the freed
+	 * one.  It would be looking in the wrong places -- the mask it
+	 * captured is the old one -- but a table only ever grows, so the
+	 * stale mask is smaller than the current capacity and every slot it
+	 * selects is in bounds.  A logic error is recoverable; a read of
+	 * freed memory is not.
+	 */
+	probe->table = table;
+	probe->mask = table->capacity - 1;
+	probe->slot = (size_t)hash & probe->mask;
+	probe->tag = relic_idtab_tag(hash);
+}
 
 /*
  * Store the next candidate identifier in *idp and return true, or return
@@ -573,6 +595,36 @@ void	 relic_idprobe_open(relic_idprobe_t *probe, const relic_idtab_t *table,
  * the probe's; the others are passed over.  The walk always terminates: the
  * table keeps an empty slot by growing before it fills.
  */
-bool	 relic_idprobe_next(relic_idprobe_t *probe, uint32_t *idp);
+static inline bool
+relic_idprobe_next(relic_idprobe_t *probe, uint32_t *idp)
+{
+	const relic_idtab_t *table;
+	size_t slot;
+	uint32_t id;
+
+	table = probe->table;
+	if (table == NULL)
+		return (false);
+
+	/*
+	 * The slot advances past every occupied slot the walk reaches, a
+	 * candidate or a slot whose tag rules it out, and never past an empty
+	 * one, so a probe that has returned false is left standing on the
+	 * empty slot where the key belongs.  relic_idtab_place() relies on
+	 * that.
+	 */
+	do {
+		slot = probe->slot;
+		id = table->slots[slot];
+		if (id == RELIC_ID_NONE)
+			return (false);
+
+		probe->slot = (slot + 1) & probe->mask;
+	} while (table->tags != NULL && table->tags[slot] != probe->tag);
+
+	*idp = id;
+
+	return (true);
+}
 
 #endif /* RELIC_UTIL_H */

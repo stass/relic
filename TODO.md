@@ -22,11 +22,10 @@ of which `contrib/` holds only the homebrew formula, so
 **Close the measured performance gaps.** [Medium, components:
 `lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/relation.c`, `lib/exec.c`,
 `lib/import.c`, `bench/compare/`]
-Use the derived-tag engine with native compilation as the working reference.
-Next test whether inlining the existing probe functions reduces closure CPU cost,
-then attribute files/facts throughput. ThinLTO remains an explicit build
-option. Parallel working memory remains a larger structural gap: further
-implementation needs a design that reduces or bounds
+Use the tagged engine with inline probe helpers and native compilation as
+the working reference. Next attribute files/facts throughput. ThinLTO remains
+an explicit build option. Parallel working memory remains a larger structural
+gap: further implementation needs a design that reduces or bounds
 actual worker copies without the rejected screen-reuse prototype's slowdown. The
 [performance plan](docs/todo-benchmark-performance.md) sets each remaining
 measurement, candidate and acceptance boundary. Use the

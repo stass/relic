@@ -4,10 +4,9 @@
 `lib/relation.c`, `lib/exec.c`, `lib/import.c`, `bench/compare/`]
 
 Reduce the remaining cost of useful commands while keeping one understandable
-execution and ownership model. Derived-relation hash tags are part of the
-working reference, with native compilation. Next test whether inlining the
-existing probe functions reduces closure CPU cost, then attribute files/facts
-throughput.
+execution and ownership model. Derived-relation hash tags and inline probe
+helpers are part of the working reference, with native compilation. Next
+attribute files/facts throughput.
 Parallel memory remains the largest resource gap, with a design gate before
 further implementation. A candidate belongs to a gap; it does not create
 another implementation track.
@@ -22,8 +21,8 @@ peak RSS, in decimal units.
 
 | Next work | Remaining gap | Evidence and decision |
 | --- | --- | --- |
-| 1 | Remaining full-closure cost | Derived tags reduce serial cyclic/acyclic scale-4 medians to 26.60/8.52 s in their paired cohort. The older rival times are 23.4/6.76 s; a composition comparison must establish the exact remaining gap. Test whether inlining the existing probe helpers removes useful cost in the default native build. |
-| 2 | Files and facts throughput | At scale 8, grouped files is 2.9/5.3 times slower than DuckDB at one/sixteen threads; facts join is 1.9/2.6 times slower. The measured excess is 0.31-0.85 s and still needs phase attribution. |
+| 1 | Files and facts throughput | The rough refresh puts grouped files 2.9/5.3 times behind DuckDB at one/sixteen threads and facts join 1.9/2.6 times behind. Probe inlining saves only a few percent in its own cohort; the larger gap still needs direct phase attribution. |
+| Composition check | Remaining full-closure cost | Inline probes bring native serial cyclic/acyclic scale-4 medians to 25.45/8.06 s in their paired cohort. The older rival times are 23.4/6.76 s; a composition comparison must establish the exact remaining gap before assigning another closure intervention. |
 | Design gate | Parallel working memory | At sixteen threads cyclic closure peaks at 8.47 GB against Souffle's 0.42 GB. Reusing worker screens lowers a matched comparison's peak to 6.66 GB but slows it 31%; that prototype is rejected. Actual worker candidate copies remain the dominant storage problem. |
 
 Eligible bound-recursion losses have reversed. Keep those gains as regression
@@ -36,12 +35,14 @@ before assigning them another optimization track.
 
 The initial control is the scan-only engine measured in the
 [trim comparison](../bench/compare/recorded/scan-only.md) and rival refresh.
-Keep its frozen source, builds, fixtures and answers. The
-[derived-tag comparison](../bench/compare/recorded/m3-max/derived-tags/README.md)
-selects the working reference: about 27%/16% less serial cyclic/acyclic time,
-with 32/16 MiB extra final accounted storage at scale 4. Representative controls
-and exact answers are retained with the evidence. Compare subsequent changes
-with this working reference and the final combination with the initial control.
+Keep its frozen source, builds, fixtures and answers. The working reference
+uses derived-relation tags and inline probe helpers with native compilation.
+The [tag](../bench/compare/recorded/m3-max/derived-tags/README.md) and
+[inlining](../bench/compare/recorded/m3-max/probe-inline/README.md) comparisons
+retain exact answers, controls and resource costs. Use the inlining cohort's
+selected binary for files/facts attribution and subsequent candidate controls.
+Measure the final combination directly against the initial control; separate
+cohorts' improvements do not multiply into a measured combined result.
 
 Use the [measurement protocol](todo-performance-measurements.md): reuse the
 [completed investigations](../bench/compare/recorded/focused-investigations.md),
@@ -77,10 +78,10 @@ Any such candidate must retain useful parallel speed on dense closure and a
 large low-duplicate computed-value control. Check acyclic closure and Linux
 CSPA before acceptance. A lower scratch charge alone, a peak shifted into
 another phase or serial replay concealing failed admission is insufficient.
-Until a concrete design meets this boundary, proceed with the closure-cost
-experiment below.
+Until a concrete design meets this boundary, proceed with files/facts
+attribution.
 
-## Reduce full-closure evaluation time
+## Hold the closure and build decisions fixed
 
 Use serial cyclic/acyclic closure at scale 4 as the targets, with the
 selected tags enabled. Retain the same-generation, sparse, wider-tuple,
@@ -97,19 +98,11 @@ test matrix. Report optional-build gains separately from default-engine
 improvements. The source-ownership audit and installed-path issues remain
 separate correctness work in [open work](../TODO.md).
 
-The [native closure profiles](../bench/compare/recorded/m3-max/thinlto/README.md#remaining-native-cost)
-put 19-22% of exclusive samples in `relic_idprobe_open()` and
-`relic_idprobe_next()`. Test one candidate that exposes those existing small
-helpers for inlining while retaining their algorithm, table representation
-and callers. The hypothesis is fewer call boundaries and redundant loads;
-sampling does not distinguish that overhead from time waiting on memory.
-
-Use the current native build as the control, with identical compiler flags
-and link order. Reject the candidate without a useful complete-command gain
-beyond measurement/layout variation, or if code growth, memory or parallel CPU
-outweighs it. Check sparse closure, same-generation recursion and Linux CSPA
-before acceptance. A negative result closes this candidate and moves the work
-to files/facts attribution; it does not justify another canonical container.
+Keep the selected probe helpers and table representation fixed during the
+files/facts investigation. The final composition comparison determines the
+remaining closure gap. Another closure intervention needs new attribution
+and one bounded removal of work; the earlier helper profiles do not select
+another container or a sequence of speculative inlining changes.
 
 ## Improve files and facts throughput
 
