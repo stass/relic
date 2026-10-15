@@ -22,10 +22,11 @@ of which `contrib/` holds only the homebrew formula, so
 **Close the measured performance gaps.** [Medium, components:
 `lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/relation.c`, `lib/exec.c`,
 `lib/import.c`, `bench/compare/`]
-Use the derived-tag engine as the working reference. Next resolve the
-independent build-policy choice and remaining full-closure CPU cost, then
-attribute files/facts throughput. Parallel working memory remains a larger
-structural gap: further implementation needs a design that reduces or bounds
+Use the derived-tag engine with native compilation as the working reference.
+Next test whether inlining the existing probe functions reduces closure CPU cost,
+then attribute files/facts throughput. ThinLTO remains an explicit build
+option. Parallel working memory remains a larger structural gap: further
+implementation needs a design that reduces or bounds
 actual worker copies without the rejected screen-reuse prototype's slowdown. The
 [performance plan](docs/todo-benchmark-performance.md) sets each remaining
 measurement, candidate and acceptance boundary. Use the
@@ -75,16 +76,6 @@ operations. A missed call fails loudly, preparation reporting an internal
 error, but undercharges acquisition until then.
 
 ## Benchmarks
-
-**Validate ThinLTO as an independent build choice.** [Medium, components:
-`configure.ac`, `tests/globals.sh`, `bench/compare/`]
-The [build comparison](bench/compare/recorded/freebsd-5995wx/build-policy/report.txt)
-finds substantial speed gains with more text. Validate a fixed current engine
-across supported toolchains, including the source-ownership audit and installed
-path disclosure issues below, before adopting a default. Keep alignment a
-separate decision and use the [closure-cost plan](docs/todo-benchmark-performance.md#reduce-full-closure-evaluation-time)
-for ordering; a close result permits a bounded layout control, not another
-permutation campaign.
 
 **Refresh published comparisons with consistent output and host coverage.**
 [Medium, component: `bench/compare/`]

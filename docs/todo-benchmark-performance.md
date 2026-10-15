@@ -5,8 +5,9 @@
 
 Reduce the remaining cost of useful commands while keeping one understandable
 execution and ownership model. Derived-relation hash tags are part of the
-working reference. Next resolve the independent build-policy choice and
-remaining full-closure CPU cost, followed by files/facts attribution.
+working reference, with native compilation. Next test whether inlining the
+existing probe functions reduces closure CPU cost, then attribute files/facts
+throughput.
 Parallel memory remains the largest resource gap, with a design gate before
 further implementation. A candidate belongs to a gap; it does not create
 another implementation track.
@@ -21,7 +22,7 @@ peak RSS, in decimal units.
 
 | Next work | Remaining gap | Evidence and decision |
 | --- | --- | --- |
-| 1 | Remaining full-closure cost | Derived tags reduce serial cyclic/acyclic scale-4 medians to 26.60/8.52 s in their paired cohort. The older rival times are 23.4/6.76 s; a composition comparison must establish the exact remaining gap. Resolve build policy independently, then profile the residual. |
+| 1 | Remaining full-closure cost | Derived tags reduce serial cyclic/acyclic scale-4 medians to 26.60/8.52 s in their paired cohort. The older rival times are 23.4/6.76 s; a composition comparison must establish the exact remaining gap. Test whether inlining the existing probe helpers removes useful cost in the default native build. |
 | 2 | Files and facts throughput | At scale 8, grouped files is 2.9/5.3 times slower than DuckDB at one/sixteen threads; facts join is 1.9/2.6 times slower. The measured excess is 0.31-0.85 s and still needs phase attribution. |
 | Design gate | Parallel working memory | At sixteen threads cyclic closure peaks at 8.47 GB against Souffle's 0.42 GB. Reusing worker screens lowers a matched comparison's peak to 6.66 GB but slows it 31%; that prototype is rejected. Actual worker candidate copies remain the dominant storage problem. |
 
@@ -87,16 +88,28 @@ large-storage, import/startup and Linux CSPA controls from the adoption
 cohort. Its measurements do not select another canonical container or
 attribute all remaining insertion time to hashing.
 
-Evaluate ThinLTO independently on a fixed engine/toolchain if its supported
-build and installation constraints can be satisfied. Keep alignment separate,
-and resolve the source-ownership audit and installed-path disclosure issues
-in [open work](../TODO.md) before adopting a build default. Measure any accepted
-tag/build combination directly; do not multiply their isolated improvements.
+Keep native compilation as the default and comparison baseline. The
+[optional ThinLTO comparison](../bench/compare/recorded/m3-max/thinlto/README.md)
+measures the tagged engine directly. ThinLTO stays explicit because its
+installed static archive requires a compatible LLVM consumer toolchain;
+building another library solely to change that default adds an artifact and
+test matrix. Report optional-build gains separately from default-engine
+improvements. The source-ownership audit and installed-path issues remain
+separate correctness work in [open work](../TODO.md).
 
-Profile the residual after the independent build decision. A further change needs a
-named hot operation and a bounded removal of work. Check sparse closure,
-same-generation recursion and a representative analysis before accepting it.
-Preserve the default path and report parallel CPU as well as wall time.
+The [native closure profiles](../bench/compare/recorded/m3-max/thinlto/README.md#remaining-native-cost)
+put 19-22% of exclusive samples in `relic_idprobe_open()` and
+`relic_idprobe_next()`. Test one candidate that exposes those existing small
+helpers for inlining while retaining their algorithm, table representation
+and callers. The hypothesis is fewer call boundaries and redundant loads;
+sampling does not distinguish that overhead from time waiting on memory.
+
+Use the current native build as the control, with identical compiler flags
+and link order. Reject the candidate without a useful complete-command gain
+beyond measurement/layout variation, or if code growth, memory or parallel CPU
+outweighs it. Check sparse closure, same-generation recursion and Linux CSPA
+before acceptance. A negative result closes this candidate and moves the work
+to files/facts attribution; it does not justify another canonical container.
 
 ## Improve files and facts throughput
 

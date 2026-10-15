@@ -981,7 +981,9 @@ optimization level. The C++ compiler is optional and must link an object
 produced by the C compiler before its header test is enabled. Installed
 static archives contain bitcode and require a compatible toolchain;
 shared libraries and executables contain native code. Runtime dependencies
-are independent of this build option.
+are independent of this build option. Keeping the option explicit preserves
+the ordinary native-archive contract for embedders without building a second
+copy of the library for installation.
 
 `./configure --help` lists the options: debug builds, `-Werror`, threads,
 ThinLTO, each sanitizer, coverage, fuzzers and `libedit`. Every installed path
