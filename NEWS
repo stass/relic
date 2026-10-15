@@ -36,7 +36,9 @@ relic 1.0.0 (unreleased)
     large load's facts to relations that already hold some, can be shared
     among threads, with the same answers in the same order whatever their
     number. An unkeyed count over a complete relation reads its tuple
-    count without scanning its rows.
+    count without scanning its rows. Derived relations use hash tags to
+    avoid unrelated tuple comparisons during evaluation, at a cost of one
+    extra byte per allocated canonical-index slot.
   * Optional limits on the tuples held, on the memory relations, values,
     plans and rewrites occupy, and on the bytes of one program text or one
     field of an imported table: a load, an import, an evaluation or a query

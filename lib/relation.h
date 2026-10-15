@@ -208,10 +208,10 @@ struct relic_relation_stats {
  * stripe maps the low half of the wide hash of a whole tuple to the
  * identifiers of the tuples in that stripe that share it.  It stores
  * identifiers and no keys: the key is the tuple, and the tuple is already in
- * `columns`.  A relation's stripes are untagged, since a membership test
- * that finds a candidate usually finds the tuple.  A builder's are tagged,
- * since a load's tests mostly miss, and a store adopting the payload drops
- * the tags, leaving every entry where it is.
+ * `columns`. Derived relations retain one tag byte per slot to filter
+ * unrelated tuple comparisons. Base stores and query-answer collectors
+ * keep compact, untagged stripes. Builders are tagged while loading; a
+ * base store adopting their payload drops the tags without moving IDs.
  */
 struct relic_payload {
 	relic_dom_t		*columns;

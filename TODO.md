@@ -22,11 +22,11 @@ of which `contrib/` holds only the homebrew formula, so
 **Close the measured performance gaps.** [Medium, components:
 `lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/relation.c`, `lib/exec.c`,
 `lib/import.c`, `bench/compare/`]
-Next evaluate the existing derived-relation membership tags for default-thread
-closure cost, then attribute files/facts throughput. Parallel working memory
-remains a larger structural gap: the screen-reuse prototype saves about 21%
-RSS but slows the target 31%, so further memory implementation needs a design
-that reduces or bounds actual worker copies. The
+Use the derived-tag engine as the working reference. Next resolve the
+independent build-policy choice and remaining full-closure CPU cost, then
+attribute files/facts throughput. Parallel working memory remains a larger
+structural gap: further implementation needs a design that reduces or bounds
+actual worker copies without the rejected screen-reuse prototype's slowdown. The
 [performance plan](docs/todo-benchmark-performance.md) sets each remaining
 measurement, candidate and acceptance boundary. Use the
 [measurement protocol](docs/todo-performance-measurements.md) to separate

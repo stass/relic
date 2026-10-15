@@ -84,9 +84,9 @@ identifier. See [bulk import](design-bulk-load.md#decoding-and-value-dictionarie
 Interning, duplicate elimination and every index reduce to one question: given
 a key, which 32-bit identifier has been assigned to it? The common
 open-addressing identifier table answers it without owning the key
-(`lib/util.h`). A canonical membership alternative is confined to the
-relation payload, as [membership locality](design-membership-locality.md)
-describes; it does not widen this table for every owner.
+(`lib/util.h`). Owners choose whether to retain its optional one-byte tags;
+[canonical membership locality](design-membership-locality.md) applies that
+choice to derived relations without widening every owner's table.
 
 **A slot holds an identifier and nothing else** -- no key, pointer or hash.
 The key lives where its owner already keeps it (a symbol's bytes, a tuple's
@@ -111,17 +111,16 @@ owner chooses once, at creation:
 | --- | --- | --- |
 | symbol pool, integer table | unsuccessful when new; key far away | yes |
 | index keys, staging sets, distinct counts | mostly unsuccessful | yes |
-| a relation's canonical index, reference layout | successful duplicate checks are important | no |
+| derived canonical indexes | repeated probes avoid unrelated tuple reads | yes |
+| base canonical indexes, query-answer collectors | compact persistent/input and result storage | no |
 | predicate table, rewrite tables | small | no |
 
-The canonical reference stays untagged to avoid an unconditional byte
-per slot on the largest table every relation has. Its layout comparison
-includes this existing tagged table before introducing another probe
-implementation. Selection uses measured hits, misses, growth and total
-memory, rather than assuming every stage of evaluation has the same
-duplicate rate. The [adoption rule](design-membership-locality.md#adoption-rule)
-requires complete workload gains and keeps the reference when additional
-metadata does not earn its cost.
+Derived relations pay one byte per canonical slot because comparison
+filtering improves their repeated evaluation work. Base stores stay compact,
+and adoption drops a builder's staging tags without moving entries. The
+[adoption rule](design-membership-locality.md#adoption-rule) requires further
+metadata or probing changes to earn their cost on complete workloads,
+including construction, growth and memory.
 
 **The probe sequence exists in one place.** Slots are probed linearly from the
 hash's low bits. A probe cursor hands each candidate identifier to the caller,
@@ -163,9 +162,9 @@ stored tuple. Tombstones are what make linear probing delicate; a table that
 must delete should be a different type.
 
 **Striped tables.** A table several threads fill at once without a lock -- a
-relation's canonical index, a secondary index's key table, the symbol pool's
-index -- is a constant number of ordinary tables, and a key lives in the
-stripe chosen by the top bits of a wide hash. The wide hash's low half is the ordinary keyed hash,
+relation's canonical index or a secondary index's key table -- is a constant
+number of ordinary tables, and a key lives in the stripe chosen by the top
+bits of a wide hash. The wide hash's low half is the ordinary keyed hash,
 which chooses slot and tag; its high half is an *unkeyed* fold of the same
 words, computed in the same loop, which chooses the stripe. Unkeyed on
 purpose: each stripe grows as its own keys need, so what a striped table holds

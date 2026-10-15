@@ -274,14 +274,14 @@ what a copy passes through, nor what the allocator keeps afterwards. A grown
 table that is deliberately kept allocated beside the one it replaces across a
 phase, as a round's merge does, is held, and is charged.
 
-[Canonical membership layouts](design-membership-locality.md#failure-paths-and-limits)
-include control bytes, cached hashes and actual allocation padding in
-their pure byte projectors. A prepared replacement is charged beside
-its source until completion or abandonment. Relation payload adoption
-transfers the same allocations and charges once; it needs no layout
-conversion. Layouts can consume different bytes, but each selected
-layout preserves the same count-based capacities and refusal decisions
-across seeds and worker counts.
+[Canonical membership](design-membership-locality.md#failure-paths-and-limits)
+charges the full capacity of derived tag arrays through the identifier
+table's ordinary byte projector. A prepared replacement is charged beside
+its source until completion or abandonment. Base adoption drops staging
+tags and transfers the remaining payload allocations and charge once.
+The selected owner policy preserves count-based capacities and refusal
+decisions across seeds and worker counts; tags can reduce what a fixed
+memory budget admits compared with compact derived slots.
 
 **Every growth is projected before it is made.** The holder computes the bytes
 it would hold afterwards with the same pure functions its growth uses (the

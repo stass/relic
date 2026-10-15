@@ -1817,10 +1817,9 @@ relic_relation_hash(const relic_relation_t *relation, const relic_dom_t *tuple)
 }
 
 /*
- * Prefetch the tuple named by the slot `hash` selects, if the slot is
- * occupied.  That tuple is the first a probe for the hash compares, and for
- * a duplicate at the canonical index's load usually the one it finds.  A
- * relation of arity zero has no columns to fetch.
+ * Prefetch the tuple at the home slot of `hash` when it is occupied and
+ * not rejected by a tag. This is only a hint; the real probe still decides
+ * membership. A relation of arity zero has no columns to fetch.
  */
 static void
 prefetch_first_candidate(const relic_relation_t *relation, uint64_t hash)
@@ -2323,6 +2322,10 @@ reltab_relation(relic_t *ctx, relic_reltab_t *table, relic_pred_id_t pred)
 	    relic_pred_of(ctx, pred)->arity);
 	if (relation == NULL)
 		return (NULL);
+
+	/* Derived payloads retain one tag per canonical slot. */
+	if (table == &ctx->store.derived)
+		payload_init(&relation->payload, true);
 
 	table->entries[pred - 1] = relation;
 
@@ -3280,8 +3283,8 @@ place_commit_part(void *argument, size_t part,
  * Move `builder`'s payload whole into `store`, which holds nothing, and
  * leave the builder empty.  The tuples keep their identifiers, and the
  * canonical index, built under the store's seed and arity, is the store's
- * as it stands once its tags are dropped, which the store's lookups, that
- * mostly find what they look for, have no use for.
+ * as it stands once its staging tags are dropped. Base stores keep compact
+ * canonical slots; only derived relations retain their tags.
  */
 static void
 adopt_builder(relic_t *ctx, relic_relation_t *store, relic_builder_t *builder)

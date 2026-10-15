@@ -159,6 +159,7 @@ static void	 a_refused_insertion_leaves_the_relation_whole(relic_t *ctx,
 		    relic_relation_t *rel, const char *scenario);
 static void	 a_million_tuples_fit_in_the_expected_memory(void);
 static void	 the_account_follows_a_relation_as_it_grows(void);
+static void	 derived_tags_follow_growth_and_clear(void);
 static void	 a_relation_stays_where_it_was_put(void);
 static void	 a_batch_inserts_what_single_insertions_would(void);
 static bool	 insert_in_batches(relic_t *ctx, relic_relation_t *batched,
@@ -2114,6 +2115,108 @@ a_screen_finds_what_an_insertion_would(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * Reach the derived table through a checked rule, rather than the base-only
+ * fixture helper. Across growth and clear/refill, IDs stay ordered and the
+ * account includes one tag byte per allocated canonical slot. Base adoption
+ * still costs four bytes per slot. These are capacity costs, not row counts.
+ */
+static void
+derived_tags_follow_growth_and_clear(void)
+{
+	static const char scenario[] = "derived tags follow growth and clear";
+	const relic_relation_t *base;
+	relic_relation_t *derived;
+	relic_dom_t columns[2];
+	relic_pred_id_t pred;
+	relic_t *ctx;
+	size_t base_bytes;
+	size_t expected;
+	size_t slots;
+	size_t s;
+	unsigned int pass;
+	unsigned int i;
+	bool added;
+
+	ctx = context(scenario, NULL);
+	if (ctx == NULL)
+		return;
+	if (relic_load_string(ctx, "tags.dl", "seed(1, 1). "
+	    "p(X, Y) :- seed(X, Y).") != 0) {
+		check(false, scenario, "the rule loads");
+		relic_destroy(ctx);
+		return;
+	}
+	if (relic_check(ctx) != 0) {
+		check(false, scenario, "the rule loads and checks");
+		relic_destroy(ctx);
+		return;
+	}
+	pred = predicate(ctx, scenario, "seed", 2);
+	base = relic_base_store(ctx, pred);
+	pred = predicate(ctx, scenario, "p", 2);
+	derived = relic_relation_written(ctx, pred);
+	if (base == NULL || derived == NULL) {
+		check(false, scenario, "the base and derived stores exist");
+		relic_destroy(ctx);
+		return;
+	}
+
+	slots = 0;
+	for (s = 0; s < RELIC_STRIPES; s++)
+		slots += base->payload.index[s].capacity;
+	base_bytes = base->payload.column_capacity * sizeof(relic_dom_t) +
+	    slots * sizeof(uint32_t);
+	check(relic_relation_bytes(base) == base_bytes, scenario,
+	    "adopted base slots carry no tag charge");
+
+	for (pass = 0; pass < 2; pass++) {
+		for (i = 0; i < 1024; i++) {
+			if (relic_value_intern_integer(ctx, i + 10,
+			    &columns[0]) != 0)
+				break;
+			columns[1] = columns[0];
+			if (!insert(ctx, scenario, i, derived, columns, &added))
+				break;
+			if (!added || relic_relation_find(derived, columns) != i + 1)
+				break;
+		}
+		check(i == 1024, scenario, "each tuple receives its insertion ID");
+		if (i != 1024)
+			break;
+		for (i = 0; i < 1024; i++) {
+			columns[0] = relic_value_find_integer(ctx, i + 10);
+			columns[1] = columns[0];
+			if (relic_relation_find(derived, columns) != i + 1)
+				break;
+		}
+		check(i == 1024, scenario, "growth preserves every earlier ID");
+		if (i != 1024)
+			break;
+		if (!insert(ctx, scenario, i, derived, columns, &added))
+			break;
+		check(!added && relic_relation_count(derived) == 1024 &&
+		    relic_relation_find(derived, columns) == 1024, scenario,
+		    "a duplicate changes neither the count nor its ID");
+
+		slots = 0;
+		for (s = 0; s < RELIC_STRIPES; s++)
+			slots += derived->payload.index[s].capacity;
+		expected = derived->payload.column_capacity * sizeof(relic_dom_t) +
+		    slots * (sizeof(uint32_t) + sizeof(uint8_t));
+		check(relic_relation_bytes(derived) == expected &&
+		    relic_relation_total_bytes(ctx) == base_bytes + expected,
+		    scenario, "the account includes every derived tag byte");
+
+		relic_relation_clear(ctx, derived);
+		check(relic_relation_count(derived) == 0 &&
+		    relic_relation_bytes(derived) == 0 &&
+		    relic_relation_total_bytes(ctx) == base_bytes, scenario,
+		    "clear releases all derived capacity and preserves the base");
+	}
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
@@ -2127,6 +2230,7 @@ main(void)
 	the_memory_limit_refuses_a_tuple_and_says_so();
 	a_million_tuples_fit_in_the_expected_memory();
 	the_account_follows_a_relation_as_it_grows();
+	derived_tags_follow_growth_and_clear();
 	a_relation_stays_where_it_was_put();
 	a_batch_inserts_what_single_insertions_would();
 	a_limit_refuses_a_batch_where_it_would_one();

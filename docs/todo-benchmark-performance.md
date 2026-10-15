@@ -4,10 +4,12 @@
 `lib/relation.c`, `lib/exec.c`, `lib/import.c`, `bench/compare/`]
 
 Reduce the remaining cost of useful commands while keeping one understandable
-execution and ownership model. The next experiment is derived-relation
-membership tags for full closure, followed by files/facts attribution. Parallel memory remains the largest
-resource gap, with a design gate before further implementation. A candidate
-belongs to a gap; it does not create another implementation track.
+execution and ownership model. Derived-relation hash tags are part of the
+working reference. Next resolve the independent build-policy choice and
+remaining full-closure CPU cost, followed by files/facts attribution.
+Parallel memory remains the largest resource gap, with a design gate before
+further implementation. A candidate belongs to a gap; it does not create
+another implementation track.
 
 ## Remaining gaps and execution order
 
@@ -19,7 +21,7 @@ peak RSS, in decimal units.
 
 | Next work | Remaining gap | Evidence and decision |
 | --- | --- | --- |
-| 1 | Full-closure evaluation time | Default-thread cyclic/acyclic closure takes 37.0/9.92 s against 23.4/6.76 s: about 13.6/3.2 s excess at scale 4. This is a material default-path cost with an existing small membership candidate. |
+| 1 | Remaining full-closure cost | Derived tags reduce serial cyclic/acyclic scale-4 medians to 26.60/8.52 s in their paired cohort. The older rival times are 23.4/6.76 s; a composition comparison must establish the exact remaining gap. Resolve build policy independently, then profile the residual. |
 | 2 | Files and facts throughput | At scale 8, grouped files is 2.9/5.3 times slower than DuckDB at one/sixteen threads; facts join is 1.9/2.6 times slower. The measured excess is 0.31-0.85 s and still needs phase attribution. |
 | Design gate | Parallel working memory | At sixteen threads cyclic closure peaks at 8.47 GB against Souffle's 0.42 GB. Reusing worker screens lowers a matched comparison's peak to 6.66 GB but slows it 31%; that prototype is rejected. Actual worker candidate copies remain the dominant storage problem. |
 
@@ -31,11 +33,14 @@ before assigning them another optimization track.
 
 ## Reference and decision gates
 
-The reference is the scan-only engine measured in the
+The initial control is the scan-only engine measured in the
 [trim comparison](../bench/compare/recorded/scan-only.md) and rival refresh.
-Keep its frozen source, builds, fixtures and answers as the initial control.
-Accepted changes form a working reference for the next isolated comparison;
-compare the final combination against the initial control too.
+Keep its frozen source, builds, fixtures and answers. The
+[derived-tag comparison](../bench/compare/recorded/m3-max/derived-tags/README.md)
+selects the working reference: about 27%/16% less serial cyclic/acyclic time,
+with 32/16 MiB extra final accounted storage at scale 4. Representative controls
+and exact answers are retained with the evidence. Compare subsequent changes
+with this working reference and the final combination with the initial control.
 
 Use the [measurement protocol](todo-performance-measurements.md): reuse the
 [completed investigations](../bench/compare/recorded/focused-investigations.md),
@@ -76,18 +81,11 @@ experiment below.
 
 ## Reduce full-closure evaluation time
 
-Use serial cyclic/acyclic closure at scale 4 as the targets. Closing the
-measured gap would require about 32-37% less complete-command time; this is
-the distance to the rival, not an unconditional implementation commitment.
-Separate tuple work and comparison cost from growth, output and scheduling
-before attributing time. A high inclusive insertion sample is not all hashing.
-
-First finish the existing derived-relation tag decision on the working
-reference. The earlier constructor-only experiment improves cyclic/chain
-closure about 19%/14% serially, with 8/16 MiB extra final storage at scale 2.
-Validate same-generation, wider-tuple and larger-storage controls, plus the
-default import/startup path. Reuse the existing diagnostics and failure tests.
-This may close part of the gap; it does not justify a new membership container.
+Use serial cyclic/acyclic closure at scale 4 as the targets, with the
+selected tags enabled. Retain the same-generation, sparse, wider-tuple,
+large-storage, import/startup and Linux CSPA controls from the adoption
+cohort. Its measurements do not select another canonical container or
+attribute all remaining insertion time to hashing.
 
 Evaluate ThinLTO independently on a fixed engine/toolchain if its supported
 build and installation constraints can be satisfied. Keep alignment separate,
@@ -95,7 +93,7 @@ and resolve the source-ownership audit and installed-path disclosure issues
 in [open work](../TODO.md) before adopting a build default. Measure any accepted
 tag/build combination directly; do not multiply their isolated improvements.
 
-Profile the residual only after these decisions. A further change needs a
+Profile the residual after the independent build decision. A further change needs a
 named hot operation and a bounded removal of work. Check sparse closure,
 same-generation recursion and a representative analysis before accepting it.
 Preserve the default path and report parallel CPU as well as wall time.

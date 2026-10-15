@@ -153,19 +153,18 @@ a hash seed and a growth history.
 Each relation has one index whose key is the whole tuple and whose value is a
 tuple identifier. It answers membership, which duplicate elimination,
 membership tests in plans and fixed-point detection all reduce to. The
-reference representation uses the untagged identifier table of
+representation uses the identifier table of
 [values](design-values.md#the-identifier-table): a slot holds a tuple ID,
-the key stays in the column array, and no tuple is stored twice. This
-keeps successful membership compact; even a filtered lookup must read
-the matching tuple to establish equality.
+the key stays in the column array, and no tuple is stored twice. Derived
+relations retain one tag byte per slot to filter unrelated candidates;
+base stores and query-answer collectors keep compact, untagged slots.
+Even a filtered lookup reads the matching tuple to establish equality.
 
 [Canonical membership locality](design-membership-locality.md) defines
-the controlled comparison with linear tags, grouped tags and cached
-hashes. One selected representation serves relations and fact builders;
-complete workload and growth measurements justify any added storage.
-Every representation retains exact column equality, insertion-order
-IDs, count-based capacities and the reservation/publication boundary.
-No choice changes generic identifier tables for unrelated owners.
+this owner choice and its storage tradeoff. It uses the existing table's
+probe, growth and byte projector, with no alternative container. Exact
+column equality, insertion-order IDs, count-based capacities and the
+reservation/publication boundary remain common to every owner.
 
 **It is striped.** It is a constant number of membership tables, and a tuple's
 entry lives in the one its wide hash's unkeyed top bits choose. A stripe is
