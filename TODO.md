@@ -26,8 +26,9 @@ Keep the tagged engine with inline probe helpers and native compilation as
 reference. The shared collector's memory/source savings do not justify its
 parallel slowdown; Mac thread-stack sampling identifies substantial tuple-mutex
 waiting, and exploratory FreeBSD cycle samples expose kernel synchronization
-work. Keep that replacement rejected. Further throughput work needs one
-concrete removal of input/expression work; further memory work needs a fresh
+work. Keep that replacement rejected. The input placement and symbol-validation
+investigations select no change. Further throughput work needs a material
+removal of input/expression work; further memory work needs a fresh
 ownership and capacity design. No atomic-table or alternate-collector
 implementation is selected. The [performance plan](docs/todo-benchmark-performance.md) sets these
 gates; the [measurement protocol](docs/todo-performance-measurements.md) keeps

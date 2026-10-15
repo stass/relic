@@ -35,7 +35,7 @@ peak RSS, in decimal units.
 
 | Priority | Remaining gap | Next gate |
 | --- | --- | --- |
-| 1 | Files/facts throughput | Grouped files is 2.72/5.16 times behind DuckDB at one/sixteen threads; facts join is 1.74/2.52 times behind. Use the retained input/expression profiles to identify one repeated or avoidable operation and its ownership contract before coding. |
+| 1 | Files/facts throughput | Grouped files is 2.72/5.16 times behind DuckDB at one/sixteen threads; facts join is 1.74/2.52 times behind. Another proposal needs a material removal of work beyond the examined placement and validation shortcuts, with an explicit ownership contract before coding. |
 | 2 | Parallel working memory | Cyclic closure peaks at 8.45 GB against Souffle's 0.42 GB in the rival comparison. Both worker-screen reuse and shared collection lose useful parallel speed. A new design must remove copies without recreating the observed synchronization cost. |
 | 3 | Remaining closure time | Serial cyclic/acyclic closure is 11%/20% behind compiled Souffle; parallel cyclic is 16% behind. Retain the accepted 29%/19% serial gains. Another change needs attribution of specific work it removes. |
 
@@ -165,6 +165,21 @@ computed-string audit finds avoidable temporary copies in the object control,
 but that concatenation is absent from files/facts and has no measured cost
 here; it does not select an expression change for these gaps.
 
+The [input operation audit](../bench/compare/recorded/m3-max/input-publication-profile/README.md)
+puts scalar fresh placement at 0.61%/1.83% of files/facts sampled CPU and
+parallel piece-dictionary placement below 1%. Only part of that work is a
+repeated occupancy walk. Rehashing and batch publication account for much
+more placement work but have no immediately reusable failed-lookup cursor.
+These results do not justify plumbing a cursor through interning or staging.
+
+The [symbol-membership screen](../bench/compare/recorded/m3-max/symbol-check-screen/README.md)
+tests reusing a symbol-use bit to avoid checking the same immutable spelling
+again, adding two runtime source lines. Across ten pairs per cell, the complete
+facts target has a median paired wall ratio of 1.0013, with five pairs favoring
+each version. The favorable import-only median does not establish a
+complete-command gain. Keep the existing validator; no
+retuning or additional validation of this candidate is queued.
+
 The [literal-prefix screen](../bench/compare/recorded/m3-max/regex-prefix-screen/README.md)
 does not establish a useful complete-files gain. The
 [private-builder bound](../bench/compare/recorded/m3-max/builder-bound/README.md)
@@ -174,9 +189,10 @@ prototype is adopted. Keep the current matcher and builder representation;
 these results do not justify widening either shortcut or adding policies to
 rescue it.
 
-Further throughput work needs another specific removal of measured work with
-an explicit ownership and reuse contract. Replacing a first lookup with a
-scan does not prove its index is avoidable or single-use. The
+This pass selects no further import cleanup. Another throughput proposal needs
+a specific removal of measured work with an explicit ownership and reuse
+contract. Replacing a first lookup with a scan does not prove its index is
+avoidable or single-use. The
 [symbol-package comparison](../bench/compare/recorded/m3-max/import-isolation/README.md)
 shows a real parallel benefit, but only about a 10-15% complete-command saving
 in its own cohort and no consistent serial gain. It does not explain the
