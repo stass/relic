@@ -8,10 +8,13 @@ execution and ownership model. Derived-relation hash tags and inline probe
 helpers are part of the working reference, with native compilation. Their
 [combined comparison](../bench/compare/recorded/m3-max/composition/README.md)
 establishes the current gains, costs and remaining gaps. Parallel memory
-remains the largest resource gap. Next attribute the current cyclic command's
-CPU work at one and sixteen workers, then require a concrete design that
-removes stored copies before implementing more memory machinery. A candidate
-belongs to a gap; it does not create another implementation track.
+remains the largest resource gap. The
+[current cyclic CPU profiles](../bench/compare/recorded/m3-max/cyclic-profile/README.md)
+identify substantial screening and duplicate-finding work. Next review whether
+one round-owned candidate set and ordered occurrence references can replace
+worker tuple copies and the merge's duplicate tables. Require concrete byte,
+lifetime and source-deletion budgets before any prototype. A candidate belongs
+to a gap; it does not create another implementation track.
 
 ## Remaining gaps and execution order
 
@@ -23,7 +26,7 @@ peak RSS, in decimal units.
 
 | Next work | Remaining gap | Evidence and decision |
 | --- | --- | --- |
-| 1 | Parallel work and memory ownership | Profile cyclic closure at one and sixteen workers on the selected engine. Separate ordinary insertion, frozen-store screening, worker candidate work, ordered merge and pool CPU before choosing a design that removes actual copies. |
+| 1 | Parallel working-memory design | Review a replacement for worker tuple copies and cross-worker duplicate tables. Earliest-task references offer an ordering proof; the growth/phase byte ledger, cleanup ownership and source-deletion budget must be concrete before implementation. |
 | Design gate | Larger files/facts throughput gaps | Grouped files is 2.72/5.16 times behind DuckDB at one/sixteen threads; facts join is 1.74/2.52 times behind. Input, expressions and materialization dominate. Larger interventions need a focused ownership and reuse design. |
 | Design gate | Parallel working memory | At sixteen threads cyclic closure peaks at 8.45 GB against Souffle's 0.42 GB. The rejected screen-reuse prototype saves memory but slows the target 31%. Actual worker candidate copies remain the dominant storage problem. |
 | Attribution gate | Remaining closure time | Serial cyclic/acyclic closure is 11%/20% behind compiled Souffle; parallel cyclic is 16% behind. The accepted bundle already saves 29%/19% of serial time against the initial engine. Another change needs fresh attribution of work it removes. |
@@ -86,15 +89,30 @@ Any such candidate must retain useful parallel speed on dense closure and a
 large low-duplicate computed-value control. Check acyclic closure and Linux
 CSPA before acceptance. A lower scratch charge alone, a peak shifted into
 another phase or serial replay concealing failed admission is insufficient.
-The next attribution uses the selected native binary and the existing exact
-cyclic scale-4 proofs, at one and sixteen workers. Reuse the target-only CPU
-capture and source-symbolication tools from the files/facts profiles. Separate
-worker-local screening, allocation and copying from frozen-store reads, merge
-steps, ordinary serial insertion, executor/index walks and pool synchronization.
-Keep unresolved CPU explicit; Running samples cannot measure blocked time.
-This fills the CPU ownership gap without repeating the memory inventory or
-introducing a production reporter. It selects no shared table, queue, lock
-scheme or publication change by itself.
+The [selected-engine profiles](../bench/compare/recorded/m3-max/cyclic-profile/README.md)
+assign 29.0% of parallel sampled CPU to frozen-store screening, 21.8% to
+merge first-occurrence checks and 21.6% to worker candidate screening,
+capacity/growth and append/copy/place. Those merge checks already run across
+stripes in parallel. General executor work remains 20.1%. No explicit pool
+synchronization/spin bucket receives a sample, but unknown callback work and
+unsampled blocked time remain; this does not prove zero spinning. Serial
+insertion owns 62.0% at one worker. CPU shares are not removable wall time.
+
+Review one collection replacement against that evidence. A shared exact set
+can record a tuple's earliest claiming task. A worker retains an ordered
+reference only when it creates the tuple or lowers that task index. With
+increasing task claims, later emissions by that worker cannot lower the
+index again. This proposed admission rule bounds references to one per
+worker/key; its metadata belongs in the byte ledger. A task-order winner
+walk then needs no global sorting pass.
+Typed pending normalization must preserve ordinary value/type-use bookkeeping.
+These are design arguments, not implementation approval: require an exact
+capacity ledger through simultaneous growth and merge reservation, one
+barrier-owned cleanup boundary, a function-level deletion/replacement map and
+one batch policy. Count locks and shared mutation as new obligations. Preserve
+thread-disabled builds, parallel count/staging and whole-round serial retry.
+Reject the proposal if it needs another collector, worker caches, extra
+policies or more runtime code to meet those obligations.
 
 ## Hold the closure and build decisions fixed
 

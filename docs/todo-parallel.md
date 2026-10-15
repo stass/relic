@@ -37,9 +37,13 @@ capacity, charged storage and process RSS distinct.
 In the [current cyclic comparison](../bench/compare/recorded/m3-max/composition/README.md#remaining-rival-gaps),
 relic uses about 63.5 s of user CPU against Souffle's 29.5 s at sixteen
 workers, while elapsed time is 5.43/4.67 s.
-This does not identify spinning or duplicated useful work. If a candidate's
-performance depends on that distinction, separate executor/screen work,
-ordered merge work, pool waiting and task imbalance in the profile.
+The [selected-engine CPU profiles](../bench/compare/recorded/m3-max/cyclic-profile/README.md)
+put 29.0% of parallel sampled CPU in frozen-store screening, 21.8% in the
+merge's parallel first-occurrence checks and 21.6% in local candidate
+screening/growth/append. General executor work remains 20.1%. No sample gets
+the explicit pool synchronization/spin owner; unknown callback work and
+unsampled blocked time prevent a claim of zero waiting or spinning. These
+CPU shares do not predict a replacement's elapsed gain.
 
 A scan with few tuples limits the number of pieces even when work beneath
 it is large. Measure that effect on a demonstrated target before changing
@@ -56,7 +60,9 @@ speed. Require a successful shared merge, so serial replay cannot conceal
 failed admission. Preserve ordinary retry, interruption, value numbering and
 output order, including computed values and allocation refusal. Reopening
 memory implementation needs a concrete design that meets this boundary.
-The next measurement profiles the selected cyclic command at one and sixteen
-workers to separate candidate work, frozen-store reads, merge steps and pool
-CPU. It does not repeat the live-owner inventory or select a new coordination
-model without a design.
+The next design review asks whether one round-owned set with earliest-task
+ownership and ordered worker references can replace replicated tuples and the
+merge's duplicate tables. Require concrete capacity/phase bounds, borrowed-byte
+cleanup order and a source deletion budget before a prototype. Shared mutation
+and mutex ownership must replace the current isolation contract explicitly;
+the CPU profile alone does not select them.

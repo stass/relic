@@ -23,10 +23,11 @@ of which `contrib/` holds only the homebrew formula, so
 `lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/relation.c`, `lib/exec.c`,
 `lib/import.c`, `lib/value.c`, `bench/compare/`]
 Use the tagged engine with inline probe helpers and native compilation as
-the working reference. Next attribute the selected cyclic command's CPU work
-at one and sixteen workers to inform the parallel-memory design. ThinLTO
-remains an explicit build option. Parallel working memory remains a larger
-structural gap: further implementation needs a design that reduces or bounds
+the working reference. Next close the byte, lifetime and source-deletion gates
+for a design replacing worker tuple copies and cross-worker duplicate tables.
+The current CPU profiles support that question, not implementation approval.
+ThinLTO remains an explicit build option. Parallel working memory remains a
+larger structural gap: further implementation needs a design that reduces or bounds
 actual worker copies without the rejected screen-reuse prototype's slowdown. The
 [performance plan](docs/todo-benchmark-performance.md) sets each remaining
 measurement, candidate and acceptance boundary. Use the
