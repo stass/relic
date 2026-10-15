@@ -22,12 +22,13 @@ of which `contrib/` holds only the homebrew formula, so
 **Close the measured performance gaps.** [Medium, components:
 `lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/relation.c`, `lib/exec.c`,
 `lib/import.c`, `bench/compare/`]
-Prioritize parallel working memory, default-thread full-closure time, then
-files/facts throughput. The
-[performance plan](docs/todo-benchmark-performance.md) ties each gap to its
-next measurement, smallest candidate and acceptance boundary. Screens belong
-to memory admission, tags to closure cost, and symbol publication to the
-complete files/facts pipeline. Use the
+Next evaluate the existing derived-relation membership tags for default-thread
+closure cost, then attribute files/facts throughput. Parallel working memory
+remains a larger structural gap: the screen-reuse prototype saves about 21%
+RSS but slows the target 31%, so further memory implementation needs a design
+that reduces or bounds actual worker copies. The
+[performance plan](docs/todo-benchmark-performance.md) sets each remaining
+measurement, candidate and acceptance boundary. Use the
 [measurement protocol](docs/todo-performance-measurements.md) to separate
 rough ranking from implementation decisions; [parallel questions](docs/todo-parallel.md)
 feed that work rather than creating another queue.

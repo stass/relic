@@ -4,10 +4,12 @@
 `lib/relation.c`, `lib/exec.c`, `lib/import.c`, `bench/compare/`]
 
 Reduce the remaining cost of useful commands while keeping one understandable
-execution and ownership model. Work follows the gaps below, in priority order.
-A candidate belongs to a gap; it does not create another implementation track.
+execution and ownership model. The next experiment is derived-relation
+membership tags for full closure, followed by files/facts attribution. Parallel memory remains the largest
+resource gap, with a design gate before further implementation. A candidate
+belongs to a gap; it does not create another implementation track.
 
-## Priorities from the comparisons
+## Remaining gaps and execution order
 
 The [rough rival comparison](../bench/compare/recorded/m3-max/rough-rivals/README.md)
 identifies the large differences. Its two fixed-order runs rank questions;
@@ -15,11 +17,11 @@ they do not establish release performance or explain allocation ownership.
 Times include loading, evaluation and output. Memory figures are process
 peak RSS, in decimal units.
 
-| Priority | Remaining gap | Evidence and reason for the order |
+| Next work | Remaining gap | Evidence and decision |
 | --- | --- | --- |
-| 1 | Parallel working memory | At sixteen threads, cyclic closure peaks at 8.47 GB against Souffle's 0.42 GB and is slower. Acyclic closure and Linux CSPA are faster but use 8.5 and 4.2 times the memory. Capacity and scaling remain problems even when elapsed time wins. |
-| 2 | Full-closure evaluation time | Default-thread cyclic/acyclic closure takes 37.0/9.92 s against 23.4/6.76 s: about 13.6/3.2 s excess at scale 4. This is a material latency cost on the default path, with an existing small membership candidate. |
-| 3 | Files and facts throughput | At scale 8, grouped files is 2.9/5.3 times slower than DuckDB at one/sixteen threads; facts join is 1.9/2.6 times slower. The larger ratios warrant work, but the measured excess is 0.31-0.85 s and spans several phases. |
+| 1 | Full-closure evaluation time | Default-thread cyclic/acyclic closure takes 37.0/9.92 s against 23.4/6.76 s: about 13.6/3.2 s excess at scale 4. This is a material default-path cost with an existing small membership candidate. |
+| 2 | Files and facts throughput | At scale 8, grouped files is 2.9/5.3 times slower than DuckDB at one/sixteen threads; facts join is 1.9/2.6 times slower. The measured excess is 0.31-0.85 s and still needs phase attribution. |
+| Design gate | Parallel working memory | At sixteen threads cyclic closure peaks at 8.47 GB against Souffle's 0.42 GB. Reusing worker screens lowers a matched comparison's peak to 6.66 GB but slows it 31%; that prototype is rejected. Actual worker candidate copies remain the dominant storage problem. |
 
 Eligible bound-recursion losses have reversed. Keep those gains as regression
 controls. Near ties and the roughly 2 ms serial chain-left gap do not justify
@@ -46,34 +48,31 @@ conditions permit. A busy-host result remains exploratory.
 
 ## Reduce parallel working memory
 
-Start with `tc-cyclic` scale 4 at one, four and sixteen workers, plus one
-low-duplicate case that computes values. Reuse the existing ownership
-reporter to identify the actual peak's candidate records/columns, screens,
-value payloads, find scratch, growth overlap and permanent store. Record
-occupied bytes versus capacity, worker copies versus unique new tuples,
-charged storage and process RSS separately. The
-[scale-2 attribution](../bench/compare/recorded/m3-max/retained-attribution/README.md)
-finds about fourteen worker copies per unique tuple in the peak round;
-confirm its relevance to the current larger case rather than assigning the
-whole 8.47 GB peak to that cause. The [parallel questions](todo-parallel.md)
-identify the reservation and scheduling distinctions worth checking.
+The [scale-4 attribution and rejected screen-reuse prototype](../bench/compare/recorded/m3-max/merge-screen-reuse/README.md)
+identify the remaining boundary. In the peak round at sixteen workers,
+102.4 million worker copies represent 8.52 million new tuples. Candidate
+capacity is 5.18 GB, with 3.89 GB occupied, and find scratch adds 2.57 GB.
+Every worker is active. The sampled charged peak precedes the process's
+largest sampled resident memory; those observations are not interchangeable.
 
-Then remove the dominant avoidable storage with the smallest ownership change.
-If local reservation/lifetime changes cannot address it, write one focused
-design for a bound on additional working storage before building one prototype.
-Preserve ordered publication, deterministic identifiers and ordinary serial
-retry. Show that the bound holds through growth and failure; moving the peak
-into another phase or avoiding sharing through fallback does not solve it.
+Do not continue the screen-reuse prototype or add a policy to rescue it.
+Earlier screen release improves charged admission but barely changes RSS;
+it is not the next capacity experiment. The current evidence does not support
+another reservation/lifetime tweak as a solution to the main gap.
 
-Earlier screen release is a separate small admission improvement within this
-work: its scale-2 experiment lowers the charged peak about 13%, while RSS
-falls only about 1%. Retain the frozen-budget successful-merge regression
-if adopting it. That result cannot close the candidate-replication problem.
+Reopen implementation only for one focused design that reduces actual worker
+copies or bounds their storage while preserving ordered publication,
+deterministic value/tuple identifiers and ordinary serial retry. State the
+expected bound through gathering, growth, merge and failure before coding.
+The [parallel questions](todo-parallel.md) retain the relevant evidence and
+constraints; they are not a scheduling feature queue.
 
-Exit with a measured improvement in peak and worker-count scaling, including
-useful parallel speed on the target and control, or a documented rejection of
-the prototype. Check acyclic closure and Linux CSPA before accepting a change
-that should generalize. A new routing framework is not a prerequisite.
+Any such candidate must retain useful parallel speed on dense closure and a
+large low-duplicate computed-value control. Check acyclic closure and Linux
+CSPA before acceptance. A lower scratch charge alone, a peak shifted into
+another phase or serial replay concealing failed admission is insufficient.
+Until a concrete design meets this boundary, proceed with the closure-cost
+experiment below.
 
 ## Reduce full-closure evaluation time
 

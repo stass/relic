@@ -7,30 +7,30 @@ which sets priority and acceptance. The target is useful parallel speed with
 controlled working memory, rather than a fixed speed-up ratio or another
 scheduling feature queue.
 
-## Locate the worker-dependent storage
+## Reduce the stored worker copies
 
-The [current scale-4 comparison](../bench/compare/recorded/m3-max/rough-rivals/README.md)
-puts cyclic closure at 8.47 GB peak RSS with sixteen workers, against
-0.45 GB at one worker and Souffle's 0.42 GB at sixteen. Acyclic closure and
-Linux CSPA also retain large parallel memory costs despite faster elapsed time.
+The [scale-4 attribution](../bench/compare/recorded/m3-max/merge-screen-reuse/README.md)
+places the sixteen-worker dense round's sampled charged peak at find:
+5.18 GB of candidate capacity plus 2.57 GB of scratch. Its 102.4 million
+worker candidates represent 8.52 million new tuples, about twelve copies
+each. All sixteen workers run eight tasks and hold about 6.4 million
+candidates each. The dominant copies are not unused reservation for idle
+workers. Candidate slack is still measurable, especially at four workers,
+but occupied representation alone is 3.89 GB at sixteen.
 
-The [earlier scale-2 attribution](../bench/compare/recorded/m3-max/retained-attribution/README.md)
-locates its sampled charged peak before staging: candidate storage and find
-scratch overlap, with about fourteen worker copies per unique new tuple in
-that round. Releasing complete buffers only after staging misses that peak.
-The [screen-release experiment](../bench/compare/recorded/focused-investigations.md)
-improves charged admission but removes little process RSS. Use those findings
-to narrow the current investigation, not as an attribution of every byte in
-the larger process peak.
+Worker-screen reuse removes redundant find tables and lowers process peak RSS
+about 21%, but slows the target 31% and leaves candidate copies intact. That
+prototype is rejected. Earlier screen release changes admission more than
+RSS. Neither experiment justifies another lifetime tweak, filter policy or
+lookup variant as the next memory intervention.
 
-Measure occupied entries and columns, reserved capacity, scratch and growth
-overlap at the actual lifetime boundaries. Distinguish data replicated across
-active workers from reservation for workers that receive little or no work.
-`worker_share()` reserves before task assignment; rounds with fewer pieces
-than workers and rounds with few new tuples are useful controls for unused
-capacity. Keep requested/live bytes, charged storage and allocator/RSS effects
-separate. Transient growth is a documented accounting limitation; it does not
-by itself justify a new growth policy or allocator workaround.
+A new proposal must reduce or bound stored copies within one understandable
+ownership model. Preserve logical occurrence order and value identity before
+publication, and retain ordinary whole-round serial retry. Derive its bound
+through growth and refusal, not only at a successful barrier. Use the retained
+reporter for the affected boundaries; there is no need to repeat the initial
+attribution without a change that makes it stale. Keep occupied bytes,
+capacity, charged storage and process RSS distinct.
 
 ## Account for the work behind parallel elapsed time
 
@@ -53,6 +53,6 @@ Follow the [memory decision](todo-benchmark-performance.md#reduce-parallel-worki
 reduce the dominant working-storage term while retaining useful parallel
 speed. Require a successful shared merge, so serial replay cannot conceal
 failed admission. Preserve ordinary retry, interruption, value numbering and
-output order, including computed values and allocation refusal. A narrow
-admission improvement can stand on its own without claiming to solve
-worker-dependent candidate duplication.
+output order, including computed values and allocation refusal. Reopening
+memory implementation needs a concrete design that meets this boundary; the next admitted performance experiment is the closure-cost
+candidate in the main plan.
