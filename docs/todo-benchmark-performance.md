@@ -54,7 +54,9 @@ Use the [measurement protocol](todo-performance-measurements.md): reuse the
 resolve the specific missing attribution, test one candidate, then keep or
 reject it. Record the expected removed work/bytes and the rejection condition
 before implementation. A stronger architecture requires stronger evidence.
-Use either host when it is usable; retain the outstanding p620 trim comparison.
+Use either host when it is usable. The
+[FreeBSD trim check](../bench/compare/recorded/freebsd-5995wx/stage5-trim-fresh/README.md)
+records the narrower driver's cost separately from later optimizations.
 The [quiet FreeBSD check](../bench/compare/recorded/freebsd-5995wx/probe-inline-fresh/README.md)
 covers inlining only. Validate selected scheduling/allocation changes on
 both hosts when conditions permit. A busy-host result remains exploratory.
