@@ -55,5 +55,8 @@ reduce the dominant working-storage term while retaining useful parallel
 speed. Require a successful shared merge, so serial replay cannot conceal
 failed admission. Preserve ordinary retry, interruption, value numbering and
 output order, including computed values and allocation refusal. Reopening
-memory implementation needs a concrete design that meets this boundary;
-the next admitted work is the bounded scalar input experiment in the main plan.
+memory implementation needs a concrete design that meets this boundary.
+The next measurement profiles the selected cyclic command at one and sixteen
+workers to separate candidate work, frozen-store reads, merge steps and pool
+CPU. It does not repeat the live-owner inventory or select a new coordination
+model without a design.

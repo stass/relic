@@ -7,11 +7,11 @@ Reduce the remaining cost of useful commands while keeping one understandable
 execution and ownership model. Derived-relation hash tags and inline probe
 helpers are part of the working reference, with native compilation. Their
 [combined comparison](../bench/compare/recorded/m3-max/composition/README.md)
-establishes the current gains, costs and remaining gaps. Next test one
-private-builder absence proof against the measured scalar input cost.
-Parallel memory remains the largest resource gap, with a design gate before
-further implementation. A candidate belongs to a gap; it does not create
-another implementation track.
+establishes the current gains, costs and remaining gaps. Parallel memory
+remains the largest resource gap. Next attribute the current cyclic command's
+CPU work at one and sixteen workers, then require a concrete design that
+removes stored copies before implementing more memory machinery. A candidate
+belongs to a gap; it does not create another implementation track.
 
 ## Remaining gaps and execution order
 
@@ -23,7 +23,7 @@ peak RSS, in decimal units.
 
 | Next work | Remaining gap | Evidence and decision |
 | --- | --- | --- |
-| 1 | Scalar input membership work | Builder membership lookups account for at most 8.3% of serial files CPU and 11.0% of serial facts CPU in the profiles. Test one first-column identifier bound that proves some tuples absent; hashing and placement still remain. |
+| 1 | Parallel work and memory ownership | Profile cyclic closure at one and sixteen workers on the selected engine. Separate ordinary insertion, frozen-store screening, worker candidate work, ordered merge and pool CPU before choosing a design that removes actual copies. |
 | Design gate | Larger files/facts throughput gaps | Grouped files is 2.72/5.16 times behind DuckDB at one/sixteen threads; facts join is 1.74/2.52 times behind. Input, expressions and materialization dominate. Larger interventions need a focused ownership and reuse design. |
 | Design gate | Parallel working memory | At sixteen threads cyclic closure peaks at 8.45 GB against Souffle's 0.42 GB. The rejected screen-reuse prototype saves memory but slows the target 31%. Actual worker candidate copies remain the dominant storage problem. |
 | Attribution gate | Remaining closure time | Serial cyclic/acyclic closure is 11%/20% behind compiled Souffle; parallel cyclic is 16% behind. The accepted bundle already saves 29%/19% of serial time against the initial engine. Another change needs fresh attribution of work it removes. |
@@ -84,8 +84,15 @@ Any such candidate must retain useful parallel speed on dense closure and a
 large low-duplicate computed-value control. Check acyclic closure and Linux
 CSPA before acceptance. A lower scratch charge alone, a peak shifted into
 another phase or serial replay concealing failed admission is insufficient.
-Until a concrete design meets this boundary, proceed with the bounded input
-experiment below.
+The next attribution uses the selected native binary and the existing exact
+cyclic scale-4 proofs, at one and sixteen workers. Reuse the target-only CPU
+capture and source-symbolication tools from the files/facts profiles. Separate
+worker-local screening, allocation and copying from frozen-store reads, merge
+steps, ordinary serial insertion, executor/index walks and pool synchronization.
+Keep unresolved CPU explicit; Running samples cannot measure blocked time.
+This fills the CPU ownership gap without repeating the memory inventory or
+introducing a production reporter. It selects no shared table, queue, lock
+scheme or publication change by itself.
 
 ## Hold the closure and build decisions fixed
 
@@ -104,40 +111,10 @@ test matrix. Report optional-build gains separately from default-engine
 improvements. The source-ownership audit and installed-path issues remain
 separate correctness work in [open work](../TODO.md).
 
-Keep the selected probe helpers and table representation fixed during the
-input experiment. Another closure intervention needs new attribution
+Keep the selected probe helpers and table representation fixed during
+attribution. Another closure intervention needs new attribution
 and one bounded removal of work; the earlier helper profiles do not select
 another container or a sequence of speculative inlining changes.
-
-## Remove justified scalar builder lookups
-
-Test one conservative upper bound on the first column's opaque identifier
-inside a private fact builder. If a proposed tuple exceeds the bound, it
-cannot already be stored, so membership needs no canonical probe. Other
-tuples use the ordinary lookup. This compares identifiers only; it assumes
-neither logical value order nor monotone input.
-
-Keep one word per private builder, not bounds for every column or metadata
-on published relations. All scalar appends go through one helper that raises
-the bound. Before the factory exposes any mutable stripe-fill handle, it
-saturates the bound, so arbitrary bulk writes cannot invalidate it and no
-batch caller or worker has to maintain it. Reset or payload adoption may
-retain a conservative overestimate. Allocation, placement, publication and
-retry retain their existing paths.
-
-The profiles' builder-membership stacks cover 96 weighted ms in each serial
-command: 8.3% of files CPU and 11.0% of facts CPU. These are ceilings, not
-predicted gains. Hashing and placement still run; removing an earlier probe
-can shift cold-access latency into placement rather than remove it.
-
-Use complete files/facts scale-8 commands at one worker as targets and sixteen
-workers as controls. Add repeated/nonmonotone first columns, duplicate-heavy
-and numeric input, and small commands. Verify zero-arity NULL tuples,
-same-first-column distinct tuples, a duplicate after bulk filling, and failed
-reserve/retry behavior. Measure actual private-object padding and peak memory.
-Keep the candidate only for a repeatable complete-command gain without a
-persistent control regression. Rejecting this bound closes the idea; it does
-not justify adding more columns, policies or builder representations.
 
 ## Require a focused design for remaining throughput
 
@@ -151,9 +128,13 @@ facts filtering and direct files grouping, but do not choose a new ownership
 model for relic.
 
 The [literal-prefix screen](../bench/compare/recorded/m3-max/regex-prefix-screen/README.md)
-does not establish a useful complete-files gain, so its prototype is not
-adopted. Its large synthetic near-match improvement does not select another
-optimization track. Keep the current matcher during the input experiment.
+does not establish a useful complete-files gain. The
+[private-builder bound](../bench/compare/recorded/m3-max/builder-bound/README.md)
+improves serial facts but leaves a parallel-files penalty unresolved after
+its one control repeat, with additional control concerns on FreeBSD. Neither
+prototype is adopted. Keep the current matcher and builder representation;
+these results do not justify widening either shortcut or adding policies to
+rescue it.
 
 Further throughput work needs another specific removal of measured work with
 an explicit ownership and reuse contract. Replacing a first lookup with a
@@ -176,9 +157,9 @@ limits, stream liveness and refusal behavior. Use an integer-only import,
 small input and a non-grouping query as controls. Exit only on a useful
 complete-command improvement with acceptable default latency and memory, or
 close the candidate. A faster import microbenchmark alone is insufficient.
-The scalar shortcut remains inconclusive, and import ownership evidence does
-not justify a 120 MB target through small cleanup. Those investigations create
-no further implementation work.
+The symbol-reservation room shortcut remains inconclusive, and import ownership
+evidence does not justify a 120 MB target through small cleanup. Those
+investigations create no further implementation work.
 
 ## Preserve gains and validate the composition
 
