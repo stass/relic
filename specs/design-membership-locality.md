@@ -14,7 +14,7 @@ Related: [architecture: storage](architecture.md#storage),
 [memory](design-memory.md#the-memory-limit),
 [bulk loading](design-bulk-load.md),
 [benchmarks](design-bench.md), [testing](design-testing.md),
-[implementation plan](../docs/todo-benchmark-performance.md#use-existing-mechanisms-first).
+[implementation plan](../docs/todo-benchmark-performance.md#reduce-full-closure-evaluation-time).
 
 ## Model
 

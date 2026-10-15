@@ -1,151 +1,58 @@
-# Parallel evaluation: gaps and ideas
+# Parallel memory and execution questions
 
-`specs/design-parallel.md` designs parallel evaluation. Shared rounds, the
-pool and the parallel merge are built. Successful evaluations have the same
-output, ordinary counters and storage bytes at every thread count. The
-speed-up targets below are missed, and components side by side are not built.
-This page records what is missing and what to try, in the order worth
-trying it. Times are from a macOS Xeon, loaded unless another platform is
-named. M3 observations refer to the
-[comparison matrix](../bench/compare/recorded/m3-max/results.tsv) and
-[diagnostic probes](../bench/compare/recorded/m3-max/optimization-probes/results.json).
-Cross-subsystem sequencing and acceptance criteria are in the
-[benchmark performance plan](todo-benchmark-performance.md). Targets and
-candidate remedies below motivate measurements; they do not approve new
-execution protocols. Keep improvements local to the retained pool, tasks
-and merge until a separate design earns its complexity.
+[Medium, components: `lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/pool.c`]
 
-## Candidate replication makes large rounds expensive
+Use these questions within the [performance plan](todo-benchmark-performance.md),
+which sets priority and acceptance. The target is useful parallel speed with
+controlled working memory, rather than a fixed speed-up ratio or another
+scheduling feature queue.
 
-[Medium, component: `lib/task.c`, `lib/merge.c`] M3 scale-8 `tc-cyclic`
-at sixteen threads takes 22.512 s and peaks at 23.46 GiB, against
-Souffle's 13.616 s and 1.49 GiB; relic's serial peak is 1.46 GiB.
-Per-worker screening bounds candidates by workers times distinct new
-tuples, and merge staging and scratch add further storage. The
-[retained scale-2 diagnostic](../bench/compare/recorded/m3-max/retained-attribution/README.md)
-finds about 14 worker copies per unique tuple in the peak round. Its
-candidate-finding barrier holds 1.324 GB of accounted storage, including
-167.8 MB of worker screening tables no longer read after gathering.
-The [screen-release prototype](../bench/compare/recorded/m3-max/screen-release/README.md)
-reduces that sampled charged peak by 12.66% and admits a forced merge at
-a lower frozen budget, with ordinary replay and ownership preserved.
-M3 process RSS falls only 1.1% at sixteen workers; elapsed time gives no
-general gain. The [p620 replica](../bench/compare/recorded/freebsd-5995wx/screen-release/README.md)
-reproduces the admission result with mixed RSS and noisy timing. Consider
-it for its local admission benefit, keeping that separate from the much larger
-candidate-copy problem. Releasing all candidates after staging misses
-the peak. Global value owners, tuple owners, resumable routing waves and
-new private handle formats are not implementation commitments. A design
-must demonstrate why the measured waste cannot be removed more locally.
-The recorded scale-8 all-pairs tree peak of 109.1 GiB is another capacity
-control, alongside low-duplicate workloads that can lose to routing work.
+## Locate the worker-dependent storage
 
-## The targets
+The [current scale-4 comparison](../bench/compare/recorded/m3-max/rough-rivals/README.md)
+puts cyclic closure at 8.47 GB peak RSS with sixteen workers, against
+0.45 GB at one worker and Souffle's 0.42 GB at sixteen. Acyclic closure and
+Linux CSPA also retain large parallel memory costs despite faster elapsed time.
 
-* `tc-cyclic` at least ten times faster at `-j 16` than at `-j 1`; it is
-  6.2 times, 2.78 s to 0.45 s, the fastest of five runs.
-* `dist/3` (`dist(X, Z, D1) :- dist(X, Y, D), par(Y, Z), D < 3, D1 = D +
-  1` over the `tc-cyclic` data) and `object/2` (the item on string
-  operations in `TODO.md`) scaling as `tc-cyclic` does at sixteen threads;
-  they scale 2.5 and 1.8 times.
-* Loading in parallel: `facts-join` at scale 10 imports at least four times
-  faster at `-j 16`, and the identifier a symbol receives is the same on
-  every run and at every thread count.
+The [earlier scale-2 attribution](../bench/compare/recorded/m3-max/retained-attribution/README.md)
+locates its sampled charged peak before staging: candidate storage and find
+scratch overlap, with about fourteen worker copies per unique new tuple in
+that round. Releasing complete buffers only after staging misses that peak.
+The [screen-release experiment](../bench/compare/recorded/focused-investigations.md)
+improves charged admission but removes little process RSS. Use those findings
+to narrow the current investigation, not as an attribution of every byte in
+the larger process peak.
 
-## Round 3 scales about eight times on sixteen threads
+Measure occupied entries and columns, reserved capacity, scratch and growth
+overlap at the actual lifetime boundaries. Distinguish data replicated across
+active workers from reservation for workers that receive little or no work.
+`worker_share()` reserves before task assignment; rounds with fewer pieces
+than workers and rounds with few new tuples are useful controls for unused
+capacity. Keep requested/live bytes, charged storage and allocator/RSS effects
+separate. Transient growth is a documented accounting limitation; it does not
+by itself justify a new growth policy or allocator workaround.
 
-[Medium, component: `lib/round.c`, `lib/task.c`] Round 3's tasks, 3 to 4 s
-of work on one thread, take 0.35 to 0.42 s on sixteen. The machine was
-loaded throughout, so how much of the shortfall is contention is unknown.
-On a quiet machine, record each task's time and each worker's: a long tail
-of tasks points at the cut (`RELIC_CHUNKS_PER_WORKER`, `RELIC_CHUNK_WORK`),
-while even tasks that are each slower than serial point at memory
-bandwidth or at the workers' screens. A worker's screen is reserved from
-what round 2 inserted, so round 3 does not grow it from empty; that
-gain is not measured at sixteen threads.
+## Account for the work behind parallel elapsed time
 
-## A round cut by a scan over a few tuples
+In the current cyclic comparison, relic uses about 70.5 s of user CPU against
+Souffle's 29.6 s at sixteen workers, while elapsed time is 5.94/4.70 s.
+This does not identify spinning or duplicated useful work. If a candidate's
+performance depends on that distinction, separate executor/screen work,
+ordered merge work, pool waiting and task imbalance in the profile.
 
-[Medium, component: `lib/plan.c`, `lib/round.c`] `dist/3` written with its
-successor as facts, `dist(X, Z, D1) :- dist(X, Y, D), par(Y, Z), D < 3,
-succ(D, D1)`, over the `tc-cyclic` data: the planner starts the recursive
-rule with `scan succ(D, D1)`, two tuples, and a plan is cut into at most as
-many pieces as that first scan visits tuples, so the round's 45 million
-derivations fall in two tasks. On sixteen threads it takes 5.7 to 5.9 s
-against 3.6 to 3.7 s on one, the fastest of five runs on a loaded machine;
-with `-X no-reorder`, which starts it at the delta, 1.43 s against 4.95 s.
-Measure scan skew and useful work below the scan before proposing deeper
-partitioning or making the planner choose orders for parallelism. A change
-to the scan-only execution boundary needs a separate design decision.
+A scan with few tuples limits the number of pieces even when work beneath
+it is large. Measure that effect on a demonstrated target before changing
+partitioning or planner choices. Worker wake-up and sparse-stripe growth
+measurements matter only if the selected workload's profile makes them
+material. No threshold sweep, deeper slicing, component-concurrency feature
+or replacement routing protocol is a prerequisite for the memory work.
 
-## Rounds that insert what they derive
+## Acceptance
 
-[Medium, component: `lib/merge.c`, `lib/round.c`] `dist/3` over the
-`tc-cyclic` data scales 2.5 times on sixteen threads, 4.08 s to 1.64 s,
-where `tc-cyclic` scales 6.2 times, 2.78 s to 0.45 s, the fastest of five
-runs each on a loaded machine. Its two large rounds each insert about a
-million new tuples of three columns, 1.96 million in all against
-`tc-cyclic`'s one million, into 51 MB against 18 MB. The computing is not
-what holds it back: the same program with the successor as facts, joined
-in the same order, takes 1.43 s on sixteen threads. Time the merge's steps
-on a quiet machine; those worker 0 runs alone, counting the new tuples,
-reserving and storing the columns, grow with the tuples a round inserts.
-The threshold that decides whether a round is shared weighs only its work,
-tuples read and derived, not the new tuples its merge will insert, so a
-round whose merge dominates is shared on the same terms as one whose tasks
-do; whether to weigh expected new tuples follows from the timing.
-
-## A round of fewer tasks than workers reserves for every worker
-
-[Medium, component: `lib/round.c`] A round just above
-`RELIC_PARALLEL_MIN_WORK` is cut into pieces of `RELIC_CHUNK_WORK`, a
-quarter of the threshold, so a round of one item below 32 000 has fewer
-pieces than a pool of sixteen has workers. Its candidate buffers are still
-reserved as twice an even share for every worker of the pool
-(`worker_share()`), so the round charges twice what it expects, and the
-few workers that run its tasks hold room for an eighth of it each and grow
-from there through the cascade the reservation exists to avoid. A worker
-cannot know beforehand which tasks it will claim, so the remedy is not a
-smaller share for some: either cut every shared round into at least as
-many pieces as the pool has workers, or reserve each worker's share as it
-claims its first task. Measure the chains of six thousand edges, whose
-shared rounds are mostly of this kind, before and after, and on an idle
-machine compare the threshold at 4 000 with 8 000, which a loaded one
-could not separate.
-
-## A job of few parts wakes every worker
-
-[Medium, component: `lib/pool.c`] `relic_pool_for()` wakes the whole pool
-whatever the job's part count, so a load's commit or a window's canonical
-stripe fill, sixteen parts each, wakes 64 or 128 workers at `-j 64` and
-`-j 128` (`-j 0` on a 128-thread machine). Measured on a 64-core
-Threadripper, that wake costs a flat 0.26-0.7 ms per job whatever the
-work, even right after a job while the workers should still be spinning,
-so a commit shared at `-j 128` breaks even only at some 24-32 thousand
-tuples against some 2 thousand at `-j 16`. Waking at most as many workers
-as the job has parts would make every wide pool behave as a sixteen-wide
-one for these jobs, and lets one threshold serve every worker count. The
-cause of the slow wake is not established; wake-ups serializing on the
-pool's mutex until the first woken have spent their spin is the guess to
-test first.
-
-## Deferred growth of a few stripes is slower than growing them at once
-
-[Low, component: `lib/relation.c`] When a shared commit
-grows only one or two canonical stripes, the part that completes each
-growth rehashes the whole stripe alone, some three times slower than the
-calling thread does it: appending 1 024 tuples to a store at the edge of
-doubling took 5.1 ms deferred against 3.0 ms serial at `-j 16` and `-j 32`,
-still slower with four stripes growing, and faster from twelve (8.8 against
-19.9 ms). Measure whether the existing immediate-growth path is preferable for
-small appends before adding a stripe-count threshold. Keep this inquiry
-confined to relation appends; the symbol pool has one ordinary index.
-
-## Components side by side are not built
-
-[Low, component: `lib/eval.c`, `lib/round.c`] Two components with no path
-between them run one after the other, so a program of many small
-independent components, such as a Magic rewrite generates, gains nothing
-from the pool. The design is
-[components side by side](../specs/design-parallel.md#components-side-by-side).
-Build it when a workload asks for it.
+Follow the [memory decision](todo-benchmark-performance.md#reduce-parallel-working-memory):
+reduce the dominant working-storage term while retaining useful parallel
+speed. Require a successful shared merge, so serial replay cannot conceal
+failed admission. Preserve ordinary retry, interruption, value numbering and
+output order, including computed values and allocation refusal. A narrow
+admission improvement can stand on its own without claiming to solve
+worker-dependent candidate duplication.

@@ -12,7 +12,7 @@ Related: [architecture](architecture.md#magic-sets),
 [Magic Sets](design-magic.md), [planning](design-planning.md),
 [evaluation](design-eval.md#the-semi-naive-fixed-point),
 [storage](design-storage.md), [testing](design-testing.md),
-[implementation plan](../docs/todo-benchmark-performance.md#characterize-the-reference).
+[validation plan](../docs/todo-benchmark-performance.md#preserve-gains-and-validate-the-composition).
 
 ## Model
 

@@ -13,7 +13,7 @@ Related: [architecture](architecture.md#facts), [facts](design-facts.md),
 [storage](design-storage.md), [memory](design-memory.md#the-memory-limit),
 [parallel loading](design-parallel.md#loading-in-parallel),
 [pending values](design-pending-values.md), [testing](design-testing.md),
-[implementation plan](../docs/todo-benchmark-performance.md#decide-the-parallel-import-tradeoff).
+[implementation plan](../docs/todo-benchmark-performance.md#improve-files-and-facts-throughput).
 
 ## Model
 

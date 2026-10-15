@@ -19,29 +19,18 @@ of which `contrib/` holds only the homebrew formula, so
 `contrib/pkgsrc/devel/relic/` are to write; and the
 [release procedure](specs/design-release.md#the-release-procedure).
 
-**Improve performance with a smaller execution model.** [Medium, component:
-`lib/exec.c`, `lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/import.c`,
-`lib/relation.c`, `bench/compare/`]
-Use the validated scan-only reference to rank remaining command costs.
-Evaluate existing derived tags and earlier screen release as separate local
-changes, then address candidate-memory growth and the import-publication
-tradeoff through bounded measurements and focused designs where needed.
-The [performance plan](docs/todo-benchmark-performance.md) defines this
-sequence and its stopping rules; the
-[measurement protocol](docs/todo-performance-measurements.md) keeps source,
-answers, resources and uncertainty tied to each decision. No general
-reduction, routing or replacement membership framework is committed.
-
-**Parallel evaluation misses its speed-up targets.** [Medium, component:
-`lib/round.c`, `docs/todo-parallel.md`] With the pool, `tc-cyclic` should
-run at least six times faster at `-j 16` than at `-j 1`, and with the
-parallel merge at least ten times; it is 6.2-fold, 2.78 s to 0.45 s, the
-fastest of five runs on a loaded macOS Xeon, which meets the first and
-misses the second. `dist/3` and `object/2`, which compute integers and
-strings, should scale as `tc-cyclic` does; `dist/3` scales 2.5-fold.
-Components side by side, designed in `specs/design-parallel.md`, are not
-built, and parallel loading misses its target. The causes and what to try
-are sorted in `docs/todo-parallel.md`.
+**Close the measured performance gaps.** [Medium, components:
+`lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/relation.c`, `lib/exec.c`,
+`lib/import.c`, `bench/compare/`]
+Prioritize parallel working memory, default-thread full-closure time, then
+files/facts throughput. The
+[performance plan](docs/todo-benchmark-performance.md) ties each gap to its
+next measurement, smallest candidate and acceptance boundary. Screens belong
+to memory admission, tags to closure cost, and symbol publication to the
+complete files/facts pipeline. Use the
+[measurement protocol](docs/todo-performance-measurements.md) to separate
+rough ranking from implementation decisions; [parallel questions](docs/todo-parallel.md)
+feed that work rather than creating another queue.
 
 ## Engine
 
@@ -86,78 +75,35 @@ error, but undercharges acquisition until then.
 
 ## Benchmarks
 
-**Validate a build policy against code-placement regressions.** [Medium,
-component: `bench/compare/`, `configure.ac`, `tests/globals.sh`]
-The [original cohorts](bench/compare/recorded/freebsd-5995wx/recursive-planning/report.txt)
-measure 2.6-2.7% more serial cyclic-closure time and 1.3-1.4% more
-facts-join time with equal tuple work and relation storage. The
-[diagnostic controls](bench/compare/recorded/freebsd-5995wx/recursive-planning-analysis/report.txt)
-reproduce the facts increase with import and validation alone. Permuting
-only linked text sections changes the cyclic revision comparison from
-+2.69% to -0.89% and facts-join from +1.70% to +0.02%; one permutation
-does not establish a robust build or attribute every part of the cyclic
-difference. The
-[alignment and hardware-counter comparison](bench/compare/recorded/freebsd-5995wx/code-alignment/report.txt)
-identifies 64-byte function alignment as a candidate: cyclic median spread
-across three layouts falls from 2.67% to 0.83%, with 5.90% more text. The
-[isolated probe-placement test](bench/compare/recorded/freebsd-5995wx/probe-alignment/report.txt)
-does not support a probe-only attribute: offsets 0, 16 and 32 differ by at
-most 0.20% on closure with surrounding code fixed. The C alignment
-attribute slows closure by 1.37% in ordinary link order. The
-[four-way build comparison](bench/compare/recorded/freebsd-5995wx/build-policy/report.txt)
-finds ThinLTO lowers ordinary serial medians by 12.5-24.2% and selected
-64-worker medians by 5.8-18.4%, with 29.6% more text. Adding global
-64-byte alignment keeps the nine substantive serial layout spreads below
-0.75%, but grows text by 35.1% and costs 1.1-1.5% on 64-worker cyclic
-closure against ThinLTO alone in two cohorts. Validate ThinLTO across
-supported machines and toolchains before setting a default; keep alignment
-a separately measured choice.
-Preserve equal argument lengths, multiple layouts, and guarded and
-ordinary-Magic references. Repeat these controls after bulk loading and
-the scan-only trim under the performance plan's measurement protocol.
+**Validate ThinLTO as an independent build choice.** [Medium, components:
+`configure.ac`, `tests/globals.sh`, `bench/compare/`]
+The [build comparison](bench/compare/recorded/freebsd-5995wx/build-policy/report.txt)
+finds substantial speed gains with more text. Validate a fixed current engine
+across supported toolchains, including the source-ownership audit and installed
+path disclosure issues below, before adopting a default. Keep alignment a
+separate decision and use the [closure-cost plan](docs/todo-benchmark-performance.md#reduce-full-closure-evaluation-time)
+for ordering; a close result permits a bounded layout control, not another
+permutation campaign.
 
-**Compare output sinks and validate scaling on a second platform.**
+**Refresh published comparisons with consistent output and host coverage.**
 [Medium, component: `bench/compare/`]
-Complete and audit the FreeBSD scale sweep, then compare the machine-specific
-results with [the Mac report](BENCHMARKS.md). Separate OS/compiler/engine
-version differences from core-count effects. Run the uniform stdout-output sweep and compare it with the preserved
-file-output cohort to quantify output-sink costs, especially for large
-answers. Keep their raw measurements and comparison tables distinct.
+The [rough rival refresh](bench/compare/recorded/m3-max/rough-rivals/README.md)
+uses stdout for every timed engine; it does not replace the full
+[file-output tables](BENCHMARKS.md). When publishing a broader comparison,
+keep those cohorts separate, validate second-host coverage, and distinguish
+OS/compiler/engine-version differences from core-count effects. The selected
+performance-plan comparisons take precedence over a full publication sweep.
 
-**Bound query factoring awaits its rival comparison.** [Medium, component:
-`lib/magic.c`, `bench/compare/tc-cyclic-bf`] The M3 Max scale-8 matrix
-records 189.242 s at one thread and 27.032 s at sixteen for the 8,000
-answers of `tc-cyclic-bf`, which the unfactored rewrite reaches after
-3,191,837,759 derivations. [Bound query factoring](specs/design-query-factoring.md)
-answers it with 805,760 derivations in about 0.1 s in a local run. Measure
-`chain-right`, `tc-acyclic-bf` and `tc-cyclic-bf` against the rival engines
-under the [performance plan](docs/todo-benchmark-performance.md#characterize-the-reference).
-
-**Attribute the remaining per-derivation cost on program analyses.**
-[Medium, component: `lib/eval.c`, `bench/compare/andersen`]
-Busy-host observations show a substantial gap against Souffle's interpreter
-on Andersen and nonlinear reachability. Profile representative analyses on
-the simplified reference before selecting an intervention. The
-[membership study](bench/compare/recorded/focused-investigations.md) supports
-existing tags on closures, not a new cached-hash container or more prefetching.
-Use the [performance plan's cost map](docs/todo-benchmark-performance.md#characterize-the-reference)
-to distinguish remaining tuple comparison, lookup, expression and growth work.
-
-**A growth's slack and transient keep the peak above the live heap.**
-[Medium, component: `lib/util.c`] `chain-closure`'s peak footprint runs
-from 34 to 49 MiB and its resident peak from 44 to 59 MiB, against a live
-heap of 33.6 MB. An identifier table's capacity is a power of two because a probe
-masks the hash, and a column array doubles because one policy serves every
-arity, so a relation just past a doubling is half empty on both. A table's
-growth holds both generations of its slots while it rehashes, one and a
-half times the new size at that moment, and the allocator keeps the freed
-generation for reuse. Growth by three halves under a multiply-shift range
-reduction, `(hash * capacity) >> 32`, would keep a mask-free probe and
-halve the slack. Measure it on `chain-closure` and `facts-join`, by peak
-footprint as well as resident set, before changing the policy. The memory
-limit does not count the transient either: an insertion or a round's merge
-admitted at the limit holds one array's or one table's old generation
-beside the new one while it is copied, one at a time.
+**Check the remaining dense-analysis cases before assigning an optimization.**
+[Medium, components: `lib/eval.c`, `bench/compare/andersen`,
+`bench/compare/tc-nonlinear`]
+Older dense Andersen and nonlinear-reachability observations are not covered
+by the rough refresh; the current parallel Linux CSPA win does not settle them.
+Use one bounded representative comparison under the
+[composition validation](docs/todo-benchmark-performance.md#preserve-gains-and-validate-the-composition)
+before reopening a general per-derivation optimization. Membership tags are
+a closure candidate with their own controls, not evidence for a new container
+on every analysis.
 
 ## Testing and CI
 
@@ -193,9 +139,10 @@ let a macOS developer run them with leak detection.
 
 Candidate features, roughly in priority order: what remains of the
 language features first, since they decide which programs can be written;
-then incremental maintenance and parallel evaluation, which change the
-engine and cost the most; floating point last, since no workload measured
-needs it. None may change the language semantics of v1.
+then incremental maintenance, which changes the engine and costs the most;
+floating point last, since no workload measured needs it. Performance work
+follows the major initiative's own priority order. None may change the
+language semantics of v1.
 
 **Language and tooling gaps.** [Medium] What Souffle, LogiQL, Nemo, clingo,
 CodeQL, DDlog and the tabling Prologs offer that relic does not, sorted in
@@ -248,11 +195,6 @@ provisional until a design exists.
   defers maintenance. Measure how often a caller adds facts between queries
   before building either half.
 * DRed-style deletion maintenance
-* parallel evaluation, specified in `specs/design-parallel.md`: shared
-  rounds, the parallel merge and parallel loading are built; components
-  side by side, a threshold that weighs new tuples, streaming queries and
-  the speed-up targets remain, in `docs/todo-parallel.md` and the major
-  initiative above
 * better cardinality estimation
 * further Magic Sets and negation optimization
 * floating point [Low, component: language], in `docs/todo-language.md`,

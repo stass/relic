@@ -1,129 +1,152 @@
 # Performance plan
 
-[Medium, components: `lib/exec.c`, `lib/round.c`, `lib/task.c`,
-`lib/merge.c`, `lib/relation.c`, `lib/import.c`, `bench/compare/`]
+[Medium, components: `lib/round.c`, `lib/task.c`, `lib/merge.c`,
+`lib/relation.c`, `lib/exec.c`, `lib/import.c`, `bench/compare/`]
 
-Make complete commands faster and parallel working memory more predictable,
-while keeping one understandable execution and ownership model. The
-reference is the simplified engine, with the default one-thread path given
-the same weight as useful parallel execution.
+Reduce the remaining cost of useful commands while keeping one understandable
+execution and ownership model. Work follows the gaps below, in priority order.
+A candidate belongs to a gap; it does not create another implementation track.
 
-The [scan-only comparison](../bench/compare/recorded/scan-only.md),
-[rough rival refresh](../bench/compare/recorded/m3-max/rough-rivals/README.md),
-[completed investigations](../bench/compare/recorded/focused-investigations.md)
-and [complexity audit](../bench/compare/recorded/complexity/README.md) supply
-evidence. Use the
-[measurement protocol](todo-performance-measurements.md) for the work below;
-[parallel issues](todo-parallel.md) describe additional symptoms, not a
-separate implementation queue.
+## Priorities from the comparisons
 
-## Characterize the reference
+The [rough rival comparison](../bench/compare/recorded/m3-max/rough-rivals/README.md)
+identifies the large differences. Its two fixed-order runs rank questions;
+they do not establish release performance or explain allocation ownership.
+Times include loading, evaluation and output. Memory figures are process
+peak RSS, in decimal units.
 
-Start from the scan-only engine: partition a leading scan and run other
-plans whole. Its bounded recursive selector, pending-value compaction,
-narrow query factoring, transferable load payloads and ordinary fold/EMIT
-ownership form the reference, not separate implementation stages.
+| Priority | Remaining gap | Evidence and reason for the order |
+| --- | --- | --- |
+| 1 | Parallel working memory | At sixteen threads, cyclic closure peaks at 8.47 GB against Souffle's 0.42 GB and is slower. Acyclic closure and Linux CSPA are faster but use 8.5 and 4.2 times the memory. Capacity and scaling remain problems even when elapsed time wins. |
+| 2 | Full-closure evaluation time | Default-thread cyclic/acyclic closure takes 37.0/9.92 s against 23.4/6.76 s: about 13.6/3.2 s excess at scale 4. This is a material latency cost on the default path, with an existing small membership candidate. |
+| 3 | Files and facts throughput | At scale 8, grouped files is 2.9/5.3 times slower than DuckDB at one/sixteen threads; facts join is 1.9/2.6 times slower. The larger ratios warrant work, but the measured excess is 0.31-0.85 s and spans several phases. |
 
-Use the scan-only candidate identified in that report as the initial
-control, preserving its frozen source, builds, fixtures and answers.
-Reuse its full normal/sanitizer checks and one/sixteen-worker facts
-import/join and cyclic/chain comparisons.
-The corresponding p620 comparison remains open until that host is usable;
-CPU starvation is not a reason to repeat the completed Mac cohort.
+Eligible bound-recursion losses have reversed. Keep those gains as regression
+controls. Near ties and the roughly 2 ms serial chain-left gap do not justify
+new execution machinery. These priorities apply to the measured workloads;
+the older dense Andersen/nonlinear cases still need a bounded comparison
+before assigning them another optimization track.
 
-Use the existing benchmark families to map the remaining costs: ingestion,
-bound and unbound graph queries, program analyses, and small commands.
-The rough rival comparison locates the largest remaining complete-command
-gaps in grouping/join throughput, full closure and parallel memory; its
-two-run observations do not select an implementation or locate a live owner.
-Reuse valid evidence and profile only where the simplified engine makes
-the old attribution uncertain. Rank work within each family; an aggregate
-score must not hide a default-path regression or a large memory cost.
+## Reference and decision gates
 
-Exit with a ranked cost map and a concrete target, control and rejection
-criterion for the next change. Keep the initial baseline as the control
-for the final composition comparison. Close retained correctness gaps only
-where existing evidence is insufficient; removed machinery creates no
-validation work.
+The reference is the scan-only engine measured in the
+[trim comparison](../bench/compare/recorded/scan-only.md) and rival refresh.
+Keep its frozen source, builds, fixtures and answers as the initial control.
+Accepted changes form a working reference for the next isolated comparison;
+compare the final combination against the initial control too.
 
-## Use existing mechanisms first
-
-Make these two decisions independently, in separate changes:
-
-* **Derived-relation tags.** Validate the existing identifier table's tag
-  choice on the simplified baseline, including a same-generation control,
-  a wider tuple and a large-storage case. Its measured closure gains make
-  it the strongest small candidate, but its persistent storage cost must be
-  explicit. Select it only if the additional memory and complete-command
-  results are acceptable; do not build another container to rescue it.
-* **Expired worker screens.** Release screens at the existing gather
-  barrier if the lower memory-limit requirement and simpler lifetime earn
-  the change. Retain the failing-before/passing-after admission regression
-  and check throughput controls. Its benefit is reduced charged overlap;
-  process RSS and speed are separate observations.
-
-After either change is accepted, it becomes part of the working reference
-for the next local comparison. After both decisions, measure their actual
-combined result against the initial baseline. Do not multiply
-isolated improvements or carry unused strategy switches into production.
+Use the [measurement protocol](todo-performance-measurements.md): reuse the
+[completed investigations](../bench/compare/recorded/focused-investigations.md),
+resolve the specific missing attribution, test one candidate, then keep or
+reject it. Record the expected removed work/bytes and the rejection condition
+before implementation. A stronger architecture requires stronger evidence.
+M3 work can proceed while p620 is unusable; retain the outstanding p620 trim
+comparison and validate selected scheduling/allocation changes there when
+conditions permit. A busy-host result remains exploratory.
 
 ## Reduce parallel working memory
 
-The main unresolved memory problem is the accumulation of copies of the
-same candidate across workers. Freeing screens does not remove that bound.
-The objective is to reduce peak growth as worker count rises while keeping
-useful parallel speed, deterministic identifiers and ordinary serial retry.
+Start with `tc-cyclic` scale 4 at one, four and sixteen workers, plus one
+low-duplicate case that computes values. Reuse the existing ownership
+reporter to identify the actual peak's candidate records/columns, screens,
+value payloads, find scratch, growth overlap and permanent store. Record
+occupied bytes versus capacity, worker copies versus unique new tuples,
+charged storage and process RSS separately. The
+[scale-2 attribution](../bench/compare/recorded/m3-max/retained-attribution/README.md)
+finds about fourteen worker copies per unique tuple in the peak round;
+confirm its relevance to the current larger case rather than assigning the
+whole 8.47 GB peak to that cause. The [parallel questions](todo-parallel.md)
+identify the reservation and scheduling distinctions worth checking.
 
-First measure candidate rows, copied value bytes, screening and merge
-scratch at their actual lifetime boundaries on the new reference. Use one
-duplicate-heavy target and one low-duplicate/computed-value control. Compare
-one, four and sixteen workers before increasing dataset size.
-Distinguish unused reservation and overlapping lifetimes from rows that
-must remain live: each calls for a different intervention.
+Then remove the dominant avoidable storage with the smallest ownership change.
+If local reservation/lifetime changes cannot address it, write one focused
+design for a bound on additional working storage before building one prototype.
+Preserve ordered publication, deterministic identifiers and ordinary serial
+retry. Show that the bound holds through growth and failure; moving the peak
+into another phase or avoiding sharing through fallback does not solve it.
 
-Try the smallest change that removes demonstrated duplication or overlap.
-If that cannot address the dominant term, write one focused design with an
-explicit byte bound, a single ownership boundary and a publication/failure
-proof before implementing one prototype. Compare its complete-command cost
-and peak on both controls. A protocol that adds new context-wide states,
-interner ownership or a second execution model needs benefits that justify
-that scope. Reject or narrow it when they do not. A general routing/wave
-framework is not the starting design.
+Earlier screen release is a separate small admission improvement within this
+work: its scale-2 experiment lowers the charged peak about 13%, while RSS
+falls only about 1%. Retain the frozen-budget successful-merge regression
+if adopting it. That result cannot close the candidate-replication problem.
 
-## Decide the parallel import tradeoff
+Exit with a measured improvement in peak and worker-count scaling, including
+useful parallel speed on the target and control, or a documented rejection of
+the prototype. Check acyclic closure and Linux CSPA before accepting a change
+that should generalize. A new routing framework is not a prerequisite.
 
-The isolated comparison establishes a real import cost from removing the
-symbol package. Decide whether that throughput is worth its maintenance
-cost on the simplified reference, separately from aggregation.
+## Reduce full-closure evaluation time
 
-Use the existing evidence to choose between retaining the single-index
-tradeoff and testing restoration of the package alone. Any restoration
-must preserve default serial performance, deterministic value numbering,
-limits and refusal behavior. Measure files and facts imports and complete
-commands, with an integer-only import control. Report RSS and charged
-storage separately. A smaller publication alternative is worth prototyping
-only when a profile identifies the work it would remove.
+Use serial cyclic/acyclic closure at scale 4 as the targets. Closing the
+measured gap would require about 32-37% less complete-command time; this is
+the distance to the rival, not an unconditional implementation commitment.
+Separate tuple work and comparison cost from growth, output and scheduling
+before attributing time. A high inclusive insertion sample is not all hashing.
 
-The scalar reservation shortcut has inconclusive timing evidence and adds
-no task. Import ownership attribution is complete: the former 120 MB target
-is not a cleanup-sized change with the measured live representation. There
-is no allocator workaround or additional delay experiment to implement.
+First finish the existing derived-relation tag decision on the working
+reference. The earlier constructor-only experiment improves cyclic/chain
+closure about 19%/14% serially, with 8/16 MiB extra final storage at scale 2.
+Validate same-generation, wider-tuple and larger-storage controls, plus the
+default import/startup path. Reuse the existing diagnostics and failure tests.
+This may close part of the gap; it does not justify a new membership container.
 
-## Consolidate and stop
+Evaluate ThinLTO independently on a fixed engine/toolchain if its supported
+build and installation constraints can be satisfied. Keep alignment separate,
+and resolve the source-ownership audit and installed-path disclosure issues
+in [open work](../TODO.md) before adopting a build default. Measure any accepted
+tag/build combination directly; do not multiply their isolated improvements.
 
-After the selected changes, run the representative complete-command cohort
-against the initial frozen baseline and relevant competing engines.
-Record default latency, parallel speed, peak/accounted memory, answers and
-the permanent code/ownership cost together. Finish the correctness gaps
-relevant to the retained paths, including plan/index refusal, rewrite limits
-and reuse, import fallback and input limits.
+Profile the residual only after these decisions. A further change needs a
+named hot operation and a bounded removal of work. Check sparse closure,
+same-generation recursion and a representative analysis before accepting it.
+Preserve the default path and report parallel CPU as well as wall time.
 
-Publish one result and update the reference. Choose another optimization
-only if that result identifies a material remaining bottleneck and a
-bounded intervention. An inconclusive experiment ends with its evidence;
-it does not automatically produce another heuristic or architecture.
+## Improve files and facts throughput
 
-General grouped reduction, new grouped/cached-hash membership containers
-and a replacement routing framework have no implementation commitment.
-ThinLTO/build-policy validation remains a separate measured choice, with
-compiler and alignment policy held fixed during the engine comparisons.
+Start with `files-grouped` and `facts-join` at scale 8, one and sixteen workers.
+Reuse import ownership and symbol-package isolation evidence. Fill the missing
+attribution with a phase profile of the current complete commands: input and
+value publication, expression evaluation, join/membership work, intermediate
+materialization, folds and output. Compare executed work with the rival plan
+where available. Direct phase evidence is required; subtracting independent
+import/full medians does not produce a reliable evaluation timer.
+
+Choose the first intervention from that attribution. The
+[symbol-package comparison](../bench/compare/recorded/m3-max/import-isolation/README.md)
+shows a real parallel benefit, but only about a 10-15% complete-command saving
+in its own cohort and no consistent serial gain. It does not explain the
+current 2-5 times gaps. Consider restoration or a smaller publication change
+only for the work it demonstrably removes, with its maintenance cost explicit.
+If expressions, repeated lookups or materialization dominate instead, target
+that work. An aggregate proposal needs a smaller ownership boundary than the
+withdrawn general reducer before it earns a prototype.
+
+Retain ordinary fold/EMIT semantics, deterministic value numbering, input
+limits, stream liveness and refusal behavior. Use an integer-only import,
+small input and a non-grouping query as controls. Exit only on a useful
+complete-command improvement with acceptable default latency and memory, or
+close the candidate. A faster import microbenchmark alone is insufficient.
+The scalar shortcut remains inconclusive, and import ownership evidence does
+not justify a 120 MB target through small cleanup. Those investigations create
+no further implementation work.
+
+## Preserve gains and validate the composition
+
+After selected changes, compare the combined engine with the initial reference
+and relevant rivals under one output policy. Include the three target families,
+a fast bound-recursion case, sparse/same-generation controls, Linux CSPA and
+small commands. Add larger sizes or a second platform to answer a specific
+scaling or portability question, rather than rerunning every old stage matrix.
+Keep the older dense-analysis question explicit; a Linux CSPA win does not
+settle it. Compiler policy stays fixed during engine comparisons.
+
+Reuse the full normal/sanitizer validation of unchanged paths; run the required
+checks for each actual change. Preserve correctness at plan/index refusal,
+rewrite limits and reuse, import fallback and input limits. Report default
+latency, parallel speed, peak/accounted memory and permanent maintenance cost
+together. A memory/time tradeoff is acceptable only as an explicit decision.
+
+Close completed work and publish one combined result. Keep narrower successes
+without claiming they solve a larger gap. If one focused candidate is rejected,
+move to the next justified priority; an inconclusive result does not authorize
+a chain of heuristics, another container or another execution model.

@@ -20,9 +20,14 @@ production instrumentation or another execution path.
 
 | Level | Scope | Exit |
 | --- | --- | --- |
-| Diagnose | One representative size, the default thread count and a parallel count; phase boundaries, useful-work counts and live owners. | Identify a material operation/allocation the proposed change actually removes, or stop. |
+| Diagnose | Reuse the rough comparison to select a gap; measure one representative size, relevant worker counts, phase work and live owners. | Identify a material operation/allocation the proposed change actually removes, or stop. |
 | Decide | Immutable reference/candidate; at least ten interleaved AB/BA pairs per decisive cell, with exact answers and relevant controls. | Keep, narrow or reject the candidate. An effect inside control spread is inconclusive. |
 | Validate the composition | Only accepted changes together; representative complete commands, a larger storage case and supported-host checks. | Record the combined tradeoff and freeze a new reference. Do not extrapolate by multiplying isolated wins. |
+
+A rough ranking can use two timed runs per engine. Once a gap is clear,
+spend further measurement on its missing attribution and candidate controls,
+not another broad ranking. Report absolute excess seconds and bytes alongside
+ratios. Large relative losses on tiny commands need proportionate remedies.
 
 Diagnostic binaries never supply performance timings. A high inclusive
 sample count does not identify the work beneath it: separate hashing from
@@ -33,10 +38,9 @@ worker work. Count software operations and hardware samples separately.
 
 | Question | Initial target and controls | Useful evidence |
 | --- | --- | --- |
-| Execution simplification | Facts join plus its import control; cyclic and chain closure; one/sixteen workers. | Complete time, unchanged answers/work, altered sharing, peak and final storage. |
-| Existing membership tags | Duplicate-heavy and new-key closures, same-generation and wide-tuple controls, a large relation, import/startup control. | Equality filtering, complete time, persistent tag bytes and growth peak. |
-| Candidate memory | One duplicate-heavy round and one low-duplicate/computed-value case; one/four/sixteen workers. | Per-owner rows/bytes, unique candidates, phase overlap, memory-limit admission, wall/user time and RSS. |
-| Symbol publication | Files/facts import and complete commands; integer-only import; one/sixteen workers. | Import/full time, scalar control, work/storage, identifiers and refusal behavior. |
+| Parallel working memory | Cyclic closure at scale 4 and one low-duplicate/computed-value case; one/four/sixteen workers. Validate accepted changes on acyclic closure and Linux CSPA. | Occupied/capacity bytes per owner, copies/unique candidates, phase overlap, admission, shared work, wall/user time and RSS. |
+| Full-closure time | Serial cyclic/acyclic scale 4; same-generation, sparse and wider-tuple controls, large storage and import/startup. | Tuple work, comparison/filter cost, growth and output; complete time and persistent/peak storage. |
+| Files/facts throughput | Files grouped and facts join at scale 8, import and complete commands, one/sixteen workers; numeric import, small input and a non-grouping control. | Direct phase attribution, expression/join/fold work, materialized rows, output, identifiers, limits and complete-command benefit. |
 | Build policy | A fixed engine and fixture set, changing only compiler/LTO/alignment policy. | Complete commands and code-layout sensitivity, with text size and toolchain scope. |
 
 These are starting cells, not a Cartesian product of every workload,
