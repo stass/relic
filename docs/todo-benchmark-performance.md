@@ -157,6 +157,14 @@ predicted speedups. The rival plans expose different work, including earlier
 facts filtering and direct files grouping, but do not choose a new ownership
 model for relic.
 
+The [analysis of the reader](../bench/compare/recorded/m3-max/input-reader-pc/README.md)
+puts unquoted byte scanning at 1.6-5.2% of total sampled CPU. Reader state and
+format selection already sit outside the compiled scan loop. This evidence
+does not select a byte-classification table or SIMD scanner. The separate
+computed-string audit finds avoidable temporary copies in the object control,
+but that concatenation is absent from files/facts and has no measured cost
+here; it does not select an expression change for these gaps.
+
 The [literal-prefix screen](../bench/compare/recorded/m3-max/regex-prefix-screen/README.md)
 does not establish a useful complete-files gain. The
 [private-builder bound](../bench/compare/recorded/m3-max/builder-bound/README.md)
