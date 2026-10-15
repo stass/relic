@@ -861,6 +861,7 @@ DL_LOG_COMPILER = $(RELIC_STRICT) $(SHELL) $(abs_top_srcdir)/tests/langtest.sh
 SH_LOG_COMPILER = $(RELIC_STRICT) $(SHELL)
 
 AM_TESTS_ENVIRONMENT = \
+	RELIC_MAKE='$(MAKE)'; export RELIC_MAKE; \
 	RELIC_CC='$(CC)'; export RELIC_CC; \
 	RELIC_CXX='$(CXX)'; export RELIC_CXX; \
 	RELIC_AR='$(AR)'; export RELIC_AR; \

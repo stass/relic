@@ -73,7 +73,7 @@ status=ok
 hyperfine() {
     for command; do :; done
     sh -c "$command" > /dev/null
-    cp "$RELIC_SRCDIR/tests/fixtures/bench/hyperfine-v2.json" "$work/timing.json"
+    cat "$RELIC_SRCDIR/tests/fixtures/bench/hyperfine-v2.json" > "$work/timing.json"
 }
 for engine in souffle-interp souffle souffle-magic nemo; do
     measure "$engine" startup

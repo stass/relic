@@ -6,7 +6,8 @@
 
 set -eu
 
-: "${RELIC_SRCDIR:?RELIC_SRCDIR must name the source directory}"
+: "${RELIC_BUILDDIR:?RELIC_BUILDDIR must name the build directory}"
+: "${RELIC_MAKE:=make}"
 : "${RELIC_CC:?RELIC_CC must name the configured C compiler}"
 : "${RELIC_CXX:?RELIC_CXX must name the configured C++ compiler}"
 : "${RELIC_AR:?RELIC_AR must name the configured archiver}"
@@ -18,6 +19,16 @@ set -eu
 work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT
 trap 'exit 1' HUP INT TERM
+
+# Configure refuses an out-of-tree build from an already configured source
+# tree. The distribution target supplies clean sources for the probes in
+# either kind of parent build, without copying its objects or config.status.
+# shellcheck disable=SC2086
+if ! (cd "$RELIC_BUILDDIR" &&
+    $RELIC_MAKE distdir "distdir=$work/source") > "$work/dist.log" 2>&1; then
+	cat "$work/dist.log" >&2
+	exit 1
+fi
 
 cat > "$work/tool" <<'EOF'
 #!/bin/sh
@@ -87,7 +98,7 @@ check_configure() {
 	status=0
 	# Preliminary configure probes stay native even if the builder supplied
 	# LTO flags directly. Enabling the option appends -flto=thin afterward.
-	(cd "$work/$name" && "$RELIC_SRCDIR/configure" \
+	(cd "$work/$name" && "$work/source/configure" \
 	    CC="$RELIC_CC" CXX="$RELIC_CXX" AR="$RELIC_AR" \
 	    RANLIB="$RELIC_RANLIB" NM="$RELIC_NM" \
 	    CFLAGS="$RELIC_CFLAGS -fno-lto" CXXFLAGS="$RELIC_CXXFLAGS -fno-lto" \
