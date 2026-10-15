@@ -22,18 +22,17 @@ of which `contrib/` holds only the homebrew formula, so
 **Close the measured performance gaps.** [Medium, components:
 `lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/relation.c`, `lib/exec.c`,
 `lib/import.c`, `lib/value.c`, `bench/compare/`]
-Use the tagged engine with inline probe helpers and native compilation as
-the working reference. Next close the byte, lifetime and source-deletion gates
-for a design replacing worker tuple copies and cross-worker duplicate tables.
-The current CPU profiles support that question, not implementation approval.
-ThinLTO remains an explicit build option. Parallel working memory remains a
-larger structural gap: further implementation needs a design that reduces or bounds
-actual worker copies without the rejected screen-reuse prototype's slowdown. The
-[performance plan](docs/todo-benchmark-performance.md) sets each remaining
-measurement, candidate and acceptance boundary. Use the
-[measurement protocol](docs/todo-performance-measurements.md) to separate
-rough ranking from implementation decisions; [parallel questions](docs/todo-parallel.md)
-feed that work rather than creating another queue.
+Keep the tagged engine with inline probe helpers and native compilation as
+reference. The shared collector's memory/source savings do not justify its
+parallel slowdown; thread-stack sampling identifies substantial tuple-mutex
+waiting. Finish the bounded exploratory FreeBSD CPU attribution without
+changing that rejection. Further throughput work needs one concrete removal
+of input/expression work; further memory work needs a fresh ownership and
+capacity design. No atomic-table or alternate-collector implementation is
+selected. The [performance plan](docs/todo-benchmark-performance.md) sets these
+gates; the [measurement protocol](docs/todo-performance-measurements.md) keeps
+rough ranking separate from implementation decisions, and
+[parallel questions](docs/todo-parallel.md) feed the same work.
 
 ## Engine
 

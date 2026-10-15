@@ -5,16 +5,24 @@
 
 Reduce the remaining cost of useful commands while keeping one understandable
 execution and ownership model. Derived-relation hash tags and inline probe
-helpers are part of the working reference, with native compilation. Their
+helpers are the working reference, with native compilation. Their
 [combined comparison](../bench/compare/recorded/m3-max/composition/README.md)
-establishes the current gains, costs and remaining gaps. Parallel memory
-remains the largest resource gap. The
-[current cyclic CPU profiles](../bench/compare/recorded/m3-max/cyclic-profile/README.md)
-identify substantial screening and duplicate-finding work. Next review whether
-one round-owned candidate set and ordered occurrence references can replace
-worker tuple copies and the merge's duplicate tables. Require concrete byte,
-lifetime and source-deletion budgets before any prototype. A candidate belongs
-to a gap; it does not create another implementation track.
+establishes the retained gains, storage costs and remaining gaps.
+
+The [shared-collection screen](../bench/compare/recorded/m3-max/shared-collection/README.md)
+closes the admitted memory prototype: an 813-line runtime reduction and 76%
+lower dense peak RSS came with 2.54 times the parallel elapsed time. All three
+parallel computed-value/duplicate controls also lost. The
+[thread-stack diagnostic](../bench/compare/recorded/m3-max/shared-collection-waits/README.md)
+finds substantial direct tuple-mutex waiting under sampling. Keep the existing
+engine; this result selects no lock tuning, alternate collector or atomic-table
+rewrite.
+
+Next finish the bounded FreeBSD process-specific CPU attribution, keeping
+busy-host evidence exploratory and separate from the Mac screen. Then require
+a concrete removal of input/expression work before another throughput
+prototype. Remaining gaps are design and attribution gates, not an automatic
+queue of implementations.
 
 ## Remaining gaps and execution order
 
@@ -24,12 +32,12 @@ they do not establish release performance or explain allocation ownership.
 Times include loading, evaluation and output. Memory figures are process
 peak RSS, in decimal units.
 
-| Next work | Remaining gap | Evidence and decision |
+| Priority | Remaining gap | Next gate |
 | --- | --- | --- |
-| 1 | Parallel working-memory design | Review a replacement for worker tuple copies and cross-worker duplicate tables. Earliest-task references offer an ordering proof; the growth/phase byte ledger, cleanup ownership and source-deletion budget must be concrete before implementation. |
-| Design gate | Larger files/facts throughput gaps | Grouped files is 2.72/5.16 times behind DuckDB at one/sixteen threads; facts join is 1.74/2.52 times behind. Input, expressions and materialization dominate. Larger interventions need a focused ownership and reuse design. |
-| Design gate | Parallel working memory | At sixteen threads cyclic closure peaks at 8.45 GB against Souffle's 0.42 GB. The rejected screen-reuse prototype saves memory but slows the target 31%. Actual worker candidate copies remain the dominant storage problem. |
-| Attribution gate | Remaining closure time | Serial cyclic/acyclic closure is 11%/20% behind compiled Souffle; parallel cyclic is 16% behind. The accepted bundle already saves 29%/19% of serial time against the initial engine. Another change needs fresh attribution of work it removes. |
+| 1 | Synchronization attribution on FreeBSD | Use one source-bound cyclic4 j16 user-cycle profile per variant, with exact answers/counters and bounded target-only thread observations. A saturated host cannot establish a wall-time ranking. This diagnoses the rejected design; it cannot override the Mac loss. |
+| Design gate | Files/facts throughput | Grouped files is 2.72/5.16 times behind DuckDB at one/sixteen threads; facts join is 1.74/2.52 times behind. Use the retained input/expression profiles to identify one repeated or avoidable operation and its ownership contract before coding. |
+| Design gate | Parallel working memory | Cyclic closure peaks at 8.45 GB against Souffle's 0.42 GB in the rival comparison. Both worker-screen reuse and shared collection lose useful parallel speed. A new design must remove copies without recreating the observed synchronization cost. |
+| Attribution gate | Remaining closure time | Serial cyclic/acyclic closure is 11%/20% behind compiled Souffle; parallel cyclic is 16% behind. Retain the accepted 29%/19% serial gains. Another change needs attribution of specific work it removes. |
 
 Eligible bound-recursion losses have reversed. Keep those gains as regression
 controls. Near ties and the roughly 2 ms serial chain-left gap do not justify
@@ -98,21 +106,23 @@ synchronization/spin bucket receives a sample, but unknown callback work and
 unsampled blocked time remain; this does not prove zero spinning. Serial
 insertion owns 62.0% at one worker. CPU shares are not removable wall time.
 
-Review one collection replacement against that evidence. A shared exact set
-can record a tuple's earliest claiming task. A worker retains an ordered
-reference only when it creates the tuple or lowers that task index. With
-increasing task claims, later emissions by that worker cannot lower the
-index again. This proposed admission rule bounds references to one per
-worker/key; its metadata belongs in the byte ledger. A task-order winner
-walk then needs no global sorting pass.
-Typed pending normalization must preserve ordinary value/type-use bookkeeping.
-These are design arguments, not implementation approval: require an exact
-capacity ledger through simultaneous growth and merge reservation, one
-barrier-owned cleanup boundary, a function-level deletion/replacement map and
-one batch policy. Count locks and shared mutation as new obligations. Preserve
-thread-disabled builds, parallel count/staging and whole-round serial retry.
-Reject the proposal if it needs another collector, worker caches, extra
-policies or more runtime code to meet those obligations.
+The shared set's ordering proof and source/byte gates passed, but its measured
+parallel time did not. Exact proofs and all 32 timed commands retained their
+required successful shared rounds, so serial replay did not conceal the loss.
+The [synchronization review](../bench/compare/recorded/m3-max/shared-collection-synchronization.md)
+records the alternatives and their costs. Atomic slots alone cannot publish
+resizing arrays safely. Single-writer routing needs retained output or bounded
+execution waves. Semantic pre-routing can remove the global value mutex, but
+restores per-part value namespaces and byte assembly, and does not remove the
+cyclic workload's tuple locks.
+
+A fresh memory proposal needs its own simultaneous-capacity ledger, occurrence
+proof and function-level replacement budget. Do not carry the rejected
+prototype's deletion credits over to a design that restores those mechanisms.
+Use the existing frozen-executor freshness invariant; the working engine
+already avoids the prototype's redundant typed lookup/canonical-ID state.
+Preserve thread-disabled builds, parallel count/staging and whole-round retry.
+No alternative memory implementation is admitted by these results.
 
 ## Hold the closure and build decisions fixed
 

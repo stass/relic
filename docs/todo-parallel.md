@@ -24,13 +24,18 @@ prototype is rejected. Earlier screen release changes admission more than
 RSS. Neither experiment justifies another lifetime tweak, filter policy or
 lookup variant as the next memory intervention.
 
+The [shared collector](../bench/compare/recorded/m3-max/shared-collection/README.md)
+reduces the dense process peak from 8.48 to 2.02 GB and runtime source by 813
+lines, but takes 13.65 rather than 5.37 seconds at sixteen workers. Its three
+parallel controls also slow by 35-70%. The exact proofs and timed counters
+confirm successful shared work. This replacement is rejected as well.
+
 A new proposal must reduce or bound stored copies within one understandable
-ownership model. Preserve logical occurrence order and value identity before
-publication, and retain ordinary whole-round serial retry. Derive its bound
-through growth and refusal, not only at a successful barrier. Use the retained
-reporter for the affected boundaries; there is no need to repeat the initial
-attribution without a change that makes it stale. Keep occupied bytes,
-capacity, charged storage and process RSS distinct.
+ownership model while retaining useful parallel speed. Preserve occurrence
+order, value identity and whole-round serial retry. Derive simultaneous
+capacity through gathering, growth, merge and refusal. Keep occupied bytes,
+capacity, charged storage and process RSS distinct; do not inherit deletion
+credits for mechanisms a new design restores.
 
 ## Account for the work behind parallel elapsed time
 
@@ -45,12 +50,26 @@ the explicit pool synchronization/spin owner; unknown callback work and
 unsampled blocked time prevent a claim of zero waiting or spinning. These
 CPU shares do not predict a replacement's elapsed gain.
 
-A scan with few tuples limits the number of pieces even when work beneath
-it is large. Measure that effect on a demonstrated target before changing
-partitioning or planner choices. Worker wake-up and sparse-stripe growth
-measurements matter only if the selected workload's profile makes them
-material. No threshold sweep, deeper slicing, component-concurrency feature
-or replacement routing protocol is a prerequisite for the memory work.
+The [separate thread-stack diagnostic](../bench/compare/recorded/m3-max/shared-collection-waits/README.md)
+finds direct collector tuple-mutex waits in 17,866 of 38,289 shared observations,
+versus none of 14,946 native observations. Pool condition waits are separate.
+These are perturbed stack appearances with unequal coverage, not CPU shares,
+blocked durations or an attributed fraction of the original slowdown. The
+cyclic rule propagates assigned values and bypasses the global value lock.
+
+Finish one bounded exploratory FreeBSD user-cycle profile per variant using
+process-specific PMCs, with exact work/source bindings and explicit sample
+loss/unwinding limits. CPU samples cannot measure sleeping time; any target
+thread-state observations remain a separate measure. Do not rank wall times
+under host saturation or expand this diagnostic into a tuning cohort.
+
+The [synchronization review](../bench/compare/recorded/m3-max/shared-collection-synchronization.md)
+explains why atomics need safe publication/growth, and why single-writer routing
+needs buffers or execution waves. Partition-local values are coherent but add
+namespaces, copying and up to P-fold occupied payload before capacity slack.
+None is an approved implementation. Retain exclusive ownership in the existing
+post-gather phases and avoid a new scheduler without a demonstrated need and
+replacement budget.
 
 ## Acceptance
 
@@ -60,9 +79,9 @@ speed. Require a successful shared merge, so serial replay cannot conceal
 failed admission. Preserve ordinary retry, interruption, value numbering and
 output order, including computed values and allocation refusal. Reopening
 memory implementation needs a concrete design that meets this boundary.
-The next design review asks whether one round-owned set with earliest-task
-ownership and ordered worker references can replace replicated tuples and the
-merge's duplicate tables. Require concrete capacity/phase bounds, borrowed-byte
-cleanup order and a source deletion budget before a prototype. Shared mutation
-and mutex ownership must replace the current isolation contract explicitly;
-the CPU profile alone does not select them.
+A different ownership design must earn a fresh source, byte and lifetime gate;
+neither the CPU profile nor the existence of an atomic primitive selects one.
+The working engine already relies on deferred pending values being fresh as
+their type. Keep that derived invariant instead of adding state for arbitrary
+pending inputs at a collector restricted to frozen execution. Generic serial
+and import descriptors retain their broader normalization contract.
