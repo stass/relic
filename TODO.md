@@ -20,14 +20,15 @@ of which `contrib/` holds only the homebrew formula, so
 [release procedure](specs/design-release.md#the-release-procedure).
 
 **Files/grouping work reduction.** [Medium, components: `lib/eval.c`,
-`lib/plan.c`, `lib/relation.c`, `lib/import.c`, `bench/compare/`] Share ordinary
-value publication and deferred-round handling with a
-[counted destination](specs/design-grouped-count.md), removing the private
-collector's duplicate value work and replay policy. The
-[collector measurements](bench/compare/recorded/counted-projection/README.md)
-and [DuckDB comparison](bench/compare/recorded/duckdb-files-analysis/README.md)
-motivate the [performance work](docs/todo-benchmark-performance.md), which sets
-architectural and measured adoption gates before a separate input-storage design.
+`lib/plan.c`, `lib/relation.c`, `lib/import.c`, `bench/compare/`] Deliver completed
+[counted destinations](specs/design-grouped-count.md) through the common
+delivery loop, removing the serial copy into a second answer store while
+retaining ordinary value publication and deferred-round handling. The
+[shared-publication measurements](bench/compare/recorded/counted-destination/README.md)
+identify that output cost and leave ordinary-control validation open. The
+[performance work](docs/todo-benchmark-performance.md) sets architectural and
+measured adoption gates before a separate input-storage design motivated by
+the [DuckDB comparison](bench/compare/recorded/duckdb-files-analysis/README.md).
 
 ## Engine
 

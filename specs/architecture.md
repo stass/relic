@@ -628,17 +628,20 @@ facts.
 
 Before the ordinary completion walk, a full
 [grouped-count query over a projected base relation](design-grouped-count.md)
-run its producer into a counted destination and retain only keys and counts.
+runs its producer into a counted destination and retains only keys and counts.
 The original predicates retain their definitions and acquire no summary
 bindings; the query owns the destination, so no program-wide reader inventory
 is needed. Eligibility is revalidated per run and keeps explicit resource
 limits on ordinary execution. Ordinary publication of producer values precedes
 count-result values. First producer occurrence and head-column order preserve
-successful value IDs and answer order. Final count rows pass through the same
-caller-side batch publisher at every worker count; resource-failure prefixes
-follow that counted-result stream rather than the eliminated fold's read
-quantum. Counters describe the work performed, so intermediate tuple and
-storage totals can differ from ordinary materialization. The program is not
+successful value IDs and answer order. Count values pass through the same
+caller-side pending-value publisher in batches of at most 64 groups at every
+worker count; resource-failure prefixes follow those batches rather than the
+eliminated fold's read quantum. After every count value is assigned, the
+completed destination supplies rows to the common delivery loop. It owns its
+checked result map and remains alive through delivery, avoiding a second
+answer relation. Counters describe the work performed, so intermediate tuple
+and storage totals can differ from ordinary materialization. The program is not
 marked materialized by this strategy.
 
 **Whole-program evaluation** computes the complete stratified fixed point

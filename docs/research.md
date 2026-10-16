@@ -126,23 +126,30 @@ projection into group state before retaining its rows.
 
 [Design](../specs/design-grouped-count.md),
 [source comparison](../bench/compare/recorded/duckdb-files-analysis/README.md),
-[private-collector experiment](../bench/compare/recorded/counted-projection/README.md).
+[private-collector experiment](../bench/compare/recorded/counted-projection/README.md),
+[shared-publication experiment](../bench/compare/recorded/counted-destination/README.md).
 
 A full count query over one base scan owns a canonical key/count destination
-and final answer. The existing emitted-tuple distinctness proof permits one
-increment per producer row under Datalog set semantics. No named predicate
-is rebound to a summary. The intended consumer shares ordinary value
+whose completed contents supply the answer. The existing emitted-tuple
+distinctness proof permits one increment per producer row under Datalog set
+semantics. No named predicate is rebound to a summary. The intended consumer shares ordinary value
 publication and deferred-round resolution, combining multiplicities in the
 existing first-occurrence merge. Its producer plan remains intact so key
 projection cannot accidentally replace generation with an existence test.
+Publishing all count values before delivery lets the same owner supply the
+result without copying it into another canonical relation. Ordinary sets and
+completed counts share the delivery loop.
 
 A measured private collector reduced files memory and elapsed time, but
 withholding interning repeated long-string work and capacity refusal added
 replay cost. Both controls lost in all ten confirmation pairs. That model
-is not selected. Shared publication aims to remove its extra value and retry
-states; it remains a design to validate, not a measured result. The admission,
-value-order and failure proofs are local obligations, not results established
-by the DuckDB reference.
+is not selected. A shared-publication screen removes the long-key loss and
+retains the files improvement, but high-cardinality output loses elapsed
+time. Direct phase observations identify serial construction of a second
+answer relation as a material cost. Delivering completed keys and counts
+removes that store; this result representation still requires implementation
+and performance validation. The admission, value-order and failure proofs are
+local obligations, not results established by the DuckDB reference.
 
 ### Frozen reads and ordered publication — Used; local method
 

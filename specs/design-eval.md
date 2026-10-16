@@ -187,6 +187,16 @@ pair. It adds no second interning path or serial query-replay policy.
 Deferred execution uses the same destination contract after its existing
 pending-value resolution and ordered merge.
 
+A completed destination also supplies its result rows. An ordinary set lends
+the gathered relation's tuples. A counted destination lends a checked
+projection of its keys and assigned count values, after the evaluator has
+published every count through the existing pending-value operation. That
+operation supports descriptor-only batches, with no tuple rewrite. Count
+publication covers at most 64 groups per batch, including already assigned
+counts. One delivery loop reads either completed destination without
+allocation; the owner remains alive until delivery ends. Counting therefore
+needs no second answer relation or separate callback protocol.
+
 **Batching is invisible by construction.** Every view of a plan was resolved
 when the plan started: a member view ends at its delta's end, the member's
 end when the round began, and `all` at the relation's end when the plan

@@ -10,34 +10,37 @@ the intervals are 0.256/0.146 against 0.0385/0.026. These are diagnostic
 intervals, with their stated boundaries and limitations. Query fusion alone
 cannot close an import floor larger than the rival's whole command.
 
-## Share publication before adding counting
+## Deliver counted results without a second store
 
-The [private-collector experiment](../bench/compare/recorded/counted-projection/README.md)
-meets the files target but fails its controls: delayed interning repeats
-long-string work, and a private capacity cutoff causes discarded collection
-and replay. Implement the [counted destination](../specs/design-grouped-count.md)
-through the ordinary evaluation protocol, removing those obligations.
+The [shared-publication screen and phase diagnostic](../bench/compare/recorded/counted-destination/README.md)
+retain the files improvement and remove the long-key loss of the
+[private collector](../bench/compare/recorded/counted-projection/README.md).
+High-cardinality output still loses elapsed time: constructing its second
+answer relation takes 15.2–15.4 ms on the caller. The ordinary join control
+also has a small unresolved loss; the screen's background activity increased,
+so this remains a validation question, not a clean control result.
 
-First establish one checked destination boundary for ordinary batch
-publication and tuple consumption. Keep the actual serial executor continuation
-and the existing deferred-round resolver, ordering and retry. Review the
-before/after ownership model across evaluation, workers, merging and storage;
-a wrapper around separate publication paths does not qualify. Ordinary set,
-dense and streaming paths retain their semantics and candidate footprint.
-
-Then add the counted destination: an anonymous canonical key relation with
-counts, fed by the certified original producer. Project emitted rows without
-replanning away source traversal. Shared workers combine key multiplicities
-inside the existing candidate and merge protocol. Final count rows use one
-caller-side publication stream at every worker count. Remove private typed-key
-storage, separate value publication, capacity cutoffs and whole-query replay.
+Complete the [counted destination](../specs/design-grouped-count.md) by using
+its finished keys and counts as the answer. Retain the ordinary serial
+continuation, deferred resolver, candidate merging and value publication.
+The original producer still runs intact; its emitted rows are projected
+without replanning away source traversal. Publish count values in
+caller-side batches of at most 64 groups at every worker count, then deliver
+the completed destination through the common delivery loop. Keep its checked
+result map with the key/count owner; remove the serial copy into a second
+answer relation. Review the before/after owners, states and obligations:
+the existing SET/COUNT distinction must suffice, with no new reader framework,
+worker mode or replay. Ordinary set, dense and streaming paths retain their
+semantics and candidate footprint.
 
 Prove that files scale 8 retains 1,200 keys instead of 1,799,657 producer
 tuples, with no named P/G/Q storage, fold index or per-P-row worker candidates.
 Check complete answers, successful IDs/order, transformed counters across
 worker counts, explicit-limit refusal, later intermediate queries, constant
 keys, repeats across tasks, paired key/count reservation, diagnostics and
-identifier-ceiling failures. Verify actual worker participation. Distinguish
+identifier-ceiling failures with both assigned and new count values. Prove
+that early callback stop follows complete value publication and that owner
+cleanup holds through delivery. Verify actual worker participation. Distinguish
 the counted-result failure contract from the eliminated fold's batch fences.
 
 Reuse the frozen fixtures, oracles and baseline for two alternating pairs

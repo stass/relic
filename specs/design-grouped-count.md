@@ -13,6 +13,7 @@ Related: [query modes](architecture.md#query-modes),
 [values](design-values.md#interning-computed-values),
 [source comparison](../bench/compare/recorded/duckdb-files-analysis/README.md),
 [collector measurements](../bench/compare/recorded/counted-projection/README.md),
+[shared-publication measurements](../bench/compare/recorded/counted-destination/README.md),
 [performance work](../docs/todo-benchmark-performance.md).
 
 ## Model and boundary
@@ -86,10 +87,18 @@ that schema when paired with its consumer. The counted destination checks P's
 arity and its key-column map; the final answer has Q's arity, which need not
 equal P's. No empty P relation stands in for a destination.
 
-One answering run owns the certificate, producer plan, counted destination
-and final answer. Its producer uses the evaluator's ordinary executor and
-serial/deferred choice. There is no second expression interpreter, private
+One answering run owns the certificate, producer plan and counted destination.
+The destination's completed keys and counts are the final answer; they are
+not copied into another relation. Its producer uses the evaluator's ordinary
+executor and serial/deferred choice. There is no second expression interpreter, private
 execution loop or second query-replay protocol.
+
+The destination owns both checked projections: original P columns to stored
+keys, and stored keys plus the count to Q's columns. Its result arity is the
+key arity plus one, checked against Q during construction; the result map is
+a permutation of those columns. Callers do not retain an independent output
+map or configure another reader. The immutable worker view exposes the input
+and key schema, with no writable count storage.
 
 Executor scratch and pending room are sized for the original P EMIT arity,
 not the narrower stored key arity. The destination checks both sides of its
@@ -193,11 +202,22 @@ publish those values through the actual producer continuation. Deferred
 execution resolves them in the same first-occurrence order before applying
 its complete key/count result. All producer values precede count-result values.
 
-After the producer finishes, the calling thread walks keys in insertion order
-and forms Q's rows through the checked output-column map. It feeds batches of
-at most 64 rows, including their pending count integers, through the same
-publication boundary into the ordinary gathered answer. This final-row
-generation and its failure boundary are identical at every worker count.
+After the producer finishes, the calling thread enumerates groups in insertion
+order and publishes any unassigned count integers through the evaluator's
+existing pending-value operation. Each batch covers at most 64 groups,
+including groups whose count is already assigned. The publication operation
+can commit descriptors without rewriting any tuples; this pass constructs no
+second answer relation. Its work accounting, interruption points and failure
+boundary are identical at every worker count.
+
+Only after all count values are published does delivery begin. Raw counts
+remain counts. A complete COUNT destination supplies canonical rows by reading
+its keys and looking up the assigned count IDs through its checked result map.
+A complete SET destination supplies the rows of its borrowed relation. One
+caller-side delivery loop handles both through this existing closed
+distinction. Reading a result row allocates and publishes nothing. This is
+read access to a completed destination, not a virtual source, executor
+operation or independently configurable reader.
 
 Successful value IDs and answer order match ordinary P/G/Q evaluation. The
 retained prefix on a resource failure while generating count results follows
@@ -206,11 +226,13 @@ Q fold. Different evaluation strategies can allocate different storage and
 meet resource failures differently; counted serial and shared execution
 retain the same failure contract. Explicit-limit execution stays ordinary.
 
-The key/count destination and producer scratch are released before ordinary
-gathered-answer delivery. No callback receives a row until the complete answer
-is ready. Query cleanup empties the answer on every exit; interruption during
-delivery retains the existing prefix-delivery contract. The ordinary query
-rule is not rerun over the populated answer.
+The evaluator releases producer scratch before delivery. The answering run
+keeps the key/count owner alive through the delivery loop and releases it on
+every exit. The context's busy state prevents callbacks from changing that
+owner or its values. No callback receives a row until the complete answer is
+ready; interruption and early stop use the same delivery loop as an ordinary
+gathered answer. The counted query leaves its ordinary answer relation empty
+and does not rerun the query rule.
 
 ## Failure, diagnostics and counters
 
@@ -227,15 +249,17 @@ Interrupts and note callbacks follow the ordinary serial/deferred contracts;
 no worker calls user code. Failure paths neither rewind committed values nor
 pretend a reported diagnostic did not occur.
 
-On success, counters describe executed work. Producer EMITs and final answer
-rows count as derivations. Both newly installed key tuples and answer tuples
-count as insertions through the ordinary destination machinery. Reading the
-producer source and enumerating stored keys count as tuple scans; membership
-probes and merge visits do not. A successfully shared producer pass counts
-as one parallel round.
+On success, counters describe executed work. Producer EMITs and successfully
+finalized result rows count as derivations. Only newly installed key tuples
+count as insertions; no second answer store exists. Reading the producer
+source and enumerating groups for count publication count as tuple scans;
+membership probes, merge visits and final delivery do not. Finalized-row work
+is counted after its value batch succeeds, while attempted group scans are
+counted at the publication boundary. A successfully shared producer pass
+counts as one parallel round.
 Discarded shared attempts contribute no published counters. Private key tuples
-and their storage are accounted while held and released before delivery. The
-successful counted work and final held/storage totals match across worker
+and their storage are accounted while held and released when delivery ends.
+The successful counted work and final held/storage totals match across worker
 counts except for parallel rounds; they can differ from ordinary
 materialization. Successful value IDs, answer order and decoded answers
 are preserved.
@@ -267,7 +291,9 @@ refusal behavior. Fault and interruption tests cover consumer reservation,
 paired key/count application, shared-round retry, count-result batches and
 delivery; no failure may expose a half-published answer or use a freed
 source/scratch pointer. Identifier-ceiling tests compare counted serial and
-shared failure prefixes. Constant keys must still count every P emission,
+shared failure prefixes, including batches mixing assigned and new counts.
+All result values must be published even when the first callback stops
+delivery. Constant keys must still count every P emission,
 and repeated keys spanning several tasks must combine every contribution.
 
 Performance validation proves that workers retain keys and their distinct
