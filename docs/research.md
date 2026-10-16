@@ -92,18 +92,49 @@ of the composition; its threat model and rationale are stated locally.
 
 ## Parallel ownership and storage
 
-### Control bytes before payload — Proposed; local adaptation
+### Control bytes before payload — Related; local proposal
 
 Abseil, [Swiss Tables Design Notes](https://abseil.io/about/design/swisstables),
 describes separate metadata carrying occupancy and a hash fingerprint, with
-candidate payloads read after filtering. Relic's
-[control-byte design](../specs/design-control-bytes.md) applies that separation
-to its existing identifier table. It uses scalar linear probing, reserves
+candidate payloads read after filtering. The archived
+[control-byte proposal](../bench/compare/recorded/files-grouping-design/control-bytes-proposal.md)
+applies that separation to Relic's identifier table. It uses scalar linear probing, reserves
 zero for emptiness and aliases hash high bytes zero and one. It does not
 adopt Abseil's SIMD groups, seven-bit encoding, deletion support or container.
 The exact encoding and invariants are local; the reference does not establish
 a performance gain for relic. The [investigation](../bench/compare/recorded/files-grouping-design/README.md)
-records the workload evidence and limits of the proposal.
+records the workload evidence. This proposal is unimplemented and is not the
+active files/grouping performance direction.
+
+### Vector pipelines and local grouped aggregation — Related; implementation reference
+
+DuckDB v1.5.5, commit `d8cdaa33fda8df955cc76ef58a280f68f4cd43fa`:
+[pipeline execution](https://github.com/duckdb/duckdb/blob/d8cdaa33fda8df955cc76ef58a280f68f4cd43fa/src/parallel/pipeline_executor.cpp#L304)
+passes projected chunks to a sink;
+[grouped aggregation](https://github.com/duckdb/duckdb/blob/d8cdaa33fda8df955cc76ef58a280f68f4cd43fa/src/execution/radix_partitioned_hashtable.cpp#L548)
+retains local hash tables across chunks and combines their partial data.
+Its [external-aggregation explanation](https://duckdb.org/2024/03/29/external-aggregation.html)
+describes the broader partitioning and memory-management approach.
+
+The [Relic comparison](../bench/compare/recorded/duckdb-files-analysis/README.md)
+pins the source and distinguishes direct phase observations from claims
+about individual features. Relic does not adopt DuckDB's vector engine,
+spill manager or string representation. The relevant idea is to consume a
+projection into group state before retaining its rows.
+
+### A query-owned counted projection — Proposed; local adaptation
+
+[Design](../specs/design-grouped-count.md),
+[evidence](../bench/compare/recorded/duckdb-files-analysis/README.md).
+
+A full count query over one base scan owns its private collector and final
+answer. An existing emitted-tuple distinctness proof permits one count
+increment per producer row under Datalog set semantics. No named predicate
+is rebound to a summary. Monotone source-range assignment makes each
+worker's first-group list ordered; merging those lists preserves producer
+value/answer order without retaining all producer rows. The narrow grammar,
+private-retry protocol and first-occurrence publication proof are local
+obligations, not results established by the DuckDB reference.
 
 ### Frozen reads and ordered publication — Used; local method
 

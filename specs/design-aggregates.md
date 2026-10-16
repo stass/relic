@@ -20,6 +20,11 @@ Related: [language](language.md#aggregates),
 [Magic Sets](design-magic.md), [parallel evaluation](design-parallel.md),
 [front end](design-frontend.md).
 
+A [full grouped-count query over a projected base](design-grouped-count.md)
+can consume its producer into a private collector and publish just the
+answer. The compiler retains ordinary rules for every predicate; this
+document describes their materialization and fold behavior.
+
 ## Model
 
 Call the rule holding an aggregate literal, minus that literal's braces,

@@ -287,11 +287,6 @@ struct, whose padding defeats a word-wise hash. The representation sits behind
 a few accessors, so it can be replaced without touching the planner, evaluator,
 rewrite or public interface.
 
-The shared identifier table's [control bytes](design-control-bytes.md)
-encode emptiness and a hash fingerprint in existing metadata. Tagged probes
-read identifiers only for possible matches; exact key comparison, linear
-placement, ownership and allocation remain common to every table user.
-
 See [design-values.md](design-values.md).
 
 ### Storage
@@ -419,8 +414,10 @@ See [design-planning.md](design-planning.md) and
 
 The executor (`lib/exec.c`) runs a plan with an explicit loop and no C
 recursion, and hands its derivations back in batches; it never inserts.
-EMIT carries an output schema with no relation pointer. Its caller owns
-the insertion or delivery destination and checks that the arity agrees. A
+EMIT carries an output schema with no relation pointer. Planning derives
+that schema from the rule, without a physical destination. Its consumer owns
+the insertion, delivery or private counted-key destination and checks that
+the arity agrees. A
 recursive component -- a set of mutually recursive predicates, its
 members -- is evaluated semi-naively (`lib/eval.c`): each round runs rule
 variants in which one recursive literal reads the previous round's delta,
@@ -621,6 +618,19 @@ ordinary semi-naive engine; and the query's rule runs last. What the
 rewrite derives is only part of the fixed point, so it is not recorded as
 the program's fixed point, and the next evaluation starts again from the
 facts.
+
+Before the ordinary completion walk, a full
+[grouped-count query over a projected base relation](design-grouped-count.md)
+can collect keys and counts privately and publish only its final answer.
+Its one producer plan runs in the ordinary executor. The original predicates
+retain their definitions and acquire no summary bindings; the per-query
+owner is the only consumer of the private collector. This removes the need
+to maintain a program-wide inventory of readers. Eligibility is revalidated
+per run and keeps explicit resource limits on ordinary execution. First
+producer occurrence and head-column order determine value publication and
+answer order. Counters describe the work performed, so intermediate tuple
+and storage totals can differ from ordinary materialization. The program is
+not marked materialized by this strategy.
 
 **Whole-program evaluation** computes the complete stratified fixed point
 and runs the query over it. It is used:

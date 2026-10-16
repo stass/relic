@@ -27,6 +27,11 @@ Related: [architecture: Magic Sets](architecture.md#magic-sets),
 
 ## Model
 
+The [counted projection strategy](design-grouped-count.md) can answer its
+matching full query before this completion walk. It retains the original
+root for ordinary execution and leaves the program's predicates unchanged.
+This model describes the queries that enter Magic rewriting.
+
 A query is answered in one of two ways
 ([query modes](architecture.md#query-modes)). It is **not rewritten** when
 the context's relations already hold the program's fixed point --

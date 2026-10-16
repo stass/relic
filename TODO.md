@@ -19,15 +19,14 @@ of which `contrib/` holds only the homebrew formula, so
 `contrib/pkgsrc/devel/relic/` are to write; and the
 [release procedure](specs/design-release.md#the-release-procedure).
 
-**Files/grouping throughput.** [Medium, components: `lib/util.h`, `lib/util.c`,
-`bench/compare/`] Screen [control-byte probing](specs/design-control-bytes.md)
-against the current native engine: reject empty and mismatching tagged slots
-without reading their identifiers. The
-[investigation](bench/compare/recorded/files-grouping-design/README.md) records
-the rival gap; the [performance work](docs/todo-benchmark-performance.md)
-sets the 100-line runtime budget, correctness, measurement and rejection
-gates. Files/facts materialization and the remaining recursion RSS gaps stay
-visible there; this throughput experiment does not claim to remove them.
+**Files/grouping work reduction.** [Medium, components: `lib/eval.c`,
+`lib/plan.c`, `lib/relation.c`, `lib/import.c`, `bench/compare/`] Prototype
+[counted base projections](specs/design-grouped-count.md) that publish only a
+full grouped query's answer, then design input-work removal at the storage
+boundary. The [DuckDB source comparison and direct phases](bench/compare/recorded/duckdb-files-analysis/README.md)
+show why both are needed. The [performance work](docs/todo-benchmark-performance.md)
+sets the narrow ownership model, 1,000-line query budget, correctness and
+material-benefit gates, and the separate unary-index hypothesis for input.
 
 ## Engine
 

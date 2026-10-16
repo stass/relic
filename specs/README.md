@@ -48,8 +48,6 @@ runtime use from proposals and related work.
   secondary indexes, deltas and frontiers.
 * [Canonical membership locality](design-membership-locality.md) --
   derived hash tags, exact probing, owner choices, growth and storage costs.
-* [Identifier-table control bytes](design-control-bytes.md) -- occupancy and
-  fingerprints reject slots before reading their identifiers.
 
 **Pipeline**, in the order a program and its queries pass through it
 
@@ -79,6 +77,8 @@ runtime use from proposals and related work.
   the regular-expression matcher, and how computed values are interned.
 * [Aggregates](design-aggregates.md) -- group rules, folding in place, and
   aggregates in strata and in the Magic rewrite.
+* [Grouped count queries](design-grouped-count.md) -- private counted
+  projections of a base relation, with only the final answer published.
 * [Parallel evaluation](design-parallel.md) -- the worker pool, deferred
   and shared rounds over a frozen store, and the serial-order merge.
 * [Pending value compaction](design-pending-values.md) -- compact worker
