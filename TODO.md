@@ -20,11 +20,12 @@ of which `contrib/` holds only the homebrew formula, so
 [release procedure](specs/design-release.md#the-release-procedure).
 
 **Remaining engine-performance gaps.** [Medium, components: `lib/eval.c`,
-`lib/import.c`, `lib/facts.c`, `bench/compare/`] Files/facts throughput and
-serial closure time remain the next classes to choose between. The
-[performance work](docs/todo-benchmark-performance.md) defines the measurement
-and complexity gates. [Dense collection measurements](bench/compare/recorded/dense-rounds/README.md)
-retain the accepted change, its missed 90% RSS aim and the remaining rival gap.
+`lib/import.c`, `lib/facts.c`, `bench/compare/`] Decide the bounded serial
+positive-membership cache nominated by the
+[investigation](bench/compare/recorded/serial-seen/README.md), including its
+small-control and RSS costs, then investigate files/facts throughput. The
+[performance work](docs/todo-benchmark-performance.md) defines the production
+design, measurement and complexity gates.
 
 ## Engine
 

@@ -117,6 +117,9 @@ Relevant to [candidate ownership](../specs/design-dense-rounds.md#alternatives-n
 Relic does not implement this tree. Its failed mutex collector does not
 invalidate this synchronization design. The paper does not provide relic's
 serial occurrence order or establish the result of a relic prototype.
+Its traversal hints also address repeated sequential searches. A potential
+Relic use is a storage/index replacement for sparse or wider relations;
+the fixed-domain collector's measurements do not evaluate that alternative.
 
 ### Brie and dense membership — Related; external implementation
 
@@ -144,6 +147,21 @@ uses monotone task assignment and a bounded worker sequence. The shared-set
 papers motivate the ownership direction but do not prove this algorithm.
 The bounded domain and task-assignment invariants are part of the proof;
 measured performance applies to the recorded workloads and build policies.
+
+### Plan-local positive membership — Investigated; local method
+
+[Serial investigation](../bench/compare/recorded/serial-seen/README.md),
+[isolated prototype](../bench/compare/recorded/serial-seen/candidate.patch).
+
+A bitmap remembers tuples whose ordinary insertion has completed during one
+serial plan. An unset bit makes no absence claim, and append-only storage
+preserves each positive fact until the plan returns. This avoids pre-seeding
+and invalidation hooks. Typed coordinates use fixed pool spans; values
+assigned outside those spans remain ordinary misses. Stable batch compaction
+maps completion back to original occurrence order, including a refused row.
+The two-pair screen nominates this bounded cache for further validation;
+production runtime code does not use it. This is a local application of
+positive memoization, without a claimed originating paper.
 
 ## Maintaining this index
 
