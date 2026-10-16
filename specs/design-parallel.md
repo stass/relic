@@ -109,6 +109,15 @@ the common classification, reservation and application steps. Dense ranks
 contain no computed values or pointers, and introduce no concurrent writer
 to the frozen store.
 
+A [counted destination](design-grouped-count.md) uses the same general
+collector and deferred-round publication contract. Its original producer
+plan emits complete rows; the checked destination projects them to keys
+before ordinary pending-value normalization. Candidates retain each key's
+first occurrence and contribution count. The destination owns how duplicate
+contributions combine and reserves its canonical key relation and counts
+together. Dense presence/rank collection implements set semantics and is
+selected through the destination's capabilities.
+
 ## Invariants
 
 * From cursor preparation through the job's barrier, no relation, index,
@@ -338,7 +347,7 @@ at level zero and use the same batch and quantum resumption protocol.
 A full batch's destination differs: serially it is inserted;
 in a deferred round it is **screened**.
 
-### The two-stage screen
+### The two-stage set screen
 
 1. **Against the frozen store.** The batch is hashed and probed in the
    frozen canonical index, in the batch insertion's own overlapping passes.
@@ -352,6 +361,14 @@ in a deferred round it is **screened**.
    worker gathered earlier in the round, and so earlier in serial order; it
    is counted and dropped. Otherwise it is placed in the screen and appended,
    with its 64-bit hash, to the worker's **candidate buffer**.
+
+For counting, construction admits one complete producer round into an empty
+destination, so no contribution is removed by a preexisting stored key.
+A repeated worker key increases the first candidate's contribution without
+moving it. The source's certified single-scan bound limits the sum of all
+contributions. Ordinary set candidates retain one contribution, independent
+of how often the tuple was derived; the destination owns this distinction.
+Candidate storage is retained across executor batches and tasks.
 
 **The distinct-tuple bound.** The second stage keeps a worker's candidates
 proportional to its distinct new tuples rather than its derivations.
@@ -570,7 +587,9 @@ parts, each writing only what its stripe, task or worker owns.
    part *s* walks, task by task, the stripe-*s* candidates of each task's
    worker list and marks each *first* or *repeat* with a table keyed by
    target and tuple, counting each task's firsts. The firsts in task order
-   are exactly the tuples the serial evaluator inserts.
+   are exactly the tuples the serial evaluator inserts. A counted destination
+   combines later contributions into the first before discarding them;
+   each key's one stripe owns those updates.
 3. **Count** (worker 0). Each task's firsts get positions in its target's
    append, in task order; each target's new tuples are summed per stripe.
    The tuple limit and identifier space are asked of the exact total.

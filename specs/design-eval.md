@@ -165,9 +165,11 @@ lower execution boundary to preserve across returns.
 ### The executor does not insert
 
 EMIT carries the head terms, checked output arity and logical predicate,
-not a relation handle. Evaluation pairs that schema with its insertion or
-delivery destination and checks its arity before execution. Ordinary
-relation readers never interpret an EMIT as an input atom.
+not a relation handle. Evaluation pairs that schema with its insertion,
+delivery or [counted destination](design-grouped-count.md) and checks the
+input arity before execution. A counted destination projects complete EMIT
+rows to keys; it does not replan the producer or narrow its scratch.
+Ordinary relation readers never interpret an EMIT as an input atom.
 
 The executor returns when its batch is full and continues from the same
 place when called again; its caller takes each batch before resuming it.
@@ -176,6 +178,14 @@ interning, inserting under the limits, reporting, calling a row callback.
 So one executor serves every destination, the taker alone tells them apart,
 and the executor fails only by recording that it did -- which is what lets a
 worker run it over a store nothing writes.
+
+The ordinary batch publisher owns work accounting, notes, error rejection
+and pending-value publication. Set insertion and counting then consume
+canonical tuples through their checked destination. Counting owns an
+anonymous key relation and counts, with one reserve/apply contract for the
+pair. It adds no second interning path or serial query-replay policy.
+Deferred execution uses the same destination contract after its existing
+pending-value resolution and ordered merge.
 
 **Batching is invisible by construction.** Every view of a plan was resolved
 when the plan started: a member view ends at its delta's end, the member's
@@ -552,9 +562,12 @@ allocations, so a query may be destroyed after its context
 relation table, which is indexed by predicate, so `relic_destroy()` releases
 no answer relation: it never owned one.
 
-**The planner confirms the emit target fits**: the relation an `EMIT` writes
-is handed to it, and its arity must equal the rule's head arity, or planning
-reports an internal error instead of the plan reading past the head.
+**Pairing confirms the emit target fits.** Planning derives EMIT's schema
+from the rule without a physical destination. Evaluation checks its arity
+against the destination's input schema before execution. A key projection
+also checks its column map and stored arity; scratch remains sized for the
+original EMIT. A mismatch reports an internal error before a plan can read
+or write beyond its row.
 
 **`$q<serial>` is a display name.** The serial counts the queries a context
 has compiled, the program's and prepared ones interleaved, a rejected query
