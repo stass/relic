@@ -206,10 +206,14 @@ typedef struct relic_config relic_config_t;
  * thread alone.  A round is shared only when it holds enough work to repay
  * the threads' coordination, and a table only among eight threads or
  * more, and only when reading its first 2 MiB does not reach its end.
- * The answers, the relations, the values, every diagnostic and every
- * counter but parallel_rounds are the same whatever the number of
- * threads; only how much of its stream a refused import has read may
- * differ.  A thread that cannot be started is not an error: the operation
+ * The answers, the relations, the values and diagnostics are the same
+ * whatever the number of threads; counters other than parallel_rounds
+ * agree on successful completion. Statistics read inside callbacks can
+ * differ because serial batches and shared rounds publish at different
+ * points. Interruption depends on timing, including when requested by a
+ * note callback, and can leave different retained prefixes and counters.
+ * How much of its stream a refused import has read may also differ.
+ * A thread that cannot be started is not an error: the operation
  * uses those that could be.  A library built without threads accepts the
  * field and runs everything on the calling thread.
  *

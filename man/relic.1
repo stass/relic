@@ -474,10 +474,14 @@ threads, so a program of small rounds runs as it would on one thread, and a
 table is shared only among eight threads or more, only when it is read
 from a regular file, and only when reading its first 2 MiB does not reach
 its end.
-The answers, their order, every diagnostic and every counter
+The answers, their order and diagnostics are the same whatever the number
+of threads.
+On successful completion, every counter
 .Fl X Cm stats
-writes but the parallel rounds are the same whatever the number of threads;
-only how much of its table a refused import has read may differ.
+writes but the parallel rounds agrees across thread counts.
+Interruption depends on timing and can leave different retained prefixes
+and counters.
+How much of its table a refused import has read may also differ.
 .Ar threads
 is at most 256.
 .It Fl l Ar limit Ns = Ns Ar value

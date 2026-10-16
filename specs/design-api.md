@@ -577,8 +577,13 @@ identical classes, at every thread count
 failure happened, which is a function of the program, the limits and the
 allocator's answers. A result's identifiers are assigned in the order its
 rows are delivered, so the same answer collected twice holds the same
-identifiers. An interrupt is the one input that depends on timing, and it
-only shortens a run.
+identifiers. Counters other than `parallel_rounds` agree on successful
+completion. Statistics observed inside callbacks can reflect different
+publication points: a shared round reports notes after merging, while serial
+execution reports them at its batch boundaries. An interrupt is the one input
+that depends on timing, including when requested from a note callback. It can
+leave different retained prefixes and counters, and never causes a published
+round to be replayed.
 
 ## Alternatives not taken
 

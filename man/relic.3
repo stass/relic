@@ -353,11 +353,15 @@ A context forked while one of its operations runs is refused in the child
 as it would be in the parent until that operation returns, which in the
 child it never does.
 A round is shared only when it holds enough work to repay the threads'
-coordination, and the answers, the relations, the values, every diagnostic
-and every counter but
+coordination, and the answers, the relations, the values and diagnostics
+are the same whatever the number of threads.
+Counters other than
 .Fa parallel_rounds
-are the same whatever the number of threads; only how much of its stream a
-refused import has read may differ.
+agree on successful completion.
+Statistics observed inside callbacks can reflect different publication points.
+Interruption depends on timing, including when requested from a note callback,
+and can leave different retained prefixes and counters.
+How much of its stream a refused import has read may also differ.
 A thread that cannot be started is not an error: the operation uses those
 that could be.
 A library built without threads accepts the field and runs everything on
