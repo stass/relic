@@ -10,44 +10,51 @@ the intervals are 0.256/0.146 against 0.0385/0.026. These are diagnostic
 intervals, with their stated boundaries and limitations. Query fusion alone
 cannot close an import floor larger than the rival's whole command.
 
-## Remove projected-row materialization
+## Share publication before adding counting
 
-Prototype the [counted base projection](../specs/design-grouped-count.md).
-One complete grouped-count query owns its producer plan and private key/count
-collector, and publishes only its answer. The first implementation keeps
-the ordinary expression executor and its 64-row batches. Assess complexity
-through the complete ownership and execution model, including private state,
-worker coordination, retry and publication. Compare the obligations introduced
-with those removed from the evaluator; source size is supporting evidence,
-not a ceiling. A larger module is justified when it simplifies that model.
-General source replacement or a second expression executor requires a design
-that demonstrates its system-wide benefit and the obligations it eliminates.
+The [private-collector experiment](../bench/compare/recorded/counted-projection/README.md)
+meets the files target but fails its controls: delayed interning repeats
+long-string work, and a private capacity cutoff causes discarded collection
+and replay. Implement the [counted destination](../specs/design-grouped-count.md)
+through the ordinary evaluation protocol, removing those obligations.
 
-First prove the work removal: no `kind`/group/result-predicate materialization,
-no fold index over those rows, and no per-row worker candidate retention.
-For files scale 8, private grouped state should correspond to 1,200 keys
-rather than 1,799,657 producer tuples. Keep partials across batches and merge
-their ordered first-occurrence lists; publication preserves value IDs and
-answer order. Counters report the transformed work and are checked across
-worker counts, not required to mimic work the ordinary evaluator performs.
+First establish one checked destination boundary for ordinary batch
+publication and tuple consumption. Keep the actual serial executor continuation
+and the existing deferred-round resolver, ordering and retry. Review the
+before/after ownership model across evaluation, workers, merging and storage;
+a wrapper around separate publication paths does not qualify. Ordinary set,
+dense and streaming paths retain their semantics and candidate footprint.
 
-Use two alternating complete-command pairs at one and sixteen workers, plus
-high-cardinality keys, duplicate-heavy input, long/computed keys and a query
-outside the admitted shape. Include an ordinary recursion control for the
-planner API cleanup. Compare full answers with independent oracles and the
-ordinary query strategy; verify IDs/order, explicit-limit refusal, later
-queries of intermediate predicates, fault recovery and actual shared work.
+Then add the counted destination: an anonymous canonical key relation with
+counts, fed by the certified original producer. Project emitted rows without
+replanning away source traversal. Shared workers combine key multiplicities
+inside the existing candidate and merge protocol. Final count rows use one
+caller-side publication stream at every worker count. Remove private typed-key
+storage, separate value publication, capacity cutoffs and whole-query replay.
 
-The adoption aim is at least 20% less complete-command time in a files cell
-and at least 35% lower files peak RSS at sixteen workers, with no reproducible
-default-path or control regression. These are gates, not forecast gains.
-A result resembling a small hash-probe improvement does not justify this
-mechanism. A useful screen proceeds to decisive interleaved measurement,
+Prove that files scale 8 retains 1,200 keys instead of 1,799,657 producer
+tuples, with no named P/G/Q storage, fold index or per-P-row worker candidates.
+Check complete answers, successful IDs/order, transformed counters across
+worker counts, explicit-limit refusal, later intermediate queries, constant
+keys, repeats across tasks, paired key/count reservation, diagnostics and
+identifier-ceiling failures. Verify actual worker participation. Distinguish
+the counted-result failure contract from the eliminated fold's batch fences.
+
+Reuse the frozen fixtures, oracles and baseline for two alternating pairs
+per screen cell: files at one/sixteen workers, high-cardinality,
+duplicate-heavy and long/computed keys, plus ordinary joins and recursion.
+The control losses must disappear through the shared mechanism, without a
+key-size policy or a growing collection of eligibility exceptions.
+
+The adoption gates remain at least 20% less complete-command time in a files
+cell and 35% lower files peak RSS at sixteen workers, with no reproducible
+default-path or control regression. Source size is supporting evidence;
+architectural review decides whether concepts and coordination obligations
+are justified. A useful screen proceeds to decisive interleaved measurement,
 normal/ASan/UBSan/TSan suites and a supported FreeBSD comparison under the
-[measurement protocol](todo-performance-measurements.md). Otherwise remove
-the prototype. A different design must explain how it addresses the measured
-cost and changes the system's concepts and obligations; adding exceptions or
-another execution mode is not justified by a target-cell win alone.
+[measurement protocol](todo-performance-measurements.md). If the common
+boundary does not simplify ownership or the implementation fails those
+measurements, remove it rather than add another execution protocol.
 
 ## Remove input work at the storage boundary
 

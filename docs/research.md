@@ -122,19 +122,27 @@ about individual features. Relic does not adopt DuckDB's vector engine,
 spill manager or string representation. The relevant idea is to consume a
 projection into group state before retaining its rows.
 
-### A query-owned counted projection — Proposed; local adaptation
+### A counted destination sharing evaluation — Proposed; local adaptation
 
 [Design](../specs/design-grouped-count.md),
-[evidence](../bench/compare/recorded/duckdb-files-analysis/README.md).
+[source comparison](../bench/compare/recorded/duckdb-files-analysis/README.md),
+[private-collector experiment](../bench/compare/recorded/counted-projection/README.md).
 
-A full count query over one base scan owns its private collector and final
-answer. An existing emitted-tuple distinctness proof permits one count
+A full count query over one base scan owns a canonical key/count destination
+and final answer. The existing emitted-tuple distinctness proof permits one
 increment per producer row under Datalog set semantics. No named predicate
-is rebound to a summary. Monotone source-range assignment makes each
-worker's first-group list ordered; merging those lists preserves producer
-value/answer order without retaining all producer rows. The narrow grammar,
-private-retry protocol and first-occurrence publication proof are local
-obligations, not results established by the DuckDB reference.
+is rebound to a summary. The intended consumer shares ordinary value
+publication and deferred-round resolution, combining multiplicities in the
+existing first-occurrence merge. Its producer plan remains intact so key
+projection cannot accidentally replace generation with an existence test.
+
+A measured private collector reduced files memory and elapsed time, but
+withholding interning repeated long-string work and capacity refusal added
+replay cost. Both controls lost in all ten confirmation pairs. That model
+is not selected. Shared publication aims to remove its extra value and retry
+states; it remains a design to validate, not a measured result. The admission,
+value-order and failure proofs are local obligations, not results established
+by the DuckDB reference.
 
 ### Frozen reads and ordered publication — Used; local method
 

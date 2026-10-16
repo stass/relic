@@ -112,7 +112,7 @@ The executor relies on these without checking them:
   head terms, arity and the logical predicate, with no relation pointer.
   The planner derives the schema from the rule without a physical target.
   Evaluation checks its arity when pairing it with an insertion, delivery or
-  [private counted-key consumer](design-grouped-count.md).
+  [counted destination](design-grouped-count.md) with a checked key projection.
 * **Every slot a bound term, a postfix program or a fold reads is bound by
   an earlier operation (a generator, an `ASSIGN` or an `AGGREGATE`) or by
   an earlier column of the same operation.**

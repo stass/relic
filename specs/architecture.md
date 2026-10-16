@@ -415,10 +415,17 @@ See [design-planning.md](design-planning.md) and
 The executor (`lib/exec.c`) runs a plan with an explicit loop and no C
 recursion, and hands its derivations back in batches; it never inserts.
 EMIT carries an output schema with no relation pointer. Planning derives
-that schema from the rule, without a physical destination. Its consumer owns
-the insertion, delivery or private counted-key destination and checks that
-the arity agrees. A
-recursive component -- a set of mutually recursive predicates, its
+that schema from the rule, without a physical destination. The evaluator owns
+batch diagnostics and value publication; a checked destination consumes
+canonical tuples for insertion, delivery or counting. A counted destination
+owns its anonymous key relation and counts together. Its producer retains its
+original generating plan, projecting only emitted rows. Shared evaluation uses
+the ordinary deferred-round resolver, ordered merge and serial retry for both
+set and counted destinations; it does not add a separate value namespace or
+query-replay protocol. This keeps publication and failure ordering independent
+of tuple storage while each destination owns its reserve/apply contract.
+
+A recursive component -- a set of mutually recursive predicates, its
 members -- is evaluated semi-naively (`lib/eval.c`): each round runs rule
 variants in which one recursive literal reads the previous round's delta,
 so every new derivation uses a new tuple and each is made exactly once.
@@ -621,16 +628,18 @@ facts.
 
 Before the ordinary completion walk, a full
 [grouped-count query over a projected base relation](design-grouped-count.md)
-can collect keys and counts privately and publish only its final answer.
-Its one producer plan runs in the ordinary executor. The original predicates
-retain their definitions and acquire no summary bindings; the per-query
-owner is the only consumer of the private collector. This removes the need
-to maintain a program-wide inventory of readers. Eligibility is revalidated
-per run and keeps explicit resource limits on ordinary execution. First
-producer occurrence and head-column order determine value publication and
-answer order. Counters describe the work performed, so intermediate tuple
-and storage totals can differ from ordinary materialization. The program is
-not marked materialized by this strategy.
+run its producer into a counted destination and retain only keys and counts.
+The original predicates retain their definitions and acquire no summary
+bindings; the query owns the destination, so no program-wide reader inventory
+is needed. Eligibility is revalidated per run and keeps explicit resource
+limits on ordinary execution. Ordinary publication of producer values precedes
+count-result values. First producer occurrence and head-column order preserve
+successful value IDs and answer order. Final count rows pass through the same
+caller-side batch publisher at every worker count; resource-failure prefixes
+follow that counted-result stream rather than the eliminated fold's read
+quantum. Counters describe the work performed, so intermediate tuple and
+storage totals can differ from ordinary materialization. The program is not
+marked materialized by this strategy.
 
 **Whole-program evaluation** computes the complete stratified fixed point
 and runs the query over it. It is used:

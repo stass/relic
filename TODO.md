@@ -20,13 +20,14 @@ of which `contrib/` holds only the homebrew formula, so
 [release procedure](specs/design-release.md#the-release-procedure).
 
 **Files/grouping work reduction.** [Medium, components: `lib/eval.c`,
-`lib/plan.c`, `lib/relation.c`, `lib/import.c`, `bench/compare/`] Prototype
-[counted base projections](specs/design-grouped-count.md) that publish only a
-full grouped query's answer, then design input-work removal at the storage
-boundary. The [DuckDB source comparison and direct phases](bench/compare/recorded/duckdb-files-analysis/README.md)
-show why both are needed. The [performance work](docs/todo-benchmark-performance.md)
-sets the query ownership model, architectural complexity review, correctness
-and material-benefit gates, and the separate unary-index hypothesis for input.
+`lib/plan.c`, `lib/relation.c`, `lib/import.c`, `bench/compare/`] Share ordinary
+value publication and deferred-round handling with a
+[counted destination](specs/design-grouped-count.md), removing the private
+collector's duplicate value work and replay policy. The
+[collector measurements](bench/compare/recorded/counted-projection/README.md)
+and [DuckDB comparison](bench/compare/recorded/duckdb-files-analysis/README.md)
+motivate the [performance work](docs/todo-benchmark-performance.md), which sets
+architectural and measured adoption gates before a separate input-storage design.
 
 ## Engine
 

@@ -21,8 +21,9 @@ Related: [language](language.md#aggregates),
 [front end](design-frontend.md).
 
 A [full grouped-count query over a projected base](design-grouped-count.md)
-can consume its producer into a private collector and publish just the
-answer. The compiler retains ordinary rules for every predicate; this
+can consume its producer into a counted destination sharing ordinary value
+publication, and retain only keys, counts and the answer. The compiler
+retains ordinary rules for every predicate; this
 document describes their materialization and fold behavior.
 
 ## Model

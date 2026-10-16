@@ -77,8 +77,8 @@ runtime use from proposals and related work.
   the regular-expression matcher, and how computed values are interned.
 * [Aggregates](design-aggregates.md) -- group rules, folding in place, and
   aggregates in strata and in the Magic rewrite.
-* [Grouped count queries](design-grouped-count.md) -- private counted
-  projections of a base relation, with only the final answer published.
+* [Grouped count queries](design-grouped-count.md) -- counted destinations
+  sharing ordinary value publication and deferred-round handling.
 * [Parallel evaluation](design-parallel.md) -- the worker pool, deferred
   and shared rounds over a frozen store, and the serial-order merge.
 * [Pending value compaction](design-pending-values.md) -- compact worker
