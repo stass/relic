@@ -46,9 +46,10 @@
  * returns.  A round of evaluation counts in `round_bytes` the buffers it
  * holds for its own length -- the strings its plans compute, and, when its
  * insertions wait for its end, what it has derived -- from the moment they
- * grow until the round ends, when they are released.  So the account is a
- * bound on what the program's stores hold and on what running the program
- * does, and not on the program as it was written.
+ * grow until the round ends, when they are released. A serial plan's
+ * optional membership bitmap uses this part for its shorter plan lifetime.
+ * So the account bounds what the program's stores hold and what running it
+ * does, excluding the program as it was written.
  *
  * Every holder asks relic_account_exceeds() before it grows, against the
  * whole total, so the limit bounds the sum and no holder can spend what
@@ -78,7 +79,7 @@ struct relic_account {
 	size_t	pool_bytes;	/* the symbol pool */
 	size_t	predtab_bytes;	/* the predicate table */
 	size_t	arena_bytes;	/* chunks of the charged arenas */
-	relic_atomic_size_t round_bytes; /* buffers of a deferred round */
+	relic_atomic_size_t round_bytes; /* round and serial-plan scratch */
 	bool	refused;
 };
 

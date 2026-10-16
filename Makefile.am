@@ -209,7 +209,8 @@ RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
 	tests/unit/test_plan tests/unit/test_pred tests/unit/test_query \
 	tests/unit/test_regex tests/unit/test_relation tests/unit/test_round \
 	tests/unit/test_rule tests/unit/test_stratify tests/unit/test_strfn \
-	tests/unit/test_symbol tests/unit/test_text tests/unit/test_util \
+	tests/unit/test_serial_seen tests/unit/test_symbol \
+	tests/unit/test_text tests/unit/test_util \
 	tests/unit/test_value
 
 ## test_api links the installed form of the library rather than the
@@ -248,6 +249,15 @@ tests_unit_test_diag_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_eval_SOURCES = tests/unit/test_eval.c tests/unit/harness.c
 tests_unit_test_eval_LDADD = librelic_internal.la $(LTLIBOBJS)
+
+## The serial-cache boundary is private to eval.c. This test includes it to
+## check compacted refusal prefixes and optional allocation failure without
+## exposing a runtime test interface. Suffix substitution excludes that one
+## evaluator object; every other module is the ordinary built object.
+tests_unit_test_serial_seen_SOURCES = tests/unit/test_serial_seen.c \
+	tests/unit/harness.c
+tests_unit_test_serial_seen_LDADD = \
+	$(librelic_internal_la_OBJECTS:lib/eval.lo=) $(LTLIBOBJS)
 
 tests_unit_test_exec_SOURCES = tests/unit/test_exec.c tests/unit/harness.c
 tests_unit_test_exec_LDADD = librelic_internal.la $(LTLIBOBJS)

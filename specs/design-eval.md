@@ -199,6 +199,11 @@ reported before the batch is inserted), and a memory limit reached up to a
 batch buffer's size earlier, since the batch is charged to the evaluation
 arena.
 
+Serial insertion can screen confirmed duplicates through a
+[plan-owned positive bitmap](design-serial-membership.md). Its unset bits
+make no absence claim, and unknown tuples keep their order through the
+ordinary batch inserter. It releases its evidence when that plan ends.
+
 ### Zero in the frame means absent
 
 The executor never interns, because interning writes the context. A

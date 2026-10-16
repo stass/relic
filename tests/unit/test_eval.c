@@ -58,6 +58,7 @@
 #define	SCENARIO_SNAPSHOT	"a naive pass walks a chain one edge further"
 #define	SCENARIO_BATCHES	"a plan reads none of its own batches"
 #define	SCENARIO_UNREACHED	"a rule no query reaches costs it no memory"
+#define	SCENARIO_SERIAL_CACHE	"serial cache ownership follows execution"
 #define	SCENARIO_SHARED		"a round is shared when it repays the threads"
 
 /*
@@ -172,6 +173,21 @@ struct diag_log {
 	size_t	warnings;
 };
 
+enum serial_cache_exit {
+	SERIAL_CACHE_COMPLETE,
+	SERIAL_CACHE_ERROR,
+	SERIAL_CACHE_INTERRUPT
+};
+
+typedef struct serial_cache_observation serial_cache_observation_t;
+
+struct serial_cache_observation {
+	relic_t		*ctx;
+	size_t		 charged;
+	size_t		 notes;
+	bool		 interrupt;
+};
+
 /*
  * The RELIC_F_ flags every context a scenario creates is given, which is how
  * main() runs the scenarios under each evaluation strategy in turn.
@@ -196,6 +212,12 @@ static bool	 answers_are(const char *scenario, relic_t *ctx,
 static relic_t	*context_with(const char *program, diag_log_t *log);
 static relic_t	*context_flagged(const char *program, diag_log_t *log,
 		    unsigned int flags);
+static void	 observe_serial_cache(void *argument,
+		    enum relic_diag_level level, const relic_location_t *where,
+		    const char *message);
+static void	 serial_cache_execution(enum serial_cache_exit ending);
+static void	 serial_cache_grid_is_intact(relic_t *ctx);
+
 static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
@@ -1627,6 +1649,146 @@ rounds_are_shared_when_they_repay_it(void)
 	free(layered);
 }
 
+/*
+ * The body uses arithmetic but no string scratch. Its diagnostic callback
+ * can therefore observe the optional bitmap's charge through the ordinary
+ * evaluator object, including just before failure or interruption unwinds it.
+ */
+static void
+observe_serial_cache(void *argument, enum relic_diag_level level,
+    const relic_location_t *where RELIC_UNUSED,
+    const char *message RELIC_UNUSED)
+{
+	serial_cache_observation_t *observation;
+	size_t charged;
+
+	observation = argument;
+	charged = relic_atomic_size_load(&observation->ctx->account.round_bytes);
+	if (charged > observation->charged)
+		observation->charged = charged;
+	if (level == RELIC_NOTE) {
+		observation->notes++;
+		if (observation->interrupt)
+			relic_interrupt(observation->ctx);
+	}
+}
+
+static void
+serial_cache_grid_is_intact(relic_t *ctx)
+{
+	relic_relation_t *relation;
+	relic_pred_id_t predicate;
+	relic_dom_t tuple[2];
+	size_t i;
+
+	if (relic_pred_intern(ctx, "p", 1, 2, NULL, &predicate) != 0) {
+		check(false, SCENARIO_SERIAL_CACHE, "find the target predicate");
+		return;
+	}
+	relation = relic_relation_read(ctx, predicate);
+	if (relation == NULL) {
+		check(false, SCENARIO_SERIAL_CACHE, "the target remains readable");
+		return;
+	}
+	check(relic_relation_count(relation) == 4096, SCENARIO_SERIAL_CACHE,
+	    "duplicates add no tuples");
+	for (i = 0; i < 4096; i++) {
+		tuple[0] = relic_value_find_integer(ctx, i / 64);
+		tuple[1] = relic_value_find_integer(ctx, i % 64);
+		if (relic_relation_find(relation, tuple) != i + 1) {
+			checkf(false, SCENARIO_SERIAL_CACHE,
+			    "tuple (%zu,%zu) keeps identifier %zu",
+			    i / 64, i % 64, i + 1);
+			break;
+		}
+	}
+}
+
+static void
+serial_cache_execution(enum serial_cache_exit ending)
+{
+	serial_cache_observation_t observation;
+	relic_stats_t stats[2];
+	relic_config_t config;
+	relic_t *ctx;
+	char program[65536];
+	size_t length, i, j, run;
+	int written, status;
+
+	length = 0;
+	for (i = 0; i < 64; i++) {
+		for (j = 0; j < 64; j++) {
+			written = snprintf(program + length,
+			    sizeof(program) - length, "p(%zu,%zu).\n", i, j);
+			if (written < 0 ||
+			    (size_t)written >= sizeof(program) - length) {
+				check(false, SCENARIO_SERIAL_CACHE, "the grid fits");
+				return;
+			}
+			length += (size_t)written;
+		}
+	}
+	written = snprintf(program + length, sizeof(program) - length,
+	    "v(a). v(0). v(1). %s "
+	    "p(X,Y) :- p(X,Y), v(Z), Z + 1 > 0.",
+	    ending == SERIAL_CACHE_ERROR ? "v(9223372036854775807)." : "");
+	if (written < 0 || (size_t)written >= sizeof(program) - length) {
+		check(false, SCENARIO_SERIAL_CACHE, "the rule fits");
+		return;
+	}
+
+	for (run = 0; run < 2; run++) {
+		bzero(&config, sizeof(config));
+		config.flags = RELIC_F_NOTE_MIXED;
+		config.max_memory = run == 0 ? 0 : 64 * 1024 * 1024;
+		ctx = relic_create_config(&config);
+		if (ctx == NULL) {
+			check(false, SCENARIO_SERIAL_CACHE, "create the context");
+			return;
+		}
+		bzero(&observation, sizeof(observation));
+		observation.ctx = ctx;
+		observation.interrupt = ending == SERIAL_CACHE_INTERRUPT;
+		relic_diag_set(ctx, observe_serial_cache, &observation);
+		if (relic_load_string(ctx, "serial-cache.dl", program) != 0) {
+			check(false, SCENARIO_SERIAL_CACHE, "load the program");
+			relic_destroy(ctx);
+			return;
+		}
+		status = relic_materialize(ctx);
+		check((status == 0) == (ending == SERIAL_CACHE_COMPLETE),
+		    SCENARIO_SERIAL_CACHE, "execution has the expected outcome");
+		check(observation.notes == 1, SCENARIO_SERIAL_CACHE,
+		    "the running plan reports its mixed operand once");
+		check((observation.charged > 0) == (run == 0),
+		    SCENARIO_SERIAL_CACHE, "only the unlimited run owns a bitmap");
+		check(relic_atomic_size_load(&ctx->account.round_bytes) == 0,
+		    SCENARIO_SERIAL_CACHE, "every execution exit releases scratch");
+		if (ending == SERIAL_CACHE_ERROR)
+			check(relic_error_class(ctx) == RELIC_ERROR_EVALUATION,
+			    SCENARIO_SERIAL_CACHE, "arithmetic failure is preserved");
+		if (ending == SERIAL_CACHE_INTERRUPT)
+			check(relic_error_class(ctx) == RELIC_ERROR_INTERRUPTED,
+			    SCENARIO_SERIAL_CACHE, "the note can interrupt execution");
+		relic_stats(ctx, &stats[run]);
+		if (status == 0)
+			serial_cache_grid_is_intact(ctx);
+		relic_destroy(ctx);
+	}
+	check(stats[0].iterations == stats[1].iterations &&
+	    stats[0].derivations == stats[1].derivations &&
+	    stats[0].tuples_inserted == stats[1].tuples_inserted &&
+	    stats[0].tuples_scanned == stats[1].tuples_scanned &&
+	    stats[0].tuples_looked_up == stats[1].tuples_looked_up &&
+	    stats[0].parallel_rounds == stats[1].parallel_rounds &&
+	    stats[0].tuples == stats[1].tuples &&
+	    stats[0].storage_bytes == stats[1].storage_bytes &&
+	    stats[0].symbol_values == stats[1].symbol_values &&
+	    stats[0].string_values == stats[1].string_values &&
+	    stats[0].integer_values == stats[1].integer_values,
+	    SCENARIO_SERIAL_CACHE, "cache and ordinary insertion keep work and storage");
+}
+
 int
 main(void)
 {
@@ -1642,6 +1804,9 @@ main(void)
 	run_everything();
 
 	rounds_are_shared_when_they_repay_it();
+	serial_cache_execution(SERIAL_CACHE_COMPLETE);
+	serial_cache_execution(SERIAL_CACHE_ERROR);
+	serial_cache_execution(SERIAL_CACHE_INTERRUPT);
 
 	return (check_summary("test_eval"));
 }

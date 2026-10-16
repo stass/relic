@@ -424,6 +424,13 @@ What each literal may see is fixed when its plan starts, so when a batch is
 inserted is invisible to the plan. The naive fixed point is kept behind
 `-X naive` as the differential oracle, sharing everything but the loop.
 
+A serial plan may keep a bounded [positive-membership bitmap](design-serial-membership.md)
+for its insertion target. Only completed ordinary insertions teach it; every
+miss still goes through the relation store. Append-only storage keeps those
+positives valid for the plan's lifetime without maintenance by other writers.
+The bitmap is charged temporary scratch and is declined under a finite
+memory limit, preserving the ordinary refusal boundary.
+
 A query whose plan derives each row exactly once, and computes and folds
 nothing, streams its rows to the caller unless a tuple or memory limit is
 set; otherwise its answer is gathered in a relation the query owns. Either

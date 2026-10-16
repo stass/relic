@@ -112,6 +112,24 @@
  */
 
 /*
+ * Positive membership evidence for one serial plan and its fixed target.
+ * An unset bit says nothing. Only completed ordinary insertions set bits,
+ * and append-only storage keeps those facts true until the plan returns.
+ */
+#define	SERIAL_SEEN_MIN_TUPLES	4096u
+#define	SERIAL_SEEN_MAX_BYTES	(4u * 1024u * 1024u)
+
+typedef struct relic_serial_seen relic_serial_seen_t;
+
+struct relic_serial_seen {
+	uint8_t		*bits;
+	size_t		 integers;
+	size_t		 symbols;
+	size_t		 width;
+	size_t		 bytes;
+};
+
+/*
  * How a component's relations are brought to their fixed point, decided when
  * the component is planned so that evaluating it runs exactly what was
  * planned for it.
@@ -483,7 +501,7 @@ static void	 decode_row(const relic_t *ctx, const relic_dom_t *tuple,
 static void	 deliver_batch(relic_evaluation_t *eval,
 		    const relic_row_sink_t *sink, uint16_t arity);
 static int	 insert_batch(relic_evaluation_t *eval,
-		    relic_relation_t *relation);
+		    relic_relation_t *relation, relic_serial_seen_t *seen);
 static relic_pending_t *make_pending_room(relic_evaluation_t *eval);
 static int	 fit_scratch(relic_evaluation_t *eval,
 		    const relic_plan_t *plan);
@@ -491,7 +509,14 @@ static void	 set_delta(relic_evaluation_t *eval, relic_relation_t *member,
 		    relic_tuple_range_t delta);
 static int	 take_batch(relic_evaluation_t *eval,
 		    const relic_rule_t *rule,
-		    const relic_emit_target_t *target);
+		    const relic_emit_target_t *target, relic_serial_seen_t *seen);
+static void	 serial_seen_open(relic_evaluation_t *eval,
+		    const relic_emit_target_t *target, relic_serial_seen_t *seen);
+static size_t	 serial_seen_coordinate(const relic_serial_seen_t *seen,
+		    relic_dom_t value);
+static int	 serial_seen_insert(relic_evaluation_t *eval,
+		    relic_relation_t *relation, relic_serial_seen_t *seen,
+		    bool *added, size_t *completedp);
 static void	 take_counters(relic_t *ctx, relic_scratch_t *scratch);
 static int	 insert_seed(relic_evaluation_t *eval,
 		    const relic_rule_t *rule, relic_relation_t *relation);
@@ -889,13 +914,130 @@ deliver_batch(relic_evaluation_t *eval, const relic_row_sink_t *sink,
 }
 
 /*
+ * The optional bitmap belongs to this plan, never its relation. Bounds keep
+ * setup small relative to the target. A finite memory limit declines it so
+ * scratch cannot move the ordinary insertion's refusal boundary.
+ */
+static void
+serial_seen_open(relic_evaluation_t *eval, const relic_emit_target_t *target,
+    relic_serial_seen_t *seen)
+{
+	size_t cells;
+	size_t bytes;
+
+	bzero(seen, sizeof(*seen));
+	if (target->rows.callback != NULL || target->relation->arity != 2 ||
+	    relic_relation_count(target->relation) < SERIAL_SEEN_MIN_TUPLES ||
+	    relic_limit_set(eval->ctx->account.limit))
+		return;
+
+	relic_value_spans(eval->ctx, &seen->integers, &seen->symbols);
+	seen->width = relic_saturating_sum(seen->integers,
+	    relic_saturating_product(2, seen->symbols));
+	cells = relic_saturating_product(seen->width, seen->width);
+	if (cells == 0 || cells == SIZE_MAX)
+		return;
+	bytes = cells / 8 + (cells % 8 != 0);
+	if (bytes > SERIAL_SEEN_MAX_BYTES ||
+	    bytes > relic_relation_count(target->relation))
+		return;
+	if (!relic_account_charge_round(&eval->ctx->account, bytes))
+		return;
+	seen->bits = calloc(bytes, 1);
+	if (seen->bits == NULL) {
+		relic_account_release_round(&eval->ctx->account, bytes);
+		return;
+	}
+	seen->bytes = bytes;
+}
+
+/* Fixed typed spans stay disjoint as later interning appends values. */
+static size_t
+serial_seen_coordinate(const relic_serial_seen_t *seen, relic_dom_t value)
+{
+	size_t index;
+
+	index = value & RELIC_DOM_INDEX_MASK;
+	if (index == 0)
+		return (SIZE_MAX);
+	switch (value & RELIC_DOM_TYPE_MASK) {
+	case RELIC_DOM_INTEGER:
+		if (index <= seen->integers)
+			return (index - 1);
+		break;
+	case RELIC_DOM_SYMBOL:
+		if (index <= seen->symbols)
+			return (seen->integers + index - 1);
+		break;
+	case RELIC_DOM_STRING:
+		if (index <= seen->symbols)
+			return (seen->integers + seen->symbols + index - 1);
+		break;
+	}
+	return (SIZE_MAX);
+}
+
+/*
+ * Compact unknown tuples without changing their order. Bits are learned only
+ * after ordinary insertion succeeds. A refusal maps back to its original
+ * position, so cached duplicates after that position are not counted either.
+ */
+static int
+serial_seen_insert(relic_evaluation_t *eval, relic_relation_t *relation,
+    relic_serial_seen_t *seen, bool *added, size_t *completedp)
+{
+	relic_dom_t unknown[2 * RELIC_INSERT_BATCH];
+	size_t cells[RELIC_INSERT_BATCH];
+	size_t positions[RELIC_INSERT_BATCH];
+	bool inserted[RELIC_INSERT_BATCH];
+	const relic_dom_t *tuple;
+	size_t original_count;
+	size_t miss_count;
+	size_t miss_completed;
+	size_t cell, i, left, right;
+	int status;
+
+	original_count = eval->scratch.batch_count;
+	assert(original_count <= RELIC_INSERT_BATCH);
+	bzero(added, original_count * sizeof(*added));
+	miss_count = 0;
+	for (i = 0; i < original_count; i++) {
+		tuple = &eval->scratch.batch[2 * i];
+		left = serial_seen_coordinate(seen, tuple[0]);
+		right = serial_seen_coordinate(seen, tuple[1]);
+		cell = left == SIZE_MAX || right == SIZE_MAX ? SIZE_MAX :
+		    left * seen->width + right;
+		cells[i] = cell;
+		if (cell != SIZE_MAX &&
+		    (seen->bits[cell / 8] & (1U << (cell % 8))) != 0)
+			continue;
+		positions[miss_count] = i;
+		bcopy(tuple, &unknown[2 * miss_count], 2 * sizeof(*tuple));
+		miss_count++;
+	}
+
+	status = relic_relation_insert_batch(eval->ctx, relation, unknown,
+	    miss_count, inserted, &miss_completed);
+	for (i = 0; i < miss_completed; i++) {
+		added[positions[i]] = inserted[i];
+		cell = cells[positions[i]];
+		if (cell != SIZE_MAX)
+			seen->bits[cell / 8] |= 1U << (cell % 8);
+	}
+	assert(status == 0 || miss_completed < miss_count);
+	*completedp = status == 0 ? original_count : positions[miss_completed];
+	return (status);
+}
+
+/*
  * Insert the batch into `relation`, counting a derivation for each tuple
  * whose insertion completed and noting which were new, and empty it.
  * Returns -1 when an insertion was refused, which the relation store has
  * reported.
  */
 static int
-insert_batch(relic_evaluation_t *eval, relic_relation_t *relation)
+insert_batch(relic_evaluation_t *eval, relic_relation_t *relation,
+    relic_serial_seen_t *seen)
 {
 	bool added[RELIC_INSERT_BATCH];
 	relic_scratch_t *scratch;
@@ -907,8 +1049,12 @@ insert_batch(relic_evaluation_t *eval, relic_relation_t *relation)
 	if (scratch->batch_count == 0)
 		return (0);
 
-	status = relic_relation_insert_batch(eval->ctx, relation,
-	    scratch->batch, scratch->batch_count, added, &completed);
+	if (seen->bits != NULL)
+		status = serial_seen_insert(eval, relation, seen, added,
+		    &completed);
+	else
+		status = relic_relation_insert_batch(eval->ctx, relation,
+		    scratch->batch, scratch->batch_count, added, &completed);
 
 	for (i = 0; i < completed; i++)
 		count_derivation(eval, added[i]);
@@ -963,7 +1109,7 @@ relic_report_mixed_note(relic_t *ctx, const relic_rule_t *rule,
  */
 static int
 take_batch(relic_evaluation_t *eval, const relic_rule_t *rule,
-    const relic_emit_target_t *target)
+    const relic_emit_target_t *target, relic_serial_seen_t *seen)
 {
 	relic_scratch_t *scratch;
 
@@ -984,7 +1130,7 @@ take_batch(relic_evaluation_t *eval, const relic_rule_t *rule,
 	if (target->rows.callback == NULL) {
 		if (resolve_pending(eval, target->relation) != 0)
 			return (-1);
-		return (insert_batch(eval, target->relation));
+		return (insert_batch(eval, target->relation, seen));
 	}
 
 	assert(scratch->pending_count == 0);
@@ -1052,22 +1198,32 @@ static int
 execute_plan(relic_evaluation_t *eval, const relic_plan_t *plan,
     const relic_rule_t *rule, const relic_emit_target_t *target)
 {
+	relic_serial_seen_t seen;
 	enum relic_exec_status status;
+	int result;
 
+	serial_seen_open(eval, target, &seen);
 	relic_exec_start(&eval->scratch, &eval->env, plan);
+	result = 0;
 
 	do {
 		status = relic_exec_run(&eval->scratch);
-		if (take_batch(eval, rule, target) != 0)
-			return (-1);
+		if (take_batch(eval, rule, target, &seen) != 0) {
+			result = -1;
+			break;
+		}
 		if (eval->stopped)
-			return (0);
+			break;
 		if (relic_refuse_interrupted(eval->ctx, "deriving",
-		    target->relation) != 0)
-			return (-1);
+		    target->relation) != 0) {
+			result = -1;
+			break;
+		}
 	} while (status == RELIC_EXEC_PAUSED);
 
-	return (0);
+	free(seen.bits);
+	relic_account_release_round(&eval->ctx->account, seen.bytes);
+	return (result);
 }
 
 /*

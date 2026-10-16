@@ -71,6 +71,8 @@ runtime use from proposals and related work.
   key counts, and deterministic selection at round boundaries.
 * [Evaluation](design-eval.md) -- the executor, the naive and semi-naive
   fixed points, query answers, streaming and interrupts.
+* [Serial positive membership](design-serial-membership.md) -- bounded
+  plan-owned evidence that avoids repeated insertion checks.
 * [Expressions](design-expressions.md) -- arithmetic, string functions and
   the regular-expression matcher, and how computed values are interned.
 * [Aggregates](design-aggregates.md) -- group rules, folding in place, and

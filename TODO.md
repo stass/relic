@@ -20,12 +20,12 @@ of which `contrib/` holds only the homebrew formula, so
 [release procedure](specs/design-release.md#the-release-procedure).
 
 **Remaining engine-performance gaps.** [Medium, components: `lib/eval.c`,
-`lib/import.c`, `lib/facts.c`, `bench/compare/`] Decide the bounded serial
-positive-membership cache nominated by the
-[investigation](bench/compare/recorded/serial-seen/README.md), including its
-small-control and RSS costs, then investigate files/facts throughput. The
-[performance work](docs/todo-benchmark-performance.md) defines the production
-design, measurement and complexity gates.
+`lib/import.c`, `lib/facts.c`, `bench/compare/`] Investigate files/facts
+throughput using the engine with bounded serial membership and dense parallel
+collection as the control. The [performance work](docs/todo-benchmark-performance.md)
+defines attribution, measurement and complexity gates. The
+[serial comparison](bench/compare/recorded/serial-membership/README.md)
+retains the accepted change, control variability and remaining rival RSS costs.
 
 ## Engine
 

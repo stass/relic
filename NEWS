@@ -41,6 +41,9 @@ relic 1.0.0 (unreleased)
     extra byte per allocated canonical-index slot. Parallel evaluation of
     dense binary relations over assigned values uses a bounded shared table
     of first occurrences to reduce temporary memory while preserving order.
+    Serial plans can cache confirmed duplicates in dense binary relations,
+    avoiding repeated hash lookups with bounded temporary storage when no
+    memory limit is set.
   * Optional limits on the tuples held, on the memory relations, values,
     plans and rewrites occupy, and on the bytes of one program text or one
     field of an imported table: a load, an import, an evaluation or a query

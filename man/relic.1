@@ -867,6 +867,10 @@ uses: the text being loaded and the field of a table being imported, which
 .Cm input
 bounds, and the program's rules and queries are sized by what was written,
 and growing an array holds the old one until the new one is filled.
+Without a memory limit, serial evaluation can use a bounded duplicate cache
+to accelerate dense two-column relations.
+A finite memory limit disables that cache to preserve the ordinary refusal
+boundary, so those evaluations can take longer even with a generous limit.
 .It Cm input
 the most bytes one input may hold: a program file, or the program read
 from the standard input, and one field of a table imported with

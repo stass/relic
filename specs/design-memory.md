@@ -321,6 +321,11 @@ strings its plans compute, the regex matcher's work space, and, in a
 derived. These buffers live for one round and are charged as one part of
 the account.
 
+The evaluator's optional [serial membership bitmap](design-serial-membership.md)
+uses this account for its shorter, single-plan lifetime. It is bounded by
+4 MiB and is not allocated when a memory limit is configured. Allocation
+refusal releases its charge and leaves ordinary insertion in use.
+
 The merge's [pending-value workspace](design-pending-values.md#storage-ownership)
 is charged through that same round account. Local marker maps and compact
 descriptors are sized by worker-local distinct values and released after
