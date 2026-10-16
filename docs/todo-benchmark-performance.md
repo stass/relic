@@ -15,10 +15,13 @@ cannot close an import floor larger than the rival's whole command.
 Prototype the [counted base projection](../specs/design-grouped-count.md).
 One complete grouped-count query owns its producer plan and private key/count
 collector, and publishes only its answer. The first implementation keeps
-the ordinary expression executor and its 64-row batches. Its budget is
-1,000 net runtime C/header lines, including parallel partials and integration.
-Do not expand it into general source replacement or add a second expression
-executor to rescue a weak result.
+the ordinary expression executor and its 64-row batches. Assess complexity
+through the complete ownership and execution model, including private state,
+worker coordination, retry and publication. Compare the obligations introduced
+with those removed from the evaluator; source size is supporting evidence,
+not a ceiling. A larger module is justified when it simplifies that model.
+General source replacement or a second expression executor requires a design
+that demonstrates its system-wide benefit and the obligations it eliminates.
 
 First prove the work removal: no `kind`/group/result-predicate materialization,
 no fold index over those rows, and no per-row worker candidate retention.
@@ -42,7 +45,9 @@ A result resembling a small hash-probe improvement does not justify this
 mechanism. A useful screen proceeds to decisive interleaved measurement,
 normal/ASan/UBSan/TSan suites and a supported FreeBSD comparison under the
 [measurement protocol](todo-performance-measurements.md). Otherwise remove
-the prototype; do not broaden eligibility or add machinery to chase the target.
+the prototype. A different design must explain how it addresses the measured
+cost and changes the system's concepts and obligations; adding exceptions or
+another execution mode is not justified by a target-cell win alone.
 
 ## Remove input work at the storage boundary
 

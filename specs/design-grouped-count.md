@@ -211,11 +211,16 @@ source substitution and no claim that the program's fixed point is current.
 
 ## Validation and complexity boundary
 
-The runtime budget is 1,000 net additional C/header lines, including serial
-collection, parallel partials and integration. One per-answer owner is the
-boundary. A general reduction framework, alternate-source registry, virtual
-index credit or second expression interpreter requires a different design.
-The implementation is not enlarged to fit an inconvenient eligibility case.
+One per-answer owner is the architectural boundary: it owns the certificate,
+private collection, retry and publication, while original predicates retain
+their ordinary definitions and storage rules. Assess the concepts, states and
+caller obligations this introduces and removes across the evaluator using the
+[complexity guidance](style.md#architectural-complexity). Source size is a review
+signal, not an acceptance limit. A general reduction framework, alternate-source
+registry, virtual index credit or second expression interpreter requires a
+different design that demonstrates its overall benefit, including the
+coordination and states it eliminates. Eligibility exceptions require the same
+scrutiny; a small diff does not make another case inexpensive to maintain.
 
 Tests compare complete ordered answers and value IDs with ordinary execution,
 and compare counted counters across worker counts. They exercise duplicate

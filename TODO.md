@@ -25,8 +25,8 @@ of which `contrib/` holds only the homebrew formula, so
 full grouped query's answer, then design input-work removal at the storage
 boundary. The [DuckDB source comparison and direct phases](bench/compare/recorded/duckdb-files-analysis/README.md)
 show why both are needed. The [performance work](docs/todo-benchmark-performance.md)
-sets the narrow ownership model, 1,000-line query budget, correctness and
-material-benefit gates, and the separate unary-index hypothesis for input.
+sets the query ownership model, architectural complexity review, correctness
+and material-benefit gates, and the separate unary-index hypothesis for input.
 
 ## Engine
 

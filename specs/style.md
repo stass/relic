@@ -14,6 +14,30 @@ Prefer several clear steps when combining operations would obscure their order
 or purpose. Review readability explicitly before committing; passing tests and
 mechanical formatting checks alone do not establish it.
 
+## Architectural complexity
+
+Judge a change by the model a maintainer needs to understand before and after
+it. Consider the concepts and entities, independently varying states and their
+interactions, ownership and lifetime rules, and obligations that span callers
+or subsystems. Include failure, retry and fallback behavior in that model.
+Compare what the change introduces with what it eliminates across the whole
+system. A new type that makes an existing distinction explicit can reduce
+complexity; several flags that admit more combinations can increase it.
+
+A substantial new module can simplify the architecture by giving one owner
+responsibility for an invariant and removing protocols from its callers.
+Credit the obligations that callers actually lose and the invalid states the
+interface prevents. Merely relocating the same coordination or hiding it behind
+a generic interface does not provide that simplification. New concepts can be
+justified by their benefit, but their interactions and maintenance cost must be
+understood rather than hidden by a small diff.
+
+Source size is a useful signal of review and maintenance work, not a complexity
+score or an acceptance threshold. Prefer explicit, readable implementation when
+it expresses a simpler model, even if it adds lines. In a design or review,
+explain the concrete changes to owners, states and caller obligations; do not
+substitute a line budget or an abstract score for that comparison.
+
 ## Readability standard
 
 Write for a maintainer encountering the code for the first time. The main
@@ -356,6 +380,12 @@ and where the reader must reconstruct missing meaning. Check whether the reader
 can follow the algorithm, distinguish the values it manipulates, and identify
 state changes, failure handling, and ownership from the implementation and its
 local contracts.
+
+For architectural changes, also apply the
+[complexity guidance](#architectural-complexity) across the affected subsystems.
+Identify the concepts and obligations introduced and eliminated, with concrete
+owners, interfaces or state transitions as evidence. Distinguish a simpler
+system from a smaller diff or a cleaner-looking wrapper around the same rules.
 
 Treat difficult-to-follow code as a finding even when it is correct, formatted,
 and commented. Fix the cause: unclear responsibility, unsuitable representation,

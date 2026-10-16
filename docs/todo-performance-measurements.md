@@ -8,8 +8,12 @@ answers, resource costs and uncertainty preserved together.
 
 A proposal names the bottleneck, the work or live allocation it removes,
 its ownership/failure boundary, one target and at least one control that
-can lose. State the result that would reject it. Count new persistent
-state and cross-subsystem obligations as costs alongside source size.
+can lose. State the result that would reject it. Apply the
+[architectural complexity guidance](../specs/style.md#architectural-complexity):
+compare the concepts, states, owners and coordination obligations introduced
+with those eliminated across the system, including failure and fallback paths.
+Source size supports that review; it is not an adoption gate. A larger module
+can earn its place by simplifying the surrounding architecture.
 
 Choose one intervention per candidate. Reuse existing fixtures, independent
 oracles and reviewed collection tools. A new profiler, container or general
