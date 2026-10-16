@@ -39,7 +39,8 @@
  * derived them, and never its derivations: a rule deriving the same few
  * tuples from millions of bindings holds a few candidates.  A task's
  * candidates lie together in its worker's buffer, which is how the merge
- * finds them in task order.
+ * finds them in task order. A selected dense round instead lowers shared
+ * occurrence ranks, keeping no worker tuple copies (lib/dense.c).
  *
  * A value the context lacked when the round began -- an integer or a
  * string a column of the batch holds pending -- is kept among the worker's
@@ -165,7 +166,7 @@ static int	 run_plan_piece(const relic_round_job_t *job,
 static int	 run_task(const relic_round_job_t *job, relic_worker_t *worker,
 		    size_t worker_index, relic_round_task_t *task);
 static int	 screen_batch(const relic_round_job_t *job,
-		    relic_worker_t *worker, size_t target);
+		    relic_worker_t *worker, const relic_round_task_t *task);
 static uint32_t	 value_rehash(uint32_t position, void *ctx);
 static uint64_t	 worker_work(const relic_worker_t *worker);
 
@@ -214,7 +215,7 @@ run_task(const relic_round_job_t *job, relic_worker_t *worker,
 
 	if (item->plan == NULL) {
 		place_seed(scratch, item->rule);
-		status = screen_batch(job, worker, item->target);
+		status = screen_batch(job, worker, task);
 	} else {
 		status = run_plan_piece(job, worker, item, task);
 	}
@@ -282,7 +283,7 @@ run_plan_piece(const relic_round_job_t *job, relic_worker_t *worker,
 		status = relic_exec_run(scratch);
 		if (scratch->error.failed)
 			return (-1);
-		if (screen_batch(job, worker, item->target) != 0)
+		if (screen_batch(job, worker, task) != 0)
 			return (-1);
 		if (relic_signal_flag_raised(job->interrupted))
 			return (-1);
@@ -302,7 +303,7 @@ run_plan_piece(const relic_round_job_t *job, relic_worker_t *worker,
  */
 static int
 screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
-    size_t target)
+    const relic_round_task_t *task)
 {
 	uint64_t hashes[RELIC_INSERT_BATCH];
 	bool held[RELIC_INSERT_BATCH];
@@ -310,9 +311,21 @@ screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
 	const relic_dom_t *tuple;
 	relic_scratch_t *scratch;
 	uint16_t arity;
+	size_t target;
 	size_t i;
 
 	scratch = &worker->scratch;
+	if (job->dense != NULL) {
+		for (i = 0; i < scratch->batch_count; i++) {
+			worker->derivations++;
+			if (!relic_dense_take(job->dense, (size_t)(task - job->tasks),
+			    &worker->dense_sequence, &scratch->batch[2 * i]))
+				return (-1);
+		}
+		scratch->batch_count = 0;
+		return (0);
+	}
+	target = job->round->items[task->item].target;
 	relation = job->round->targets[target];
 	arity = relic_relation_arity(relation);
 

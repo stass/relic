@@ -1952,7 +1952,6 @@ size_t	 relic_tuples_admissible(const relic_t *ctx);
 int	 relic_relation_reserve(relic_t *ctx, relic_relation_t *relation,
 	    const relic_tuple_growth_t *growth,
 	    relic_idtab_t grown[RELIC_STRIPES]);
-size_t	 relic_relation_count(const relic_relation_t *relation);
 relic_tuple_id_t relic_relation_end(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_since(const relic_relation_t *relation,
 	    relic_tuple_id_t first);

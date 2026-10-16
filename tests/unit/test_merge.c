@@ -53,6 +53,7 @@
 #define	SCENARIO_SIZES		"a merge declines pending sizes it cannot " \
 				"represent"
 #define	SCENARIO_MARKERS	"a merge declines markers naming nothing"
+#define	SCENARIO_INTERRUPT	"an interrupted merge publishes nothing"
 
 /*
  * The round's targets, p/2 and q/2; the tasks a round holds, one item
@@ -113,6 +114,7 @@ static void	 a_merge_with_no_string_bytes_gives_back_its_charge(void);
 static void	 a_merge_numbers_values_in_task_order(void);
 static void	 a_merge_declines_unrepresentable_sizes(void);
 static void	 a_merge_declines_markers_naming_nothing(void);
+static void	 an_interrupted_merge_publishes_nothing(void);
 static void	 merge_declines(hand_merge_t *hand, const char *scenario,
 		    const char *what);
 static bool	 open_partial(hand_merge_t *hand, const char *scenario);
@@ -154,8 +156,40 @@ main(void)
 	a_merge_numbers_values_in_task_order();
 	a_merge_declines_unrepresentable_sizes();
 	a_merge_declines_markers_naming_nothing();
+	an_interrupted_merge_publishes_nothing();
 
 	return (check_summary("test_merge"));
+}
+
+/*
+ * Preparation may reserve capacity, but an interrupt observed at its end
+ * must not publish any promised value or tuple. Private candidates may
+ * have been rewritten; they are discarded when the round is declined.
+ */
+static void
+an_interrupted_merge_publishes_nothing(void)
+{
+	hand_merge_t hand;
+	size_t before;
+	bool merged;
+
+	if (!open_partial(&hand, SCENARIO_INTERRUPT))
+		return;
+	before = round_bytes(hand.ctx);
+	relic_signal_flag_raise(&hand.ctx->interrupted);
+	merged = hand_merge(&hand);
+	check(!merged, SCENARIO_INTERRUPT, "the merge declines");
+	check(relic_relation_count(hand.targets[0]) == 0 &&
+	    relic_relation_count(hand.targets[1]) == 0, SCENARIO_INTERRUPT,
+	    "neither target publishes a tuple identifier");
+	check(find_string(hand.ctx, "amber") == 0 &&
+	    find_string(hand.ctx, "blue") == 0 &&
+	    relic_value_find_integer(hand.ctx, NEW_INTEGER) == 0,
+	    SCENARIO_INTERRUPT, "no promised value is published");
+	check(round_bytes(hand.ctx) == before, SCENARIO_INTERRUPT,
+	    "preparation gives back every round charge");
+	relic_signal_flag_lower(&hand.ctx->interrupted);
+	hand_close(&hand);
 }
 
 /*
@@ -848,7 +882,7 @@ hand_pair(hand_merge_t *hand, size_t worker, size_t target,
 static bool
 hand_merge(hand_merge_t *hand)
 {
-	return (relic_round_merge(hand->ctx, hand->pool, &hand->round, 0));
+	return (relic_round_merge(hand->ctx, hand->pool, &hand->round, 0, NULL));
 }
 
 /*

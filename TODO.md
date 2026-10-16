@@ -19,17 +19,12 @@ of which `contrib/` holds only the homebrew formula, so
 `contrib/pkgsrc/devel/relic/` are to write; and the
 [release procedure](specs/design-release.md#the-release-procedure).
 
-**Bound dense recursive working memory.** [Medium, components:
-`lib/round.c`, `lib/task.c`, `lib/merge.c`, `lib/atomic.h`]
-Implement and assess [dense candidate collection](specs/design-dense-rounds.md):
-a fixed array of first-occurrence ranks replaces worker tuple copies for
-eligible binary targets. Preserve the ordinary executor and ordered append,
-with a 600-line runtime budget and a measured target of 90% lower dense
-parallel RSS without a speed regression. The
-[performance work](docs/todo-benchmark-performance.md) and
-[acceptance steps](docs/todo-parallel.md) bound this proposal. The
-[completed pass](bench/compare/recorded/performance-pass.md) retains prior
-decisions and the other rival gaps; it has no experiments still queued.
+**Remaining engine-performance gaps.** [Medium, components: `lib/eval.c`,
+`lib/import.c`, `lib/facts.c`, `bench/compare/`] Files/facts throughput and
+serial closure time remain the next classes to choose between. The
+[performance work](docs/todo-benchmark-performance.md) defines the measurement
+and complexity gates. [Dense collection measurements](bench/compare/recorded/dense-rounds/README.md)
+retain the accepted change, its missed 90% RSS aim and the remaining rival gap.
 
 ## Engine
 
@@ -84,6 +79,14 @@ OS/compiler/engine-version differences from core-count effects. The selected
 performance-plan comparisons take precedence over a full publication sweep.
 
 ## Testing and CI
+
+**Qualify the FreeBSD MSan toolchain and dependencies.** [Medium, components:
+`m4/relic_sanitizers.m4`, `lib/pool.c`, `tests/`, development toolchain] The full suite needs
+working shadow propagation through libc memory streams and instrumented
+ncurses/libedit; a standalone C program reproduces the stdio failure. Also
+resolve the observed MSan worker-startup/loader-atfork stall before treating
+this host as a full MSan validator. The [preserved investigation](bench/compare/recorded/dense-rounds/README.md#validation)
+records 324 passes, four failures and two unfinished tests without suppressions.
 
 **Native global merging hides source ownership from the object audit.**
 [Medium, component: `tests/globals.sh`] On Apple clang at `-O3`, a mutable

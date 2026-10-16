@@ -39,6 +39,7 @@
 
 typedef struct relic_candidate relic_candidate_t;
 typedef struct relic_candidates relic_candidates_t;
+typedef struct relic_dense relic_dense_t;
 typedef struct relic_insert_history relic_insert_history_t;
 typedef struct relic_plan_history relic_plan_history_t;
 typedef struct relic_pool relic_pool_t;
@@ -243,6 +244,7 @@ struct relic_worker {
 	size_t			 pending_capacity;
 	relic_candidates_t	 candidates;
 	uint64_t		 derivations;
+	uint32_t		 dense_sequence;
 };
 
 /*
@@ -282,6 +284,7 @@ struct relic_pool {
 	uint64_t		 thread_tasks;
 	uint64_t		 expected_candidates;
 	uint64_t		 reservation_declines;
+	uint64_t		 dense_rounds;	/* successful dense publications */
 };
 
 /*
@@ -289,10 +292,10 @@ struct relic_pool {
  * claims (relic_pool_for()) in increasing order.
  *
  * The round and everything it reaches are read-only, and so is the store.
- * The account is the one thing outside a worker's own a task writes, when a
- * candidate buffer grows, and it does so only through the round charge
- * frozen.h declares.  `admissible` is how many more tuples the tuple
- * limit can admit, SIZE_MAX when none is set: a worker gathering more
+ * Tasks charge candidate growth through the account's frozen interface.
+ * The dense collector instead lowers fixed shared ranks. `admissible` is
+ * how many more tuples the limit can admit, SIZE_MAX when none is set:
+ * a worker gathering more
  * candidates than that holds a round the merge would refuse part way, and
  * abandons it rather than fill memory first.  `interrupted` is the
  * context's interrupt flag, which a worker reads after each return of the
@@ -309,7 +312,43 @@ struct relic_round_job {
 	const relic_signal_flag_t	*interrupted;
 	size_t				 admissible;
 	relic_atomic_bool_t		 abandoned;
+	relic_dense_t			*dense;
 };
+
+/*
+ * A fixed pair rectangle for one frozen round. Gathering only lowers ranks;
+ * after the barrier, order and scratch alternate as radix input and output.
+ * Only the final order array is fully sorted by rank.
+ * Histograms belong to ordered parts, not the workers claiming those parts.
+ * charged covers these arrays alone; close releases them and zeroes the owner.
+ */
+struct relic_dense {
+	relic_round_job_t	*job;
+	relic_pool_t		*pool;
+	relic_atomic_u64_t	*ranks;
+	uint32_t		*order;
+	uint32_t		*scratch;
+	size_t			*histograms;
+	size_t			 integers;
+	size_t			 symbols;
+	size_t			 width;
+	size_t			 cells;
+	size_t			 count;
+	size_t			 parts;
+	size_t			 charged;
+	unsigned int		 shift;
+	bool			 scattering;
+};
+
+/* Open returns 1 if selected, 0 if ineligible, -1 on private refusal. */
+int	 relic_dense_open(relic_dense_t *dense, relic_pool_t *pool,
+	    relic_round_job_t *job);
+void	 relic_dense_close(relic_dense_t *dense);
+bool	 relic_dense_take(relic_dense_t *dense, size_t task,
+	    uint32_t *sequence, const relic_dom_t *tuple);
+int	 relic_dense_order(relic_dense_t *dense);
+void	 relic_dense_tuple(const relic_dense_t *dense, size_t position,
+	    relic_dom_t *tuple);
 
 /*
  * A part of a job the pool shares: what relic_pool_for() runs for part
@@ -395,10 +434,11 @@ const relic_round_item_t *relic_round_first_call(const relic_round_t *round);
  * nothing, when a limit or the allocator would refuse the merge, for the
  * round to be run serially.  `texts_bytes` is at least what the serial
  * run's text buffers would hold by the round's end, which the memory limit
- * is asked of beside the growth.  The candidates are the caller's to release.
+ * is asked of beside the growth. Dense collection supplies ordered positions
+ * instead of candidates. The caller closes either collector after the merge.
  */
 bool	 relic_round_merge(relic_t *ctx, relic_pool_t *pool,
-	    relic_round_t *round, size_t texts_bytes);
+	    relic_round_t *round, size_t texts_bytes, relic_dense_t *dense);
 
 /*
  * lib/pool.c

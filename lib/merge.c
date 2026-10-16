@@ -14,68 +14,28 @@
 #include "internal.h"
 
 /*
- * The merge of a deferred round: inserting what its tasks gathered, on the
- * pool's workers, as the serial evaluator would have inserted it.
+ * Deferred publication has one boundary: prepare ordered appends, reserve
+ * every public allocation, then apply without failure. Until application,
+ * tuples, values and index entries remain private; reservation may retain
+ * larger capacities even when the merge is declined.
  *
- * The serial evaluator inserts the tuples a round derives one at a time,
- * and what it leaves is fixed by one list: the tuples new to their
- * relation, in the order they were first derived.  Each takes the next
- * identifier of its relation, the next slot of its canonical stripe, the
- * next key of its secondary index's stripe where its key is new, and the
- * end of its key's chain; every array grows a step at a time to a capacity
- * set by what it comes to hold.  The candidates, read task by task in task
- * order, are that derivation order with some repeats already removed, so
- * the list is the candidates that no earlier candidate repeats -- the
- * firsts -- in that order.  The merge finds the firsts, gives each its
- * identifier, and then makes every part of every relation what the serial
- * insertions would have made it, each part at once.
+ * The general collector resolves pending values and finds each tuple's first
+ * candidate in task order. The dense collector orders cell positions by their
+ * earliest occurrence ranks. Both give every task its insertion count and its
+ * starting position in its target's append, preserving serial tuple IDs.
  *
- *	resolve		(worker 0) describe each value a candidate holds
- *			pending once, where task order first meets it, and
- *			promise it the identifier the serial run gives it;
- *			then a worker to a part, write the promises over its
- *			candidates' markers, hashing each such candidate
- *			again;
- *	find new tuples	a worker to a part, list its candidates by stripe;
- *			then a stripe of the canonical index to a part, mark
- *			each candidate of the stripe a first or a repeat of
- *			an earlier one, counting each task's firsts;
- *	count		(worker 0) each task's firsts give it the positions
- *			its new tuples take in its target's append, and each
- *			target its count per stripe; the tuple limit and the
- *			identifier space are asked of the exact total;
- *	stage		a task to a part: copy its firsts, with their hashes
- *			and their keys' hashes, into their positions; then an
- *			index of a target to a part, list the staged tuples
- *			by their stripe of the index;
- *	classify	a stripe of a secondary index to a part: find the key
- *			each staged tuple of the stripe joins, numbering the
- *			stripe's new keys;
- *	reserve		(worker 0) ask the memory limit of exactly what the
- *			serial insertions would hold, with the tables their
- *			growth replaces held beside it, and grow every array
- *			to it, preparing each table's growth without filling
- *			it; grow the value table and the pool for the new
- *			values;
- *	apply		(worker 0) append the new values and store the
- *			columns; then a stripe to a part, fill each grown
- *			table, place the canonical entries and link the
- *			chains.
+ * Staging fills those disjoint append ranges and lists them by index stripe.
+ * Classification numbers new secondary keys in insertion order. Reservation
+ * checks the exact serial storage projection, including replaced tables and
+ * expression scratch, before growing relation, index and value arrays.
+ * Application publishes values and columns, then fills canonical tables and
+ * links secondary chains. The relation store defines the independent parts
+ * of listing, classification and application; pool barriers separate them.
  *
- * No step up to the application changes what a relation, the value table
- * or the pool holds, and every step that can fail -- scratch the limit or
- * the allocator refuses, a limit the new tuples or values would pass, a
- * growth refused -- is among them.  The scratch of a step is sized before
- * the step begins, from counts the steps before it found, and taken as one
- * block charged once, which the step's parts carve between them: no part
- * allocates, and no part can fail.  A failure declines the merge, and the
- * round runs again serially, where whatever refuses it reports itself; the
- * merge itself never reports and never fails part way.  Every part of a
- * step writes only what its stripe, its task or its worker owns, and the
- * pool's barrier between steps publishes what each step wrote to the
- * next.  Which parts a relation's append is listed, classified and applied
- * in is the relation store's to say, and the merge runs every part it
- * names.
+ * A private failure or interrupt discards preparation and asks the caller to
+ * retry the round serially, where the ordinary evaluator reports the outcome.
+ * Interrupted staging is checked before listing can read its unfinished rows.
+ * The final interrupt check precedes application, which cannot be rolled back.
  */
 
 typedef struct relic_merge relic_merge_t;
@@ -243,6 +203,7 @@ struct relic_merge_resolution {
  * holds them while the keys are classified.
  */
 struct relic_merge {
+	relic_dense_t			*dense;
 	relic_t				*ctx;
 	relic_pool_t			*pool;
 	relic_round_t			*round;
@@ -310,7 +271,7 @@ static size_t	 pending_string_bytes(const relic_pool_t *pool);
 static size_t	 pending_value_count(const relic_pool_t *pool);
 static int	 prepare_merge(relic_merge_t *merge, relic_t *ctx,
 		    relic_pool_t *pool, relic_round_t *round,
-		    size_t texts_bytes);
+		    size_t texts_bytes, relic_dense_t *dense);
 static void	 prepare_spans(relic_merge_compaction_t *compaction);
 static int	 reserve_room(relic_merge_t *merge);
 static void	 resolution_close(relic_merge_t *merge);
@@ -332,12 +293,14 @@ static const relic_dom_t *tuple_of(const relic_merge_t *merge,
 
 bool
 relic_round_merge(relic_t *ctx, relic_pool_t *pool, relic_round_t *round,
-    size_t texts_bytes)
+    size_t texts_bytes, relic_dense_t *dense)
 {
 	relic_merge_t merge;
 	bool merged;
 
-	merged = prepare_merge(&merge, ctx, pool, round, texts_bytes) == 0;
+	merged = prepare_merge(&merge, ctx, pool, round, texts_bytes, dense) == 0;
+	if (relic_signal_flag_raised(&ctx->interrupted))
+		merged = false;
 	if (merged)
 		apply_merge(&merge);
 	merge_end(&merge);
@@ -406,15 +369,21 @@ merge_begin(relic_merge_t *merge, relic_t *ctx, relic_pool_t *pool,
  */
 static int
 prepare_merge(relic_merge_t *merge, relic_t *ctx, relic_pool_t *pool,
-    relic_round_t *round, size_t texts_bytes)
+    relic_round_t *round, size_t texts_bytes, relic_dense_t *dense)
 {
 	if (merge_begin(merge, ctx, pool, round) != 0)
 		return (-1);
 	merge->texts_bytes = texts_bytes;
-	if (resolve_pending(merge) != 0)
-		return (-1);
-	if (find_new_tuples(merge) != 0)
-		return (-1);
+	merge->dense = dense;
+	if (dense != NULL) {
+		if (relic_dense_order(dense) != 0)
+			return (-1);
+	} else {
+		if (resolve_pending(merge) != 0)
+			return (-1);
+		if (find_new_tuples(merge) != 0)
+			return (-1);
+	}
 	if (count_new_tuples(merge) != 0)
 		return (-1);
 	if (stage_new_tuples(merge) != 0)
@@ -1175,6 +1144,10 @@ count_new_tuples(relic_merge_t *merge)
 		target = merge->round->items[task->item].target;
 		append = &merge->appends[target];
 		merge->task_starts[t] = append->count;
+		if (merge->dense != NULL) {
+			append->count += task->inserted;
+			continue;
+		}
 
 		task->inserted = 0;
 		for (s = 0; s < RELIC_STRIPES; s++) {
@@ -1185,6 +1158,8 @@ count_new_tuples(relic_merge_t *merge)
 		}
 	}
 
+	if (merge->dense != NULL && merge->appends[0].count != merge->dense->count)
+		return (-1);
 	total = 0;
 	for (t = 0; t < merge->round->target_count; t++) {
 		append = &merge->appends[t];
@@ -1211,6 +1186,7 @@ static int
 stage_new_tuples(relic_merge_t *merge)
 {
 	size_t t;
+	size_t s;
 
 	for (t = 0; t < merge->round->target_count; t++) {
 		if (relic_relation_append_open(merge->ctx,
@@ -1220,12 +1196,22 @@ stage_new_tuples(relic_merge_t *merge)
 
 	relic_pool_for(merge->pool, merge->pool->task_count, stage_task,
 	    merge);
+	if (relic_signal_flag_raised(&merge->ctx->interrupted))
+		return (-1);
 
 	if (number_parts(merge, relic_relation_list_parts,
 	    &merge->listing_parts, &merge->listing_part_count) != 0)
 		return (-1);
 	relic_pool_for(merge->pool, merge->listing_part_count, list_staged_part,
 	    merge);
+	if (merge->dense != NULL) {
+		for (s = 0; s < RELIC_STRIPES; s++)
+			merge->appends[0].growth.by_stripe[s] =
+			    merge->appends[0].stripe_start[s + 1] -
+			    merge->appends[0].stripe_start[s];
+		relic_dense_close(merge->dense);
+		merge->dense = NULL;
+	}
 
 	return (0);
 }
@@ -1254,6 +1240,7 @@ list_staged_part(void *argument, size_t part,
 static void
 stage_task(void *argument, size_t task, size_t worker_index RELIC_UNUSED)
 {
+	relic_dom_t tuple[2];
 	const relic_round_task_t *record;
 	const relic_candidates_t *candidates;
 	const relic_candidate_t *candidate;
@@ -1271,6 +1258,18 @@ stage_task(void *argument, size_t task, size_t worker_index RELIC_UNUSED)
 	candidates = &merge->pool->workers[record->worker].candidates;
 
 	position = merge->task_starts[task];
+	if (merge->dense != NULL) {
+		end = position + record->inserted;
+		for (; position < end; position++) {
+			if ((position & 4095u) == 0 &&
+			    relic_signal_flag_raised(&merge->ctx->interrupted))
+				return;
+			relic_dense_tuple(merge->dense, position, tuple);
+			relic_relation_stage(relation, &merge->appends[target],
+			    position, tuple, relic_relation_hash(relation, tuple));
+		}
+		return;
+	}
 	end = record->first_candidate + record->candidate_count;
 	for (i = record->first_candidate; i < end; i++) {
 		candidate = &candidates->entries[i];

@@ -12,8 +12,9 @@
  * declare.  Each interface has a replacement under compat/ that is compiled
  * where the C library lacks it, so the rest of the tree calls the interface
  * unconditionally and contains no platform test.  A MemorySanitizer build
- * compiles the strlcat and strlcpy replacements everywhere, because the
- * sanitizer cannot see what the C library's copies write.
+ * compiles private strlcat and strlcpy replacements everywhere: sanitizer
+ * interception of the C library's copies varies between runtimes. config.h
+ * gives them private names before the system headers declare them.
  *
  * An interface is declared here exactly where configure found no system
  * declaration of it, which is a separate question from whether it links, so

@@ -38,7 +38,7 @@
  * comes to hold, so a write to the store through a member of one does not
  * compile.
  *
- * Such code stores to two words outside its own: a key's frontier, which
+ * Frozen context access permits writes only to a key's frontier, which
  * relic_index_first_since() moves inside lib/index.c, and the memory
  * account's total for a round's buffers, which it reaches only through the
  * two functions of lib/account.c below.  The account is incomplete here
@@ -127,6 +127,7 @@ enum relic_order {
  * and whether the relation holds it.  relic_relation_hash() gives one
  * tuple's wide hash alone, the same one.
  */
+size_t	 relic_relation_count(const relic_relation_t *relation);
 relic_pred_id_t relic_relation_pred(const relic_relation_t *relation);
 uint16_t relic_relation_arity(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_all(const relic_relation_t *relation);
@@ -256,6 +257,9 @@ const char *relic_value_bytes(const relic_t *ctx, relic_dom_t dom,
 relic_dom_t relic_value_find_integer(const relic_t *ctx, int64_t integer);
 relic_dom_t relic_value_find_string(const relic_t *ctx, const char *bytes,
 	    size_t length);
+/* Frozen identifier spans, including unused symbol type-use positions. */
+void	 relic_value_spans(const relic_t *ctx, size_t *integers,
+	    size_t *symbols);
 
 /*
  * A value as its type and its contents, whether or not the context has

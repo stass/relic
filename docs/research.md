@@ -131,17 +131,19 @@ Relic does not implement Brie. Souffle documents it as an optional
 [relation representation](https://souffle-lang.github.io/relations); citing it
 does not establish that a particular retained benchmark used it.
 
-### Earliest-occurrence ranks — Proposed; local adaptation
+### Earliest-occurrence ranks — Used; local adaptation
 
 [Dense round design](../specs/design-dense-rounds.md),
 [abstract model](../bench/compare/recorded/dense-round-design/README.md),
-[implementation work](todo-parallel.md).
+[implementation](../lib/dense.c),
+[measurements](../bench/compare/recorded/dense-rounds/README.md).
 
 A fixed cell per possible pair stores an atomic minimum occurrence rank;
 sorting surviving cells reconstructs serial insertion order. The local proof
 uses monotone task assignment and a bounded worker sequence. The shared-set
 papers motivate the ownership direction but do not prove this algorithm.
-There is no runtime implementation or measured benefit claimed here.
+The bounded domain and task-assignment invariants are part of the proof;
+measured performance applies to the recorded workloads and build policies.
 
 ## Maintaining this index
 

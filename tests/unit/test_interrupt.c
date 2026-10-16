@@ -134,8 +134,8 @@ record_error(void *callback_ctx, enum relic_diag_level level,
 
 	interrupter = callback_ctx;
 	if (level == RELIC_ERROR)
-		strlcpy(interrupter->last_error, message,
-		    sizeof(interrupter->last_error));
+		snprintf(interrupter->last_error, sizeof(interrupter->last_error),
+		    "%s", message);
 }
 
 static void

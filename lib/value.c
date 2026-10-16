@@ -725,6 +725,13 @@ relic_value_find_integer(const relic_t *ctx, int64_t integer)
 	return (RELIC_DOM_INTEGER | id);
 }
 
+void
+relic_value_spans(const relic_t *ctx, size_t *integers, size_t *symbols)
+{
+	*integers = ctx->values.integer_count;
+	*symbols = ctx->symbols.count;
+}
+
 /*
  * The probe is the pool's own lookup, and then the string bit: bytes the
  * pool holds only as a symbol value's spelling, or for a value a caller made

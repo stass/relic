@@ -35,8 +35,8 @@ LIBOBJDIR = compat/
 
 noinst_LTLIBRARIES = librelic_internal.la
 librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c lib/arith.c \
-	lib/cost.c lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c lib/explain.c \
-	lib/expr.c lib/facts.c lib/fold.c lib/import.c lib/index.c lib/lex.c \
+	lib/cost.c lib/dense.c lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c \
+	lib/explain.c lib/expr.c lib/facts.c lib/fold.c lib/import.c lib/index.c lib/lex.c \
 	lib/literal.c lib/magic.c lib/merge.c lib/parse.c lib/plan.c \
 	lib/pool.c lib/pred.c lib/regex.c lib/relation.c lib/result.c \
 	lib/round.c lib/rule.c lib/stratify.c lib/strfn.c \
@@ -200,7 +200,7 @@ tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
 
 RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
 	tests/unit/test_arith tests/unit/test_compute tests/unit/test_cost \
-	tests/unit/test_diag \
+	tests/unit/test_dense tests/unit/test_diag \
 	tests/unit/test_eval tests/unit/test_exec \
 	tests/unit/test_facts tests/unit/test_fold tests/unit/test_import \
 	tests/unit/test_index tests/unit/test_interrupt \
@@ -274,6 +274,9 @@ tests_unit_test_magic_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_merge_SOURCES = tests/unit/test_merge.c tests/unit/harness.c
 tests_unit_test_merge_LDADD = librelic_internal.la $(LTLIBOBJS)
+
+tests_unit_test_dense_SOURCES = tests/unit/test_dense.c tests/unit/harness.c
+tests_unit_test_dense_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_parse_SOURCES = tests/unit/test_parse.c tests/unit/harness.c
 tests_unit_test_parse_LDADD = librelic_internal.la $(LTLIBOBJS)

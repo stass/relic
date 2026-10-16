@@ -57,16 +57,33 @@ dnl lacks the interface, so the library and the tool call these
 dnl unconditionally and neither tests for a platform.
 dnl
 dnl MemorySanitizer knows memory to be written only when instrumented code
-dnl or a C library function its runtime intercepts wrote it.  It intercepts
-dnl no strlcat(3) or strlcpy(3), so a string the C library copied would
-dnl read as uninitialized and fail the suite.  Under --enable-msan the
-dnl replacements are compiled whatever the C library provides, and are
-dnl instrumented with the rest of the tree.
+dnl or a C library function its runtime intercepts wrote it. Interception of
+dnl strlcat(3) and strlcpy(3) varies between runtimes, so --enable-msan uses
+dnl instrumented replacements under private names on every platform. The
+dnl names cannot collide with a runtime that supplies those interceptors.
 AC_REPLACE_FUNCS([getentropy memmem reallocarray strtonum])
 AS_IF([test "x$enable_msan" = xyes],
-    [AC_LIBOBJ([strlcat])
+    [AC_DEFINE([RELIC_MSAN_STRINGS], [1],
+	[Define to use private instrumented string copies.])
+     AC_LIBOBJ([strlcat])
      AC_LIBOBJ([strlcpy])],
     [AC_REPLACE_FUNCS([strlcat strlcpy])])
+
+dnl config.h is included before system headers, so their declarations follow
+dnl the renaming too. Explicit test replacement names take precedence.
+AH_BOTTOM([
+#ifdef RELIC_MSAN_STRINGS
+/* Fortified wrappers can bypass the instrumented private copies. */
+#undef _FORTIFY_SOURCE
+#define _FORTIFY_SOURCE 0
+#ifndef strlcat
+#define strlcat relic_msan_strlcat
+#endif
+#ifndef strlcpy
+#define strlcpy relic_msan_strlcpy
+#endif
+#endif
+])
 
 dnl compat.h declares each of those interfaces exactly where no system header
 dnl does.  Whether one is declared is a separate question from whether it

@@ -9,7 +9,7 @@ collector retain their representations.
 Related: [parallel evaluation](architecture.md#parallel-evaluation),
 [tasks and merge](design-parallel.md), [values](design-values.md),
 [storage](design-storage.md), [memory](design-memory.md),
-[implementation work](../docs/todo-parallel.md).
+[method references](../docs/research.md#earliest-occurrence-ranks--used-local-adaptation).
 
 ## Model
 
@@ -196,8 +196,9 @@ array. There is no `P * U` tuple-storage term.
 
 With 4,000 assigned integers and an empty symbol pool, the rank array is
 128 MB in decimal units. The ordinary append, indexes, final relation,
-expression scratch and allocation overlap remain real costs. Implementation
-scope and acceptance belong in [open work](../docs/todo-parallel.md).
+expression scratch and allocation overlap remain real costs.
+[Measurements](../bench/compare/recorded/dense-rounds/README.md) distinguish
+requested storage from process RSS.
 
 ## Alternatives not taken
 

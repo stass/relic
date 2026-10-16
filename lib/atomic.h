@@ -42,6 +42,27 @@ typedef atomic_size_t		relic_atomic_size_t;
 typedef _Atomic(uint32_t)	relic_atomic_u32_t;
 typedef _Atomic(uint64_t)	relic_atomic_u64_t;
 
+/* Only instantiate the dense collector's CAS on always-lock-free types. */
+#if ATOMIC_LONG_LOCK_FREE == 2 && ATOMIC_LLONG_LOCK_FREE == 2 && \
+    ATOMIC_INT_LOCK_FREE == 2
+#define	RELIC_DENSE_ATOMICS	1
+static inline bool
+relic_atomic_u64_swap_if_relaxed(relic_atomic_u64_t *word,
+    uint64_t *expected, uint64_t desired)
+{
+	return (atomic_compare_exchange_strong_explicit(word, expected,
+	    desired, memory_order_relaxed, memory_order_relaxed));
+}
+#else
+#define	RELIC_DENSE_ATOMICS	0
+#endif
+
+static inline uint64_t
+relic_atomic_u64_load_relaxed(const relic_atomic_u64_t *word)
+{
+	return (atomic_load_explicit(word, memory_order_relaxed));
+}
+
 static inline void
 relic_atomic_bool_init(relic_atomic_bool_t *word, bool value)
 {
@@ -151,6 +172,25 @@ typedef bool		relic_atomic_bool_t;
 typedef size_t		relic_atomic_size_t;
 typedef uint32_t	relic_atomic_u32_t;
 typedef uint64_t	relic_atomic_u64_t;
+
+#define	RELIC_DENSE_ATOMICS	1
+static inline bool
+relic_atomic_u64_swap_if_relaxed(relic_atomic_u64_t *word,
+    uint64_t *expected, uint64_t desired)
+{
+	if (*word != *expected) {
+		*expected = *word;
+		return (false);
+	}
+	*word = desired;
+	return (true);
+}
+
+static inline uint64_t
+relic_atomic_u64_load_relaxed(const relic_atomic_u64_t *word)
+{
+	return (*word);
+}
 
 static inline void
 relic_atomic_bool_init(relic_atomic_bool_t *word, bool value)

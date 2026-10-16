@@ -31,9 +31,9 @@
  * view.  The pool's workers claim the tasks (lib/pool.c), each worker its
  * own in increasing order.  A task derives exactly what the serial
  * evaluator derives while its first cursor is inside its piece, in the
- * same order, and screens what it derives (lib/task.c): a worker's
- * candidates are the tuples it derived that neither the frozen store nor
- * its own earlier candidates hold.
+ * same order. Collection either screens into worker candidate buffers
+ * (lib/task.c), or records earliest occurrences in a fixed pair rectangle
+ * (lib/dense.c). Both preserve task order and first occurrence within a task.
  *
  * The merge then inserts the candidates as the serial evaluator would have
  * inserted them, on the pool's workers (lib/merge.c).  The candidates in
@@ -160,6 +160,7 @@ enum relic_round_outcome
 relic_round_run(relic_t *ctx, relic_round_t *round)
 {
 	relic_round_job_t job;
+	relic_dense_t dense;
 	relic_pool_t *pool;
 	size_t texts_bytes;
 	size_t workers;
@@ -190,22 +191,27 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 		decline_round(ctx, pool);
 		return (RELIC_ROUND_DECLINED);
 	}
-	if (reserve_candidates(ctx, pool, round) != 0) {
+	job_begin(&job, ctx, pool, round);
+	status = relic_dense_open(&dense, pool, &job);
+	if (status < 0 ||
+	    (status == 0 && reserve_candidates(ctx, pool, round) != 0)) {
+		relic_dense_close(&dense);
 		decline_round(ctx, pool);
 		return (RELIC_ROUND_DECLINED);
 	}
-
-	job_begin(&job, ctx, pool, round);
+	job.dense = status == 1 ? &dense : NULL;
 	relic_pool_for(pool, pool->task_count, relic_round_run_task, &job);
 	texts_bytes = end_worker_texts(pool);
 
 	if (relic_atomic_bool_load_relaxed(&job.abandoned) ||
 	    relic_signal_flag_raised(&ctx->interrupted) ||
-	    !relic_round_merge(ctx, pool, round, texts_bytes)) {
+	    !relic_round_merge(ctx, pool, round, texts_bytes, job.dense)) {
+		relic_dense_close(&dense);
 		abandon_round(ctx, pool);
 		pool->abandoned_rounds++;
 		return (RELIC_ROUND_DECLINED);
 	}
+	relic_dense_close(&dense);
 
 	status = report_task_notes(ctx, pool, round);
 	take_worker_counters(pool, &ctx->counters);
@@ -213,6 +219,8 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 
 	record_task_work(pool, round);
 	pool->merged_rounds++;
+	if (job.dense != NULL)
+		pool->dense_rounds++;
 	pool->thread_tasks += tasks_run_by_threads(pool);
 	if (pool->worker_count > 1)
 		ctx->counters.parallel_rounds++;

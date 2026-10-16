@@ -8,8 +8,13 @@ interfaces that some platforms lack. `configure` compiles one only where the
 C library does not provide the interface, through `AC_REPLACE_FUNCS`, so
 engine sources call each interface unconditionally and no source outside
 this directory contains a platform test. The exception is a
-MemorySanitizer build, which compiles `strlcat.c` and `strlcpy.c` everywhere,
-because the sanitizer cannot see what the C library's copies write.
+MemorySanitizer build, which compiles `strlcat.c` and `strlcpy.c` everywhere
+under private names. Runtime interception of these interfaces varies;
+instrumented replacements keep their writes visible to the sanitizer without
+colliding with runtime-provided interceptors. The renaming is in `config.h`,
+before system declarations, and respects the test suite's explicit names.
+That MSan-only configuration disables fortification so header wrappers cannot
+bypass the instrumented copies; other build modes keep their hardening flags.
 `compat.h` declares whichever interfaces the platform's headers do not.
 
 **Bundled upstream headers.** `queue.h` is a copy of an upstream file, not

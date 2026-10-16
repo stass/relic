@@ -64,6 +64,7 @@
 #define	SCENARIO_HISTORY	"a round reserves what its items inserted"
 #define	SCENARIO_COMPACT	"a merge resolves each local value once"
 #define	SCENARIO_DRIVER		"a lookup plan keeps its indexed access"
+#define	SCENARIO_DENSE		"assigned heads retain expression scratch"
 #define	SCENARIO_DELTA_DRIVER	"whole delta lookup plans agree with serial"
 
 /* Room for a generated program and for a context's diagnostics. */
@@ -191,6 +192,7 @@ static void	 compact_program(text_t *text);
 static size_t	 compact_values_held(const relic_t *ctx);
 static void	 compacted_rounds_agree(size_t threads, size_t max_memory);
 static void	 computing_rounds_merge(size_t threads);
+static void	 dense_rounds_keep_expression_scratch(size_t threads);
 static void	 pending_values_resolve_once(void);
 static void	 errors_fail_as_serially(size_t threads);
 static void	 sums_overflow_as_serially(size_t threads);
@@ -1948,6 +1950,54 @@ sums_overflow_as_serially(size_t threads)
 	relic_destroy(deferred);
 }
 
+/* Text is evaluated in the body, while both emitted columns are assigned. */
+static void
+dense_rounds_keep_expression_scratch(size_t threads)
+{
+	diagnostics_t serial_diagnostics, deferred_diagnostics;
+	relic_t *serial, *deferred;
+	char what[64];
+	unsigned int i;
+	int serial_status, deferred_status;
+
+	failing.length = 0;
+	failing.bytes[0] = '\0';
+	for (i = 0; i < GRAPH_NODES; i++) {
+		appendf(&failing, "edge(%u, %u).\n", i,
+		    (i + 1) % GRAPH_NODES);
+		appendf(&failing, "edge(%u, %u).\n", i,
+		    (i * 7 + 3) % GRAPH_NODES);
+	}
+	appendf(&failing,
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- path(X, Y), edge(Y, Z), "
+	    "S = str(X), length(S) > 0.\n");
+	snprintf(what, sizeof(what), "dense on %zu thread(s)", threads);
+	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
+	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
+	    0, 0, &deferred_diagnostics);
+	if (serial != NULL && deferred != NULL) {
+		serial_status = relic_materialize(serial);
+		deferred_status = relic_materialize(deferred);
+		checkf(serial_status == 0 && deferred_status == 0,
+		    SCENARIO_DENSE, "%s: both materialize", what);
+		if (RELIC_DENSE_ATOMICS && sizeof(relic_atomic_u64_t) == 8)
+			checkf(deferred->pool != NULL &&
+			    deferred->pool->dense_rounds > 0, SCENARIO_DENSE,
+			    "%s: dense rounds reach publication", what);
+		checkf(abandoned_rounds(deferred) == 0, SCENARIO_DENSE,
+		    "%s: no serial retry conceals a collector failure", what);
+		contexts_agree(SCENARIO_DENSE, what, serial, deferred);
+		checkf(strcmp(serial_diagnostics.text,
+		    deferred_diagnostics.text) == 0, SCENARIO_DENSE,
+		    "%s: diagnostics agree", what);
+		checkf(relic_atomic_size_load(&deferred->account.round_bytes) == 0,
+		    SCENARIO_DENSE, "%s: all private buffers are released", what);
+	}
+	relic_destroy(serial);
+	relic_destroy(deferred);
+}
+
 int
 main(void)
 {
@@ -1972,6 +2022,7 @@ main(void)
 		    WIDE_LIMIT_STEPS, threads);
 		notes_come_as_serially(threads);
 		computing_rounds_merge(threads);
+		dense_rounds_keep_expression_scratch(threads);
 		errors_fail_as_serially(threads);
 		sums_overflow_as_serially(threads);
 		strings_rounds_merge(threads);

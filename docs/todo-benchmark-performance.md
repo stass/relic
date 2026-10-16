@@ -1,46 +1,36 @@
 # Performance work
 
-[Medium, components: `lib/round.c`, `lib/task.c`, `lib/merge.c`,
-`lib/atomic.h`, `bench/compare/`]
+[Medium, components: `lib/eval.c`, `lib/import.c`, `lib/facts.c`,
+`lib/relation.c`, `bench/compare/`]
 
-The [completed performance pass](../bench/compare/recorded/performance-pass.md)
-retains the accepted engine, rejected experiments and unresolved rival gaps.
-Its experiments are closed.
+Use the accepted dense-collection engine as the native control. Its
+[recorded comparison](../bench/compare/recorded/dense-rounds/README.md) includes
+the missed 90% RSS aim and the remaining roughly twofold memory gap on the fresh
+FreeBSD rival comparison. The
+[earlier performance pass](../bench/compare/recorded/performance-pass.md)
+retains the other rival gaps and rejected approaches.
 
-## Reduce parallel working memory
+## Choose the next gap
 
-Select **dense binary recursive relations over assigned values**. On the
-retained cyclic scale-4 comparison, sixteen-thread relic uses 8.45 GB against
-Souffle's 0.42 GB. The [allocation attribution](../bench/compare/recorded/m3-max/merge-screen-reuse/README.md)
-finds 102.4 million worker copies of 8.52 million new tuples, 5.18 GB of
-candidate capacity and 2.57 GB of duplicate-finding scratch.
+Files/facts throughput and serial closure time remain material classes.
+Choose one representative cell by absolute excess time and bytes, using the
+existing rough comparison. Attribute its remaining cost to parsing, value
+assignment, relation/index work or executor work before proposing code.
+Further dense-memory work needs attribution of the common append and storage,
+which outlive the collector arrays.
 
-Use the [dense collection design](../specs/design-dense-rounds.md): one fixed
-array records the earliest occurrence of each possible pair. The ordinary
-executor runs each task once. An atomic minimum preserves the earliest task;
-a scalar worker sequence preserves order within that task. Sorting the
-surviving pair positions gives the ordinary ordered append. No tuple payload
-is copied into worker candidate buffers for an admitted dense round.
+Define one bounded change around the measured owner or operation. State what
+storage, traversal or mechanism it removes, its source budget, its controls
+and its rejection criterion before implementation. Preserve complete answers,
+order, assigned identifiers, counters, final accounted storage and refusal
+behavior. Require actual successful execution of the changed path.
 
-This is a proposal, not a measured improvement. The
-[design model](../bench/compare/recorded/dense-round-design/README.md) checks
-ordering and derives a storage ledger. Atomic contention, ordering cost,
-selection on real rounds and process RSS require an implementation experiment.
+## Decide and validate
 
-The [implementation and acceptance steps](todo-parallel.md) define the one
-candidate. Files/facts throughput and remaining serial closure time remain
-documented gaps; neither is an additional implementation workstream.
-
-## Preserve gains and validate the composition
-
-Keep the selected native probe-inline executable as the control. Preserve
-complete answers, order, assigned identifiers, all ordinary counters, final
-accounted storage, and serial refusal behavior. Prove actual dense collection
-and successful shared publication, so a serial retry cannot conceal failure.
-
-Start with a small screen. Advance to the
-[measurement protocol](todo-performance-measurements.md) and full required
-validation only after a major measured memory reduction retains useful speed.
-Compare against a fresh Souffle run on the same host before declaring the
-selected rival gap closed. Close this candidate if its mechanism or source
-budget fails; do not append a family of collector variants.
+Start with a small fixed screen, then use the
+[measurement protocol](todo-performance-measurements.md) for a decisive
+comparison only if the screen shows a useful gain. Retain every observation
+and failed attempt. Measure the accepted changes together, compare rivals
+on the same host and output policy, and run the required correctness and
+sanitizer checks. Close an unproductive candidate; keep unresolved toolchain
+validation work in the testing category of `TODO.md`.
