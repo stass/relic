@@ -287,6 +287,11 @@ struct, whose padding defeats a word-wise hash. The representation sits behind
 a few accessors, so it can be replaced without touching the planner, evaluator,
 rewrite or public interface.
 
+The shared identifier table's [control bytes](design-control-bytes.md)
+encode emptiness and a hash fingerprint in existing metadata. Tagged probes
+read identifiers only for possible matches; exact key comparison, linear
+placement, ownership and allocation remain common to every table user.
+
 See [design-values.md](design-values.md).
 
 ### Storage

@@ -19,13 +19,15 @@ of which `contrib/` holds only the homebrew formula, so
 `contrib/pkgsrc/devel/relic/` are to write; and the
 [release procedure](specs/design-release.md#the-release-procedure).
 
-**Remaining engine-performance gaps.** [Medium, components: `lib/eval.c`,
-`lib/import.c`, `lib/facts.c`, `bench/compare/`] Investigate files/facts
-throughput using the engine with bounded serial membership and dense parallel
-collection as the control. The [performance work](docs/todo-benchmark-performance.md)
-defines attribution, measurement and complexity gates. The
-[serial comparison](bench/compare/recorded/serial-membership/README.md)
-retains the accepted change, control variability and remaining rival RSS costs.
+**Files/grouping throughput.** [Medium, components: `lib/util.h`, `lib/util.c`,
+`bench/compare/`] Screen [control-byte probing](specs/design-control-bytes.md)
+against the current native engine: reject empty and mismatching tagged slots
+without reading their identifiers. The
+[investigation](bench/compare/recorded/files-grouping-design/README.md) records
+the rival gap; the [performance work](docs/todo-benchmark-performance.md)
+sets the 100-line runtime budget, correctness, measurement and rejection
+gates. Files/facts materialization and the remaining recursion RSS gaps stay
+visible there; this throughput experiment does not claim to remove them.
 
 ## Engine
 

@@ -97,15 +97,16 @@ lookup still reads the matching key, so avoided mismatches alone do not
 establish that this storage pays for itself. Canonical membership also
 measures growth, where a cached hash can avoid rereading tuple columns.
 
-**A tag is the cheaper form of that idea.** A table created tagged keeps one
-byte per slot: the top eight bits of the hash the slot's identifier was placed
-under. The low bits choose the slot, so the tag separates keys that share a
-neighbourhood, and a probe passes an occupied slot whose tag differs without
-asking the owner. With well-distributed independent slot and tag bits,
-an unsuccessful search compares against one mismatching key in 256 on
-average, for a quarter of the slot array's size. Above `2^24` slots those
-bits overlap and filtering weakens without affecting correctness. Each
-owner chooses once, at creation:
+**A control byte is the cheaper form of that idea.** A table created tagged
+keeps one byte per slot. Zero denotes emptiness; a nonzero byte is the hash's
+top eight bits, mapping zero to one. The low bits choose the slot, so the
+fingerprint separates keys that share a neighbourhood. A probe reads an
+identifier only when its control byte matches, then asks the owner to compare
+the complete key. The [control-byte design](design-control-bytes.md) defines
+the encoding, the small zero/one alias and the shared linear walk. Controls
+cost a quarter of the slot array's size. Above `2^24` slots the hash bits
+overlap and filtering weakens without affecting correctness. Each owner
+chooses once, at creation:
 
 | Table | Its searches | Tagged |
 | --- | --- | --- |

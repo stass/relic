@@ -48,6 +48,8 @@ runtime use from proposals and related work.
   secondary indexes, deltas and frontiers.
 * [Canonical membership locality](design-membership-locality.md) --
   derived hash tags, exact probing, owner choices, growth and storage costs.
+* [Identifier-table control bytes](design-control-bytes.md) -- occupancy and
+  fingerprints reject slots before reading their identifiers.
 
 **Pipeline**, in the order a program and its queries pass through it
 

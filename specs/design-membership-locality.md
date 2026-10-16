@@ -18,8 +18,10 @@ Related: [architecture: storage](architecture.md#storage),
 
 The relation payload owns its packed domain columns and canonical stripes.
 Each stripe is a `relic_idtab_t`: linear probing over four-byte tuple IDs,
-with a separate tag byte per slot when tagged. Tuple ID zero denotes an
-empty slot. Every eight-bit tag value is valid; emptiness comes from the ID.
+with a separate control byte per slot when tagged. Tuple ID zero denotes an
+empty slot. A tagged table also encodes emptiness in control byte zero, so
+the [common probe](design-control-bytes.md) reads an ID only for a matching
+nonzero fingerprint.
 
 | Owner | Canonical tags | Reason |
 | --- | --- | --- |
@@ -37,9 +39,10 @@ No planner flag, worker count or allocation address selects the layout.
 ## Exact lookup and identity
 
 The unkeyed high part of a wide tuple hash selects the fixed stripe. The
-keyed low 32 bits select the home slot and supply its top eight bits as
-the tag. A probe advances linearly, wrapping at the power-of-two capacity,
-until an empty ID proves absence. A mismatching tag skips the tuple read.
+keyed low 32 bits select the home slot and supply its top byte as the
+fingerprint, mapping zero to one. A probe advances linearly, wrapping at the
+power-of-two capacity, until an empty slot proves absence. A mismatching
+control byte skips both the identifier and tuple reads.
 A matching tag only admits the candidate to exact domain-word equality.
 Collisions cannot create a match, including for zero-column tuples.
 

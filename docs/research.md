@@ -92,6 +92,19 @@ of the composition; its threat model and rationale are stated locally.
 
 ## Parallel ownership and storage
 
+### Control bytes before payload — Proposed; local adaptation
+
+Abseil, [Swiss Tables Design Notes](https://abseil.io/about/design/swisstables),
+describes separate metadata carrying occupancy and a hash fingerprint, with
+candidate payloads read after filtering. Relic's
+[control-byte design](../specs/design-control-bytes.md) applies that separation
+to its existing identifier table. It uses scalar linear probing, reserves
+zero for emptiness and aliases hash high bytes zero and one. It does not
+adopt Abseil's SIMD groups, seven-bit encoding, deletion support or container.
+The exact encoding and invariants are local; the reference does not establish
+a performance gain for relic. The [investigation](../bench/compare/recorded/files-grouping-design/README.md)
+records the workload evidence and limits of the proposal.
+
 ### Frozen reads and ordered publication — Used; local method
 
 [Parallel design](../specs/design-parallel.md),
