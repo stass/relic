@@ -281,6 +281,10 @@ identifiers and are placed in that index on the calling thread in input
 order. Workers can hash and compare pending values privately before that
 publication boundary.
 
+Canonical value identity is compatible with batched execution: operations
+can consume arrays of domain identifiers. A batch retains the same equality
+and publication contracts as scalar work.
+
 The rejected alternatives are a tagged 64-bit cell, whose boxed integers have
 two encodings every construction site must keep canonical, and the public value
 struct, whose padding defeats a word-wise hash. The representation sits behind

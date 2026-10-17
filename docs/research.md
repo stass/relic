@@ -102,8 +102,9 @@ of the composition; its threat model and rationale are stated locally.
 ## Parallel ownership and storage
 
 <a id="control-bytes-before-payload--related-local-proposal"></a>
+<a id="control-bytes-before-payload--proposed-local-adaptation"></a>
 
-### Control bytes before payload — Proposed; local adaptation
+### Control bytes before payload — Related; measured local adaptation
 
 Abseil, [Swiss Tables Design Notes](https://abseil.io/about/design/swisstables),
 describes separate metadata carrying occupancy and a hash fingerprint, with
@@ -115,9 +116,14 @@ adopt Abseil's SIMD groups, seven-bit encoding, deletion support or container.
 The exact encoding and invariants are local; the reference does not establish
 a performance gain for relic. The [initial investigation](../bench/compare/recorded/files-grouping-design/README.md)
 records operation counts. The
-[remaining-cost assessment](../bench/compare/recorded/remaining-costs/README.md#proposed-engine-work)
-selects a bounded experiment because the table already owns every writer;
-the representation is not implemented and its speed benefit is unproven.
+[native comparison](../bench/compare/recorded/metadata-probe/README.md)
+retains the isolated prototype, conditional-load assembly evidence and
+complete-command results. It improves the serial files and facts targets
+but consumes more user CPU on parallel duplicate loading in every decisive
+pair. That control cost fails the experiment's adoption rule; the production
+table keeps its existing tag encoding and probe. The added representation
+obligations are local: zero-tag/zero-ID equivalence and the zero/one alias.
+The prototype adds no owner or caller protocol.
 
 ### Vector pipelines and local grouped aggregation — Related; implementation reference
 
@@ -134,6 +140,15 @@ pins the source and distinguishes direct phase observations from claims
 about individual features. Relic does not adopt DuckDB's vector engine,
 spill manager or string representation. The relevant idea is to consume a
 projection into group state before retaining its rows.
+
+Canonical IDs and batching are independent choices. Relic batches import and
+publication work, while its expression interpreter evaluates individual
+bindings. A batch kernel can operate on arrays of canonical IDs within the
+existing ownership model. DuckDB's
+[vector formats](https://duckdb.org/docs/current/internals/vector) include
+dictionary indexes; its execution model does not require Relic's one
+context-wide namespace for every value. The representation difference does
+not itself establish a difference in which queries an engine can express.
 
 The [input-constraint control](../bench/compare/recorded/remaining-costs/duckdb-pk/README.md)
 adds a complete-tuple primary key to the same unique inputs. DuckDB's

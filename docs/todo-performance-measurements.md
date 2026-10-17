@@ -1,6 +1,6 @@
 # Measuring a performance change
 
-This protocol supports the [performance plan](todo-benchmark-performance.md).
+This protocol supports the [performance direction](todo-benchmark-performance.md).
 It keeps each comparison small enough to answer a decision, with source,
 answers, resource costs and uncertainty preserved together.
 

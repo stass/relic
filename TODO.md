@@ -19,16 +19,6 @@ of which `contrib/` holds only the homebrew formula, so
 `contrib/pkgsrc/devel/relic/` are to write; and the
 [release procedure](specs/design-release.md#the-release-procedure).
 
-**Reduce shared table-probe work.** [Medium, components: `lib/util.h`,
-`lib/util.c`, `bench/compare/`] Test metadata-first probing within the existing
-identifier table, preserving its storage and publication contracts. The
-[performance work](docs/todo-benchmark-performance.md) gives a bounded
-experiment and a 5% complete-command gate. The
-[remaining-cost investigation](bench/compare/recorded/remaining-costs/README.md)
-supports selective ordinary Datalog rules for joins and accepting residual
-bulk-SQL gaps; it does not select a new evaluator, value representation or
-unary-index refactor.
-
 ## Engine
 
 **Type tests read the type bits directly.** [Medium, component:

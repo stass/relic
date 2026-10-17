@@ -15,7 +15,7 @@ Related: [query modes](architecture.md#query-modes),
 [collector measurements](../bench/compare/recorded/counted-projection/README.md),
 [shared-publication measurements](../bench/compare/recorded/counted-destination/README.md),
 [direct-delivery measurements](../bench/compare/recorded/counted-delivery/README.md),
-[performance work](../docs/todo-benchmark-performance.md).
+[performance direction](../docs/todo-benchmark-performance.md).
 
 ## Model and boundary
 

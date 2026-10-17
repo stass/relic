@@ -124,8 +124,8 @@ peaks, memory-limit admission and ownership complexity together. Preserve
 exact answers and failure behavior; an unexplained reproducible control
 regression blocks adoption. The
 [measurement protocol](../docs/todo-performance-measurements.md) defines the
-comparison, and the [performance plan](../docs/todo-benchmark-performance.md)
-records only remaining work.
+comparison; the [performance direction](../docs/todo-benchmark-performance.md)
+sets the boundary for further proposals.
 
 ## Alternatives not taken
 
