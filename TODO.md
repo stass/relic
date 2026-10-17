@@ -19,16 +19,17 @@ of which `contrib/` holds only the homebrew formula, so
 `contrib/pkgsrc/devel/relic/` are to write; and the
 [release procedure](specs/design-release.md#the-release-procedure).
 
-**Files/grouping work reduction.** [Medium, components: `lib/eval.c`,
-`lib/plan.c`, `lib/relation.c`, `lib/import.c`, `bench/compare/`] Deliver completed
-[counted destinations](specs/design-grouped-count.md) through the common
-delivery loop, removing the serial copy into a second answer store while
-retaining ordinary value publication and deferred-round handling. The
-[shared-publication measurements](bench/compare/recorded/counted-destination/README.md)
-identify that output cost and leave ordinary-control validation open. The
-[performance work](docs/todo-benchmark-performance.md) sets architectural and
-measured adoption gates before a separate input-storage design motivated by
-the [DuckDB comparison](bench/compare/recorded/duckdb-files-analysis/README.md).
+**Files/import work reduction.** [Medium, components: `lib/relation.c`,
+`lib/import.c`, `bench/compare/`] Investigate a shared canonical-storage
+preparation boundary and whether contiguous unary domain IDs can eliminate
+a relation's separate hash index, with transactional promotion for other
+inputs. The [performance work](docs/todo-benchmark-performance.md) defines the
+design and measurement sequence, using the
+[counted-query measurements](bench/compare/recorded/counted-delivery/README.md)
+as the reference and the
+[DuckDB comparison](bench/compare/recorded/duckdb-files-analysis/README.md)
+to identify input work. This is a design investigation, not an approved
+representation change.
 
 ## Engine
 

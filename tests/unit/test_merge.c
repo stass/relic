@@ -90,6 +90,8 @@ struct hand_merge {
 	relic_round_t		 round;
 	relic_round_item_t	 items[HAND_TASKS];
 	relic_relation_t	*targets[HAND_TARGETS];
+	relic_destination_t destinations[HAND_TARGETS];
+	relic_destination_t *destination_pointers[HAND_TARGETS];
 };
 
 /*
@@ -676,7 +678,7 @@ hand_open(hand_merge_t *hand, size_t workers)
 
 	bzero(hand, sizeof(*hand));
 	hand->round.items = hand->items;
-	hand->round.targets = hand->targets;
+	hand->round.targets = hand->destination_pointers;
 	hand->round.item_capacity = HAND_TASKS;
 	hand->round.target_count = HAND_TARGETS;
 
@@ -692,6 +694,8 @@ hand_open(hand_merge_t *hand, size_t workers)
 		hand->targets[i] = relic_relation_read(hand->ctx, pred);
 		if (hand->targets[i] == NULL)
 			return (false);
+		relic_destination_set(&hand->destinations[i], hand->targets[i]);
+		hand->destination_pointers[i] = &hand->destinations[i];
 	}
 
 	if (relic_pool_create(&hand->pool, workers,
@@ -849,7 +853,7 @@ hand_task(hand_merge_t *hand, size_t worker, size_t target,
 		candidate->hash = relic_relation_hash(hand->targets[target],
 		    &candidates->words[candidate->offset]);
 		candidate->target = (uint32_t)target;
-		candidate->repeat = false;
+		candidate->contribution = 1;
 		stripe = relic_hash_stripe(candidate->hash);
 		candidates->stripes[candidates->count] = (uint8_t)stripe;
 		candidates->by_stripe[stripe]++;

@@ -1411,3 +1411,36 @@ relic_explain_abandoned_rewrite(relic_t *ctx, const relic_rule_t *query,
 	put_query_rule(ctx, &line, query, answer);
 	line_finish(ctx, &line);
 }
+
+/* Describe the work the private collector attempts, without a fold index. */
+void
+relic_explain_counted(relic_t *ctx, const relic_rule_t *producer,
+    const relic_plan_t *plan, const uint16_t *keys, uint16_t width,
+    const relic_relation_t *answer)
+{
+	relic_explain_line_t line;
+	uint16_t i;
+	size_t operation;
+
+	if (!relic_explaining(ctx))
+		return;
+	line_begin(&line, 1);
+	line_put(&line, "counted producer ");
+	put_pred(ctx, &line, producer->head);
+	line_put(&line, " over ");
+	put_pred(ctx, &line, relic_relation_pred(plan->ops[0].u.atom.relation));
+	line_put(&line, " group columns (");
+	for (i = 0; i < width; i++) {
+		if (i != 0)
+			line_put(&line, ", ");
+		put_size(&line, keys[i]);
+	}
+	line_put(&line, ") -> ");
+	put_relation_name(ctx, &line, answer);
+	line_finish(ctx, &line);
+	for (operation = 0; operation < plan->op_count; operation++) {
+		if (relic_signal_flag_raised(&ctx->interrupted))
+			break;
+		put_ops(ctx, producer, &plan->ops[operation], 1, 2, NULL, false);
+	}
+}

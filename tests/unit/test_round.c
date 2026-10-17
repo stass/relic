@@ -62,6 +62,7 @@
 #define	SCENARIO_TEXT_TUPLES	"the tuple limit refuses strings as serially"
 #define	SCENARIO_TEXT_MEMORY	"the memory limit refuses strings as serially"
 #define	SCENARIO_HISTORY	"a round reserves what its items inserted"
+#define	SCENARIO_RESERVATION	"a reservation refuses before a round runs"
 #define	SCENARIO_COMPACT	"a merge resolves each local value once"
 #define	SCENARIO_DRIVER		"a lookup plan keeps its indexed access"
 #define	SCENARIO_DENSE		"assigned heads retain expression scratch"
@@ -168,6 +169,7 @@ static void	 a_lookup_plan_keeps_its_indexed_access(size_t threads);
 static void	 a_querys_rewrite_runs_deferred_rounds(size_t threads);
 static uint64_t	 expected_candidates(const relic_t *ctx);
 static uint64_t	 reservation_declines(const relic_t *ctx);
+static void	 a_reservation_refuses_before_a_round_runs(size_t threads);
 static void	 rounds_reserve_what_deferred_rounds_inserted(size_t threads);
 static void	 rounds_reserve_what_serial_rounds_inserted(void);
 static void	 appendf(text_t *text, const char *format, ...)
@@ -1000,6 +1002,102 @@ reservation_declines(const relic_t *ctx)
 }
 
 /*
+ * A completed seed records one real insertion for its next round to reserve.
+ * The seed has no plan and needs no expression buffers; pool preparation and
+ * task storage are uncharged. With no arena or round bytes held, the reported
+ * storage is the entire account. A budget equal to it therefore refuses the
+ * candidate reservation, the round's first positive charge, before any task.
+ * This covers reservation refusal independently of sampled limit intervals.
+ */
+static void
+a_reservation_refuses_before_a_round_runs(size_t threads)
+{
+	diagnostics_t diagnostics;
+	relic_stats_t before, after;
+	relic_insert_history_t history = { 0 };
+	relic_arg_t argument = { .kind = RELIC_ARG_CONSTANT };
+	relic_rule_t seed = {
+		.head_args = &argument,
+		.origin = RELIC_ORIGIN_QUERY,
+		.head_arity = 1
+	};
+	relic_round_item_t item = { .rule = &seed, .insertions = &history };
+	relic_destination_t destination;
+	relic_destination_t *targets[] = { &destination };
+	relic_exec_env_t env = { 0 };
+	relic_round_t round = {
+		.items = &item,
+		.targets = targets,
+		.env = &env,
+		.item_count = 1,
+		.item_capacity = 1,
+		.target_count = 1
+	};
+	relic_relation_t *relation;
+	const relic_dom_t *tuple;
+	relic_t *ctx;
+	uint64_t reservations, merged, abandoned;
+
+	ctx = context_for("held(7).", RELIC_F_PARALLEL_ALWAYS, threads,
+	    0, 0, &diagnostics);
+	if (ctx == NULL)
+		return;
+	relation = relic_relation_create(ctx, RELIC_ID_NONE, 0, 1);
+	if (relation == NULL) {
+		checkf(false, SCENARIO_RESERVATION,
+		    "on %zu thread(s), the seed's target is created", threads);
+		relic_destroy(ctx);
+		return;
+	}
+	relic_destination_set(&destination, relation);
+	env.ctx = ctx;
+	argument.u.constant = relic_value_find_integer(ctx, 7);
+	checkf(relic_round_run(ctx, &round) == RELIC_ROUND_MERGED &&
+	    history.ran && history.inserted == 1 &&
+	    relic_relation_count(relation) == 1,
+	    SCENARIO_RESERVATION,
+	    "on %zu thread(s), a completed seed supplies its insertion history", threads);
+	relic_relation_clear(ctx, relation);
+	item.gained = false;
+	relic_stats(ctx, &before);
+	ctx->account.limit = before.storage_bytes;
+	checkf(ctx->account.arena_bytes == 0 && ctx->account.round_bytes == 0 &&
+	    !relic_account_exceeds(&ctx->account, 0, 0) &&
+	    relic_account_exceeds(&ctx->account, 0, 1),
+	    SCENARIO_RESERVATION,
+	    "on %zu thread(s), the budget admits held storage and no growth", threads);
+	reservations = reservation_declines(ctx);
+	merged = merged_rounds(ctx);
+	abandoned = abandoned_rounds(ctx);
+	checkf(relic_round_run(ctx, &round) == RELIC_ROUND_DECLINED &&
+	    reservation_declines(ctx) == reservations + 1,
+	    SCENARIO_RESERVATION,
+	    "on %zu thread(s), the predicted reservation is refused", threads);
+	relic_stats(ctx, &after);
+	checkf(bcmp(&before, &after, sizeof(before)) == 0 &&
+	    relic_relation_count(relation) == 0 && !item.gained &&
+	    history.ran && history.inserted == 1 && diagnostics.length == 0 &&
+	    merged_rounds(ctx) == merged && abandoned_rounds(ctx) == abandoned &&
+	    !ctx->account.refused && ctx->account.arena_bytes == 0 &&
+	    ctx->account.round_bytes == 0, SCENARIO_RESERVATION,
+	    "on %zu thread(s), refusal publishes nothing and returns every charge", threads);
+	ctx->account.limit = 0;
+	checkf(relic_round_run(ctx, &round) == RELIC_ROUND_MERGED && item.gained &&
+	    merged_rounds(ctx) == merged + 1 && abandoned_rounds(ctx) == abandoned &&
+	    relic_relation_count(relation) == 1 && diagnostics.length == 0 &&
+	    ctx->account.round_bytes == 0,
+	    SCENARIO_RESERVATION,
+	    "on %zu thread(s), the same round merges when its reservation fits", threads);
+	tuple = relic_relation_tuple(relation, 1);
+	checkf(tuple != NULL && tuple[0] == argument.u.constant,
+	    SCENARIO_RESERVATION,
+	    "on %zu thread(s), the retry installs the seed's assigned value", threads);
+	relic_relation_clear(ctx, relation);
+	relic_relation_free(relation);
+	relic_destroy(ctx);
+}
+
+/*
  * Whether a deferred context counted its merged rounds as shared exactly
  * when it had threads to share them with: every one of them on a pool of
  * more than one worker, and none on the calling thread alone, where no
@@ -1292,9 +1390,8 @@ a_querys_rewrite_runs_deferred_rounds(size_t threads)
  *
  * Otherwise the sweep must reach both ways a deferred round ends under a
  * limit: a round abandoned and run again serially, and a round merged.
- * Under the memory limit it must also reach a round declined at its
- * reservation, which the rounds after the first of a recursive component
- * make.
+ * Reservation refusal has its own direct test: sampling these intervals
+ * need not hit the limit between held storage and a predicted reservation.
  * Under the memory limit it must also reach an abandoned round whose
  * serial run then succeeds, the case where the buffers' charge alone was
  * in the way, and a merge the limit itself declines, once every task has
@@ -1325,7 +1422,6 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	bool abandoned_seen;
 	bool recovered_seen;
 	bool declined_seen;
-	bool reservation_seen;
 	bool merged_seen;
 	char what[64];
 
@@ -1360,7 +1456,6 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	abandoned_seen = false;
 	recovered_seen = false;
 	declined_seen = false;
-	reservation_seen = false;
 	merged_seen = false;
 
 	for (limit = first; limit <= last; limit += step) {
@@ -1398,8 +1493,6 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 		}
 		if (limit_declines(deferred) > 0)
 			declined_seen = true;
-		if (reservation_declines(deferred) > 0)
-			reservation_seen = true;
 		if (merged_rounds(deferred) > 0)
 			merged_seen = true;
 
@@ -1417,9 +1510,6 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 		checkf(declined_seen || (working > 0 && workers > 1), scenario,
 		    "on %zu thread(s), the sweep has the limit decline a "
 		    "merge", threads);
-		checkf(reservation_seen, scenario, "on %zu thread(s), the "
-		    "sweep has the limit refuse a round's reservation",
-		    threads);
 	}
 }
 
@@ -2012,6 +2102,7 @@ main(void)
 	for (i = 0; i < sizeof(thread_counts) / sizeof(thread_counts[0]);
 	    i++) {
 		threads = thread_counts[i];
+		a_reservation_refuses_before_a_round_runs(threads);
 		a_deferred_round_inserts_in_serial_order(threads);
 		a_querys_rewrite_runs_deferred_rounds(threads);
 		limits_refuse_as_serially(SCENARIO_TUPLES, graph.bytes, false,

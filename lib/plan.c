@@ -221,8 +221,6 @@ typedef struct relic_plan_score relic_plan_score_t;
  * `accesses` has as much room, and holds the `access_count` indexes the
  * operations emitted so far read, one per operation reading one, until
  * coalesce_accesses() keeps each index once.
- * `target` is the relation the EMIT writes, and NULL when only the order is
- * wanted.
  * `delta_literal` is the body index of the literal that reads the delta, or
  * RELIC_PLAN_NO_DELTA, and `policy` says where it goes.  `incomplete`, when
  * not NULL, is indexed by predicate identifier minus one and marks the
@@ -232,7 +230,6 @@ struct relic_planner {
 	relic_t			*ctx;
 	relic_arena_t		*arena;
 	const relic_rule_t	*rule;
-	relic_relation_t	*target;
 	const bool		*incomplete;
 	size_t			*order;
 	bool			*placed;
@@ -301,7 +298,6 @@ static int	 confirm_delta_literal(relic_t *ctx, const relic_rule_t *rule,
 		    size_t delta_literal, const bool *incomplete);
 static int	 confirm_order_complete(const relic_planner_t *planner);
 static int	 confirm_plan_complete(const relic_planner_t *planner);
-static int	 confirm_target_fits(const relic_planner_t *planner);
 static enum relic_cost_kind cost_kind(const relic_op_t *op);
 static enum relic_cost_kind fold_cost_kind(const relic_op_aggregate_t *fold);
 static uint64_t	 dead_slots(const relic_t *ctx, const relic_rule_t *rule);
@@ -365,11 +361,11 @@ static int	 place_test(relic_planner_t *planner,
 		    const relic_literal_t *literal);
 static int	 plan_family(relic_planner_t *planners, relic_t *ctx,
 		    relic_arena_t *arena, const relic_rule_t *rule,
-		    relic_relation_t *target, size_t delta_literal,
+		    size_t delta_literal,
 		    const bool *incomplete, relic_plan_family_t *family);
 static int	 planner_init(relic_planner_t *planner, relic_t *ctx,
 		    relic_arena_t *arena, const relic_rule_t *rule,
-		    relic_relation_t *target, size_t delta_literal,
+		    size_t delta_literal,
 		    enum relic_order_policy policy, const bool *incomplete);
 static int	 planner_prepare_order(relic_planner_t *planner);
 static void	 planner_release(relic_planner_t *planner);
@@ -1882,36 +1878,10 @@ confirm_delta_literal(relic_t *ctx, const relic_rule_t *rule,
 }
 
 /*
- * Confirm that the relation the EMIT writes has a column for each head
- * argument, no more and no fewer.  The EMIT reads `head_arity` arguments into
- * a tuple of the relation's arity, so this is what makes the head arity a
- * bound the plan can trust: a rule built with the wrong one, or handed the
- * wrong relation, fails here rather than reading past its arguments or
- * storing a tuple with columns nobody wrote.
- */
-static int
-confirm_target_fits(const relic_planner_t *planner)
-{
-	char described[RELIC_PRED_TEXT_MAX];
-
-	if (planner->target->arity == planner->rule->head_arity)
-		return (0);
-
-	relic_diag_internal(planner->ctx, &planner->rule->where,
-	    "a rule of %u head arguments was planned into relation %s",
-	    (unsigned int)planner->rule->head_arity,
-	    relic_relation_identify(planner->ctx, planner->target, described,
-	    sizeof(described)));
-
-	return (-1);
-}
-
-/*
  * Place the EMIT that ends every plan.  It carries the head's terms and
  * arity, and the predicate the head names, or none for a query.  The
  * relation the tuples are written into belongs to the caller:
- * confirm_target_fits() has required its arity to be the head's, and the
- * operation does not hold the relation.
+ * the operation derives its schema solely from the rule.
  */
 static int
 place_emit(relic_planner_t *planner)
@@ -1922,9 +1892,6 @@ place_emit(relic_planner_t *planner)
 	uint16_t i;
 
 	rule = planner->rule;
-
-	if (confirm_target_fits(planner) != 0)
-		return (-1);
 
 	if (confirm_plan_complete(planner) != 0)
 		return (-1);
@@ -2037,14 +2004,13 @@ dead_slots(const relic_t *ctx, const relic_rule_t *rule)
 /*
  * Prepare to order a rule's body: the record of which literals are placed,
  * in the arena, and room for a ranking of its positive literals, which
- * planner_release() frees.  `target` is the relation the EMIT writes, or NULL
- * when only the order is wanted.  The caller supplies where the order goes.
+ * planner_release() frees.  The caller supplies where the order goes.
  * Returns -1 when an allocation was refused, which marks the arena failed
  * whichever allocation it was, so the caller's boundary reports it.
  */
 static int
 planner_init(relic_planner_t *planner, relic_t *ctx, relic_arena_t *arena,
-    const relic_rule_t *rule, relic_relation_t *target, size_t delta_literal,
+    const relic_rule_t *rule, size_t delta_literal,
     enum relic_order_policy policy, const bool *incomplete)
 {
 	size_t count;
@@ -2053,7 +2019,6 @@ planner_init(relic_planner_t *planner, relic_t *ctx, relic_arena_t *arena,
 	planner->ctx = ctx;
 	planner->arena = arena;
 	planner->rule = rule;
-	planner->target = target;
 	planner->incomplete = incomplete;
 	planner->delta_literal = delta_literal;
 	planner->policy = policy;
@@ -2311,7 +2276,7 @@ emit_family(relic_planner_t *planners, size_t count,
  */
 static int
 plan_family(relic_planner_t *planners, relic_t *ctx, relic_arena_t *arena,
-    const relic_rule_t *rule, relic_relation_t *target, size_t delta_literal,
+    const relic_rule_t *rule, size_t delta_literal,
     const bool *incomplete, relic_plan_family_t *family)
 {
 	enum relic_order_policy policies[RELIC_FAMILY_MAX];
@@ -2323,7 +2288,7 @@ plan_family(relic_planner_t *planners, relic_t *ctx, relic_arena_t *arena,
 
 	count = family_policies(ctx, policies);
 	for (i = 0; i < count; i++) {
-		if (planner_init(&planners[i], ctx, arena, rule, target,
+		if (planner_init(&planners[i], ctx, arena, rule,
 		    delta_literal, policies[i], incomplete) != 0)
 			return (-1);
 		if (planner_prepare_order(&planners[i]) != 0)
@@ -2362,8 +2327,7 @@ planning_status(relic_t *ctx, relic_arena_t *arena, int status)
  * reported: memory or the memory limit refused an index or a statistic, or
  * the planner broke one of a plan's invariants, which is an internal error.
  *
- * The caller passes `target` so the head arity can be checked against it.
- * The plan does not retain `target`.  `incomplete`, when not NULL, is
+ * The head schema comes from the rule.  `incomplete`, when not NULL, is
  * indexed by predicate identifier minus one and marks the relations still
  * being derived; every other relation is measured as it stands.
  *
@@ -2371,12 +2335,12 @@ planning_status(relic_t *ctx, relic_arena_t *arena, int status)
  * from `arena`, and live as long as the caller keeps it.  The relations the
  * body reads, and the indexes its lookups read, are created here if they do
  * not yet exist; they belong to the context, which is what lets a plan hold
- * them.  The caller keeps `target` and pairs it with the plan when the plan
- * runs.
+ * them.  The caller checks the head schema when pairing the plan with its
+ * consumer and scratch.
  */
 int
 relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
-    relic_relation_t *target, const bool *incomplete, relic_plan_t *plan)
+    const bool *incomplete, relic_plan_t *plan)
 {
 	relic_planner_t planner;
 	relic_plan_draft_t draft;
@@ -2384,7 +2348,7 @@ relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
 
 	bzero(plan, sizeof(*plan));
 
-	status = planner_init(&planner, ctx, arena, rule, target,
+	status = planner_init(&planner, ctx, arena, rule,
 	    RELIC_PLAN_NO_DELTA, RELIC_POLICY_GREEDY, incomplete);
 	if (status == 0)
 		status = planner_prepare_order(&planner);
@@ -2485,7 +2449,7 @@ relic_plan_prepare(relic_t *ctx, relic_arena_t *arena,
  */
 int
 relic_plan_variant(relic_t *ctx, relic_arena_t *arena,
-    const relic_rule_t *rule, relic_relation_t *target, size_t delta_literal,
+    const relic_rule_t *rule, size_t delta_literal,
     const bool *incomplete, relic_plan_family_t *family)
 {
 	relic_planner_t planners[RELIC_FAMILY_MAX];
@@ -2500,7 +2464,7 @@ relic_plan_variant(relic_t *ctx, relic_arena_t *arena,
 		return (-1);
 	}
 
-	status = plan_family(planners, ctx, arena, rule, target,
+	status = plan_family(planners, ctx, arena, rule,
 	    delta_literal, incomplete, family);
 
 	for (i = 0; i < RELIC_FAMILY_MAX; i++)
@@ -2527,7 +2491,7 @@ relic_plan_order(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
 	relic_planner_t planner;
 	int status;
 
-	status = planner_init(&planner, ctx, arena, rule, NULL,
+	status = planner_init(&planner, ctx, arena, rule,
 	    RELIC_PLAN_NO_DELTA, RELIC_POLICY_GREEDY, incomplete);
 	if (status == 0) {
 		planner.order = order;

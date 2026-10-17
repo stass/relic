@@ -122,20 +122,21 @@ about individual features. Relic does not adopt DuckDB's vector engine,
 spill manager or string representation. The relevant idea is to consume a
 projection into group state before retaining its rows.
 
-### A counted destination sharing evaluation — Proposed; local adaptation
+### A counted destination sharing evaluation — Used; local adaptation
 
 [Design](../specs/design-grouped-count.md),
 [source comparison](../bench/compare/recorded/duckdb-files-analysis/README.md),
 [private-collector experiment](../bench/compare/recorded/counted-projection/README.md),
-[shared-publication experiment](../bench/compare/recorded/counted-destination/README.md).
+[shared-publication experiment](../bench/compare/recorded/counted-destination/README.md),
+[direct-delivery measurements](../bench/compare/recorded/counted-delivery/README.md).
 
 A full count query over one base scan owns a canonical key/count destination
 whose completed contents supply the answer. The existing emitted-tuple
 distinctness proof permits one increment per producer row under Datalog set
-semantics. No named predicate is rebound to a summary. The intended consumer shares ordinary value
-publication and deferred-round resolution, combining multiplicities in the
-existing first-occurrence merge. Its producer plan remains intact so key
-projection cannot accidentally replace generation with an existence test.
+semantics. No named predicate is rebound to a summary. The consumer shares
+ordinary value publication and deferred-round resolution, combining
+multiplicities in the existing first-occurrence merge. Its producer plan remains
+intact so key projection cannot accidentally replace generation with an existence test.
 Publishing all count values before delivery lets the same owner supply the
 result without copying it into another canonical relation. Ordinary sets and
 completed counts share the delivery loop.
@@ -143,13 +144,15 @@ completed counts share the delivery loop.
 A measured private collector reduced files memory and elapsed time, but
 withholding interning repeated long-string work and capacity refusal added
 replay cost. Both controls lost in all ten confirmation pairs. That model
-is not selected. A shared-publication screen removes the long-key loss and
-retains the files improvement, but high-cardinality output loses elapsed
-time. Direct phase observations identify serial construction of a second
+is not selected. A shared-publication screen removed the long-key loss and
+retained the files improvement, but high-cardinality output lost elapsed
+time. Direct phase observations identified serial construction of a second
 answer relation as a material cost. Delivering completed keys and counts
-removes that store; this result representation still requires implementation
-and performance validation. The admission, value-order and failure proofs are
-local obligations, not results established by the DuckDB reference.
+removes that store while reusing ordinary delivery. The bounded query
+certificate and closed SET/COUNT destination own the added rules; workers
+retain the ordinary publication, merging and failure protocol. The admission,
+value-order and failure proofs are local obligations, not results established
+by the DuckDB reference.
 
 ### Frozen reads and ordered publication — Used; local method
 

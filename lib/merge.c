@@ -207,7 +207,7 @@ struct relic_merge {
 	relic_t				*ctx;
 	relic_pool_t			*pool;
 	relic_round_t			*round;
-	relic_append_t			*appends;
+	relic_destination_append_t	*appends;
 	size_t				*projected;
 	relic_merge_list_t		*worker_lists;
 	relic_merge_firsts_place_t	 firsts_places[RELIC_STRIPES];
@@ -243,13 +243,13 @@ static void	 copy_strings(const relic_merge_compaction_t *compaction);
 static int	 count_new_tuples(relic_merge_t *merge);
 static int	 describe_marker(relic_merge_compaction_t *compaction,
 		    size_t worker, relic_dom_t marker);
-static const relic_candidate_t *entry_of(const relic_merge_t *merge,
+static relic_candidate_t *entry_of(const relic_merge_t *merge,
 		    relic_merge_ref_t ref);
 static size_t	 find_layout(void *owner, void *memory);
 static int	 find_new_tuples(relic_merge_t *merge);
 static void	 find_new_in_stripe(void *argument, size_t stripe,
 		    size_t worker_index);
-static bool	 firsts_hold(const relic_merge_t *merge,
+static relic_candidate_t *firsts_find(const relic_merge_t *merge,
 		    const relic_merge_firsts_t *firsts, relic_merge_ref_t ref);
 static void	 firsts_add(const relic_merge_t *merge,
 		    relic_merge_firsts_t *firsts, relic_merge_ref_t ref);
@@ -631,7 +631,7 @@ collect_descriptors(relic_merge_compaction_t *compaction)
 			candidate = &candidates->entries[i];
 			tuple = &candidates->words[candidate->offset];
 			arity = relic_relation_arity(
-			    merge->round->targets[candidate->target]);
+			    relic_destination_relation(merge->round->targets[candidate->target]));
 			for (column = 0; column < arity; column++) {
 				if ((tuple[column] & RELIC_DOM_TYPE_MASK) != 0)
 					continue;
@@ -820,7 +820,7 @@ rewrite_worker(void *argument, size_t worker, size_t worker_index RELIC_UNUSED)
 
 	for (i = 0; i < candidates->count; i++) {
 		candidate = &candidates->entries[i];
-		relation = merge->round->targets[candidate->target];
+		relation = relic_destination_relation(merge->round->targets[candidate->target]);
 		tuple = &candidates->words[candidate->offset];
 		if (!rewrite_markers(&compaction->spans[worker],
 		    merge->resolution.map.ids, tuple,
@@ -973,6 +973,7 @@ find_new_in_stripe(void *argument, size_t stripe,
 	const relic_merge_list_t *worker_list;
 	const relic_round_task_t *task;
 	relic_candidates_t *candidates;
+	relic_candidate_t *first, *candidate;
 	relic_merge_firsts_t firsts;
 	relic_merge_t *merge;
 	relic_merge_ref_t ref;
@@ -1001,8 +1002,13 @@ find_new_in_stripe(void *argument, size_t stripe,
 		    stripe_end, task->first_candidate);
 		for (; i < stripe_end && worker_list->list[i] < task_end; i++) {
 			ref.position = worker_list->list[i];
-			if (firsts_hold(merge, &firsts, ref)) {
-				candidates->entries[ref.position].repeat = true;
+			candidate = &candidates->entries[ref.position];
+			first = firsts_find(merge, &firsts, ref);
+			if (first != NULL) {
+				first->contribution = relic_contribution_combine(
+				    &merge->round->targets[candidate->target]->view,
+				    first->contribution, candidate->contribution);
+				candidate->contribution = 0;
 			} else {
 				firsts_add(merge, &firsts, ref);
 				task_firsts++;
@@ -1054,7 +1060,7 @@ stripe_candidates(const relic_pool_t *pool, size_t stripe)
 /*
  * The candidate `ref` names, and its tuple.
  */
-static const relic_candidate_t *
+static relic_candidate_t *
 entry_of(const relic_merge_t *merge, relic_merge_ref_t ref)
 {
 	return (&merge->pool->workers[ref.worker].candidates.entries[
@@ -1075,18 +1081,18 @@ tuple_of(const relic_merge_t *merge, relic_merge_ref_t ref)
  * Whether a first met already is the same tuple for the same target as the
  * candidate `ref` names.
  */
-static bool
-firsts_hold(const relic_merge_t *merge, const relic_merge_firsts_t *firsts,
+static relic_candidate_t *
+firsts_find(const relic_merge_t *merge, const relic_merge_firsts_t *firsts,
     relic_merge_ref_t ref)
 {
 	const relic_candidate_t *candidate;
-	const relic_candidate_t *first;
+	relic_candidate_t *first;
 	relic_idprobe_t probe;
 	uint16_t arity;
 	uint32_t met_plus_one;
 
 	candidate = entry_of(merge, ref);
-	arity = relic_relation_arity(merge->round->targets[candidate->target]);
+	arity = relic_relation_arity(relic_destination_relation(merge->round->targets[candidate->target]));
 
 	relic_idprobe_open(&probe, &firsts->table,
 	    relic_candidate_screen_hash(candidate->target, candidate->hash));
@@ -1096,10 +1102,10 @@ firsts_hold(const relic_merge_t *merge, const relic_merge_firsts_t *firsts,
 		    relic_tuple_equal(tuple_of(merge,
 		    firsts->refs[met_plus_one - 1]), tuple_of(merge, ref),
 		    arity))
-			return (true);
+			return (first);
 	}
 
-	return (false);
+	return (NULL);
 }
 
 /*
@@ -1142,7 +1148,7 @@ count_new_tuples(relic_merge_t *merge)
 	for (t = 0; t < merge->pool->task_count; t++) {
 		task = &merge->pool->tasks[t];
 		target = merge->round->items[task->item].target;
-		append = &merge->appends[target];
+		append = &merge->appends[target].relation;
 		merge->task_starts[t] = append->count;
 		if (merge->dense != NULL) {
 			append->count += task->inserted;
@@ -1158,13 +1164,13 @@ count_new_tuples(relic_merge_t *merge)
 		}
 	}
 
-	if (merge->dense != NULL && merge->appends[0].count != merge->dense->count)
+	if (merge->dense != NULL && merge->appends[0].relation.count != merge->dense->count)
 		return (-1);
 	total = 0;
 	for (t = 0; t < merge->round->target_count; t++) {
-		append = &merge->appends[t];
+		append = &merge->appends[t].relation;
 		if (append->count > RELIC_TUPLE_MAX -
-		    relic_relation_count(merge->round->targets[t]))
+		    relic_relation_count(relic_destination_relation(merge->round->targets[t])))
 			return (-1);
 		total += append->count;
 	}
@@ -1189,7 +1195,7 @@ stage_new_tuples(relic_merge_t *merge)
 	size_t s;
 
 	for (t = 0; t < merge->round->target_count; t++) {
-		if (relic_relation_append_open(merge->ctx,
+		if (relic_destination_append_open(merge->ctx,
 		    merge->round->targets[t], &merge->appends[t]) != 0)
 			return (-1);
 	}
@@ -1206,9 +1212,9 @@ stage_new_tuples(relic_merge_t *merge)
 	    merge);
 	if (merge->dense != NULL) {
 		for (s = 0; s < RELIC_STRIPES; s++)
-			merge->appends[0].growth.by_stripe[s] =
-			    merge->appends[0].stripe_start[s + 1] -
-			    merge->appends[0].stripe_start[s];
+			merge->appends[0].relation.growth.by_stripe[s] =
+			    merge->appends[0].relation.stripe_start[s + 1] -
+			    merge->appends[0].relation.stripe_start[s];
 		relic_dense_close(merge->dense);
 		merge->dense = NULL;
 	}
@@ -1228,7 +1234,7 @@ list_staged_part(void *argument, size_t part,
 
 	merge = argument;
 	part_record = &merge->listing_parts[part];
-	relic_relation_list_append(&merge->appends[part_record->target],
+	relic_relation_list_append(&merge->appends[part_record->target].relation,
 	    part_record->part);
 }
 
@@ -1254,7 +1260,7 @@ stage_task(void *argument, size_t task, size_t worker_index RELIC_UNUSED)
 	merge = argument;
 	record = &merge->pool->tasks[task];
 	target = merge->round->items[record->item].target;
-	relation = merge->round->targets[target];
+	relation = relic_destination_relation(merge->round->targets[target]);
 	candidates = &merge->pool->workers[record->worker].candidates;
 
 	position = merge->task_starts[task];
@@ -1265,20 +1271,20 @@ stage_task(void *argument, size_t task, size_t worker_index RELIC_UNUSED)
 			    relic_signal_flag_raised(&merge->ctx->interrupted))
 				return;
 			relic_dense_tuple(merge->dense, position, tuple);
-			relic_relation_stage(relation, &merge->appends[target],
-			    position, tuple, relic_relation_hash(relation, tuple));
+			relic_destination_stage(merge->round->targets[target], &merge->appends[target],
+			    position, tuple, relic_relation_hash(relation, tuple), 1);
 		}
 		return;
 	}
 	end = record->first_candidate + record->candidate_count;
 	for (i = record->first_candidate; i < end; i++) {
 		candidate = &candidates->entries[i];
-		if (candidate->repeat)
+		if (candidate->contribution == 0)
 			continue;
 
-		relic_relation_stage(relation, &merge->appends[target],
+		relic_destination_stage(merge->round->targets[target], &merge->appends[target],
 		    position, &candidates->words[candidate->offset],
-		    candidate->hash);
+		    candidate->hash, candidate->contribution);
 		position++;
 	}
 
@@ -1342,7 +1348,7 @@ classify_layout(void *owner, void *memory)
 		part_record = &merge->classify_parts[p];
 		place = &merge->keys_places[p];
 		place->room = relic_relation_classify_tuples(
-		    &merge->appends[part_record->target], part_record->part);
+		    &merge->appends[part_record->target].relation, part_record->part);
 		place->slots = relic_block_piece(&cursor, &bytes,
 		    relic_idtab_bytes_for(true, place->room), 1);
 		place->first = relic_block_piece(&cursor, &bytes, place->room,
@@ -1370,7 +1376,7 @@ number_parts(const relic_merge_t *merge,
 
 	count = 0;
 	for (t = 0; t < merge->round->target_count; t++)
-		count += parts_of(&merge->appends[t]);
+		count += parts_of(&merge->appends[t].relation);
 	*countp = 0;
 	if (count == 0)
 		return (0);
@@ -1381,7 +1387,7 @@ number_parts(const relic_merge_t *merge,
 	*partsp = parts;
 
 	for (t = 0; t < merge->round->target_count; t++) {
-		target_parts = parts_of(&merge->appends[t]);
+		target_parts = parts_of(&merge->appends[t].relation);
 		for (p = 0; p < target_parts; p++) {
 			parts[*countp].target = t;
 			parts[*countp].part = p;
@@ -1413,8 +1419,8 @@ classify_part(void *argument, size_t part, size_t worker_index RELIC_UNUSED)
 	    place->slots);
 	new_keys.first = place->first;
 	relic_relation_classify_append(
-	    merge->round->targets[part_record->target],
-	    &merge->appends[part_record->target], part_record->part, &new_keys);
+	    relic_destination_relation(merge->round->targets[part_record->target]),
+	    &merge->appends[part_record->target].relation, part_record->part, &new_keys);
 }
 
 /*
@@ -1447,10 +1453,10 @@ reserve_room(relic_merge_t *merge)
 
 	growth = 0;
 	for (t = 0; t < merge->round->target_count; t++) {
-		relation = merge->round->targets[t];
+		relation = relic_destination_relation(merge->round->targets[t]);
 		merge->projected[t] = relic_relation_bytes_after_append(
-		    relation, &merge->appends[t]);
-		during = relic_relation_bytes_during_append(relation,
+		    relation, &merge->appends[t].relation);
+		during = relic_destination_bytes_during_append(merge->round->targets[t],
 		    &merge->appends[t]);
 		if (merge->projected[t] == SIZE_MAX || during == SIZE_MAX)
 			return (-1);
@@ -1477,7 +1483,7 @@ reserve_room(relic_merge_t *merge)
 		merge->resolution.reserved = true;
 	}
 	for (t = 0; t < merge->round->target_count; t++) {
-		if (relic_relation_reserve_append(merge->ctx,
+		if (relic_destination_reserve_append(merge->ctx,
 		    merge->round->targets[t], &merge->appends[t]) != 0)
 			return (-1);
 	}
@@ -1503,7 +1509,7 @@ reserve_room(relic_merge_t *merge)
 static void
 apply_merge(relic_merge_t *merge)
 {
-	relic_relation_t *relation;
+	const relic_relation_t *relation;
 	size_t t;
 
 	if (resolution_promised(&merge->resolution)) {
@@ -1514,18 +1520,18 @@ apply_merge(relic_merge_t *merge)
 	}
 
 	for (t = 0; t < merge->round->target_count; t++)
-		relic_relation_take_append(merge->ctx,
+		relic_destination_take_append(merge->ctx,
 		    merge->round->targets[t], &merge->appends[t]);
 
 	relic_pool_for(merge->pool, merge->apply_part_count, apply_part,
 	    merge);
 
 	for (t = 0; t < merge->round->target_count; t++) {
-		relation = merge->round->targets[t];
+		relation = relic_destination_relation(merge->round->targets[t]);
 		relic_relation_finish_append(merge->ctx, relation,
-		    &merge->appends[t]);
+		    &merge->appends[t].relation);
 		assert(relic_relation_bytes(relation) == merge->projected[t]);
-		merge->ctx->counters.tuples_inserted += merge->appends[t].count;
+		merge->ctx->counters.tuples_inserted += merge->appends[t].relation.count;
 	}
 
 	for (t = 0; t < merge->pool->task_count; t++) {
@@ -1546,8 +1552,8 @@ apply_part(void *argument, size_t part, size_t worker_index RELIC_UNUSED)
 
 	merge = argument;
 	part_record = &merge->apply_parts[part];
-	relic_relation_apply_append(merge->round->targets[part_record->target],
-	    &merge->appends[part_record->target], part_record->part);
+	relic_relation_apply_append(merge->round->targets[part_record->target]->relation,
+	    &merge->appends[part_record->target].relation, part_record->part);
 }
 
 /*
@@ -1563,7 +1569,7 @@ merge_end(relic_merge_t *merge)
 
 	if (merge->appends != NULL) {
 		for (t = 0; t < merge->round->target_count; t++)
-			relic_relation_append_close(merge->ctx,
+			relic_destination_append_close(merge->ctx,
 			    &merge->appends[t]);
 	}
 

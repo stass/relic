@@ -24,6 +24,8 @@ struct dense_fixture {
 	relic_t			*ctx;
 	relic_pool_t		*pool;
 	relic_relation_t	*target;
+	relic_destination_t destination;
+	relic_destination_t *destination_pointer;
 	relic_exec_env_t	 env;
 	relic_round_t		 round;
 	relic_round_item_t	 item;
@@ -99,7 +101,9 @@ fixture_open(dense_fixture_t *fixture, size_t workers)
 	fixture->item.plan = &fixture->plan;
 	fixture->round.items = &fixture->item;
 	fixture->round.item_count = 1;
-	fixture->round.targets = &fixture->target;
+	relic_destination_set(&fixture->destination, fixture->target);
+	fixture->destination_pointer = &fixture->destination;
+	fixture->round.targets = &fixture->destination_pointer;
 	fixture->round.target_count = 1;
 	fixture->round.env = &fixture->env;
 	fixture->job.round = &fixture->round;

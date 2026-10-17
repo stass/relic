@@ -147,18 +147,8 @@ typedef struct relic_evaluation relic_evaluation_t;
 typedef struct relic_group_run relic_group_run_t;
 typedef struct relic_member_entry relic_member_entry_t;
 typedef struct relic_rule_plans relic_rule_plans_t;
-typedef struct relic_row_sink relic_row_sink_t;
 typedef struct relic_running_plan relic_running_plan_t;
 typedef struct relic_variant relic_variant_t;
-
-/*
- * The caller a query's rows are delivered to: the callback that receives
- * each, and the context it is called with.
- */
-struct relic_row_sink {
-	relic_row_cb	 callback;
-	void		*callback_ctx;
-};
 
 /*
  * Where a running plan's EMIT sends the head tuples it derives.  They have
@@ -168,7 +158,7 @@ struct relic_row_sink {
  * given rows, and only when query_streams() admits its plan.
  */
 struct relic_emit_target {
-	relic_relation_t	*relation;
+	relic_destination_t	*destination;
 	relic_row_sink_t	 rows;
 };
 
@@ -313,6 +303,7 @@ struct relic_component_plans {
 	relic_rule_plans_t	 *planned;
 	relic_variant_t		 *variants;
 	relic_relation_t	**members;
+	relic_destination_t	**destinations;
 	relic_round_item_t	 *items;
 	relic_delta_work_t	  work;
 	size_t			  rule_count;
@@ -501,7 +492,7 @@ static void	 decode_row(const relic_t *ctx, const relic_dom_t *tuple,
 static void	 deliver_batch(relic_evaluation_t *eval,
 		    const relic_row_sink_t *sink, uint16_t arity);
 static int	 insert_batch(relic_evaluation_t *eval,
-		    relic_relation_t *relation, relic_serial_seen_t *seen);
+		    relic_destination_t *destination, relic_serial_seen_t *seen);
 static relic_pending_t *make_pending_room(relic_evaluation_t *eval);
 static int	 fit_scratch(relic_evaluation_t *eval,
 		    const relic_plan_t *plan);
@@ -541,10 +532,10 @@ static bool	*mixed_noted_flag(relic_t *ctx, const relic_rule_t *rule);
 static void	 note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
 		    const relic_mixed_note_t *note);
 static void	 report_failure(relic_t *ctx, const relic_rule_t *rule,
-		    const relic_relation_t *relation,
+		    const relic_destination_t *destination,
 		    const relic_exec_error_t *error);
 static void	 report_texts_refused(relic_t *ctx,
-		    const relic_relation_t *relation,
+		    const relic_destination_t *destination,
 		    enum relic_exec_failure failure);
 static int	 resolve_pending(relic_evaluation_t *eval,
 		    relic_relation_t *relation);
@@ -634,6 +625,7 @@ static bool	 choose_query_target(const relic_t *ctx,
 		    relic_running_plan_t *running,
 		    const relic_row_sink_t *rows);
 static int	 deliver_gathered_answer(relic_t *ctx,
+		    const relic_destination_t *destination,
 		    const relic_relation_t *answer,
 		    const relic_row_sink_t *sink);
 static int	 stream_query_plan(relic_evaluation_t *eval,
@@ -766,7 +758,7 @@ describe_fold(const relic_aggregate_t *aggregate, char *buffer, size_t size)
  */
 static void
 report_failure(relic_t *ctx, const relic_rule_t *rule,
-    const relic_relation_t *relation, const relic_exec_error_t *error)
+    const relic_destination_t *destination, const relic_exec_error_t *error)
 {
 	char described[RELIC_PRED_TEXT_MAX];
 	const char *separator;
@@ -792,7 +784,7 @@ report_failure(relic_t *ctx, const relic_rule_t *rule,
 		break;
 	case RELIC_FAIL_LIMIT:
 	case RELIC_FAIL_NO_MEMORY:
-		report_texts_refused(ctx, relation, error->failure);
+		report_texts_refused(ctx, destination, error->failure);
 		return;
 	}
 
@@ -814,7 +806,7 @@ report_failure(relic_t *ctx, const relic_rule_t *rule,
  * insertion into `relation`, or the allocator.
  */
 static void
-report_texts_refused(relic_t *ctx, const relic_relation_t *relation,
+report_texts_refused(relic_t *ctx, const relic_destination_t *destination,
     enum relic_exec_failure failure)
 {
 	char described[RELIC_PRED_TEXT_MAX];
@@ -825,7 +817,7 @@ report_texts_refused(relic_t *ctx, const relic_relation_t *relation,
 	}
 
 	relic_diag_limit(ctx, "memory", ctx->account.limit, "deriving",
-	    relic_relation_describe(ctx, relation, described,
+	    relic_destination_describe(ctx, destination, described,
 	    sizeof(described)));
 }
 
@@ -926,8 +918,10 @@ serial_seen_open(relic_evaluation_t *eval, const relic_emit_target_t *target,
 	size_t bytes;
 
 	bzero(seen, sizeof(*seen));
-	if (target->rows.callback != NULL || target->relation->arity != 2 ||
-	    relic_relation_count(target->relation) < SERIAL_SEEN_MIN_TUPLES ||
+	if (target->rows.callback != NULL ||
+	    relic_destination_set_relation(target->destination) == NULL ||
+	    target->destination->relation->arity != 2 ||
+	    relic_relation_count(target->destination->relation) < SERIAL_SEEN_MIN_TUPLES ||
 	    relic_limit_set(eval->ctx->account.limit))
 		return;
 
@@ -939,7 +933,7 @@ serial_seen_open(relic_evaluation_t *eval, const relic_emit_target_t *target,
 		return;
 	bytes = cells / 8 + (cells % 8 != 0);
 	if (bytes > SERIAL_SEEN_MAX_BYTES ||
-	    bytes > relic_relation_count(target->relation))
+	    bytes > relic_relation_count(target->destination->relation))
 		return;
 	if (!relic_account_charge_round(&eval->ctx->account, bytes))
 		return;
@@ -1036,7 +1030,7 @@ serial_seen_insert(relic_evaluation_t *eval, relic_relation_t *relation,
  * reported.
  */
 static int
-insert_batch(relic_evaluation_t *eval, relic_relation_t *relation,
+insert_batch(relic_evaluation_t *eval, relic_destination_t *destination,
     relic_serial_seen_t *seen)
 {
 	bool added[RELIC_INSERT_BATCH];
@@ -1050,10 +1044,10 @@ insert_batch(relic_evaluation_t *eval, relic_relation_t *relation,
 		return (0);
 
 	if (seen->bits != NULL)
-		status = serial_seen_insert(eval, relation, seen, added,
+		status = serial_seen_insert(eval, destination->relation, seen, added,
 		    &completed);
 	else
-		status = relic_relation_insert_batch(eval->ctx, relation,
+		status = relic_destination_insert(eval->ctx, destination,
 		    scratch->batch, scratch->batch_count, added, &completed);
 
 	for (i = 0; i < completed; i++)
@@ -1118,7 +1112,7 @@ take_batch(relic_evaluation_t *eval, const relic_rule_t *rule,
 	relic_report_mixed_note(eval->ctx, rule, &scratch->note);
 
 	if (scratch->error.failed) {
-		report_failure(eval->ctx, rule, target->relation,
+		report_failure(eval->ctx, rule, target->destination,
 		    &scratch->error);
 		bzero(&scratch->error, sizeof(scratch->error));
 		scratch->batch_count = 0;
@@ -1128,14 +1122,16 @@ take_batch(relic_evaluation_t *eval, const relic_rule_t *rule,
 	}
 
 	if (target->rows.callback == NULL) {
-		if (resolve_pending(eval, target->relation) != 0)
+		relic_destination_project(relic_destination_view(target->destination), scratch->batch,
+		    scratch->batch_count);
+		if (resolve_pending(eval, target->destination->relation) != 0)
 			return (-1);
-		return (insert_batch(eval, target->relation, seen));
+		return (insert_batch(eval, target->destination, seen));
 	}
 
 	assert(scratch->pending_count == 0);
 
-	deliver_batch(eval, &target->rows, target->relation->arity);
+	deliver_batch(eval, &target->rows, target->destination->relation->arity);
 
 	return (0);
 }
@@ -1161,6 +1157,16 @@ count_derivation(relic_evaluation_t *eval, bool added)
  * failure here leaves the context as any other failure there does.
  */
 int
+relic_refuse_interrupted_subject(relic_t *ctx, const char *verb, const char *subject)
+{
+	if (!relic_signal_flag_raised(&ctx->interrupted))
+		return (0);
+	relic_diag_error(ctx, RELIC_ERROR_INTERRUPTED, NULL,
+	    "interrupted while %s %s", verb, subject);
+	return (-1);
+}
+
+int
 relic_refuse_interrupted(relic_t *ctx, const char *verb,
     const relic_relation_t *relation)
 {
@@ -1168,12 +1174,8 @@ relic_refuse_interrupted(relic_t *ctx, const char *verb,
 
 	if (!relic_signal_flag_raised(&ctx->interrupted))
 		return (0);
-
-	relic_diag_error(ctx, RELIC_ERROR_INTERRUPTED, NULL,
-	    "interrupted while %s %s", verb, relic_relation_describe(ctx,
-	    relation, described, sizeof(described)));
-
-	return (-1);
+	return (relic_refuse_interrupted_subject(ctx, verb,
+	    relic_relation_describe(ctx, relation, described, sizeof(described))));
 }
 
 /*
@@ -1214,8 +1216,8 @@ execute_plan(relic_evaluation_t *eval, const relic_plan_t *plan,
 		}
 		if (eval->stopped)
 			break;
-		if (relic_refuse_interrupted(eval->ctx, "deriving",
-		    target->relation) != 0) {
+		if (relic_destination_refuse_interrupted(eval->ctx, "deriving",
+		    target->destination) != 0) {
 			result = -1;
 			break;
 		}
@@ -1302,6 +1304,12 @@ run_round(relic_evaluation_t *eval, relic_round_t *round)
 	int status;
 	size_t i;
 
+	for (i = 0; i < round->item_count; i++)
+		if (relic_destination_begin_round(eval->ctx,
+		    round->targets[round->items[i].target], round->items[i].plan,
+		    round->item_count, round->target_count) != 0)
+			return (-1);
+
 	if (rounds_may_be_deferred(eval->ctx)) {
 		switch (relic_round_run(eval->ctx, round)) {
 		case RELIC_ROUND_MERGED:
@@ -1347,13 +1355,13 @@ run_item(relic_evaluation_t *eval, const relic_round_t *round,
 	int status;
 
 	bzero(&target, sizeof(target));
-	target.relation = round->targets[item->target];
+	target.destination = round->targets[item->target];
 	work_before = counted_work(eval->ctx);
 	inserted_before = eval->ctx->counters.tuples_inserted;
 
 	eval->derived = false;
 	if (item->plan == NULL)
-		status = insert_seed(eval, item->rule, target.relation);
+		status = insert_seed(eval, item->rule, target.destination->relation);
 	else
 		status = execute_plan(eval, item->plan, item->rule, &target);
 	item->gained = eval->derived;
@@ -1395,7 +1403,7 @@ begin_round(relic_evaluation_t *eval, const relic_component_plans_t *plans,
     relic_round_t *round)
 {
 	round->items = plans->items;
-	round->targets = plans->members;
+	round->targets = plans->destinations;
 	round->env = &eval->env;
 	round->item_count = 0;
 	round->item_capacity = plans->item_capacity;
@@ -2094,7 +2102,7 @@ build_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 	relic_plan_t plan;
 
 	*runningp = NULL;
-	if (relic_plan_rule(eval->ctx, eval->arena, rule, target,
+	if (relic_plan_rule(eval->ctx, eval->arena, rule,
 	    eval->is_member, &plan) != 0)
 		return (-1);
 
@@ -2192,24 +2200,16 @@ make_pending_room(relic_evaluation_t *eval)
  * to hold the plan's.
  */
 static int
-make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
-    const relic_plan_t *plan, relic_relation_t *target,
+make_destination_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
+    const relic_plan_t *plan, relic_destination_t *target,
     relic_running_plan_t **runningp)
 {
-	const relic_op_t *emit;
 	relic_running_plan_t *running;
 
 	*runningp = NULL;
-	emit = plan->op_count == 0 ? NULL :
-	    &plan->ops[plan->op_count - 1];
-	if (emit == NULL || emit->kind != RELIC_OP_EMIT ||
-	    emit->u.emit.arity != target->arity) {
-		relic_diag_internal(eval->ctx, &rule->where,
-		    "a rule's plan writes other than the relation it was "
-		    "planned for");
+	if (relic_destination_pair(eval->ctx, target, rule, plan) != 0)
 		return (-1);
-	}
-	if (target->arity > eval->scratch.arity_room) {
+	if (relic_destination_input_arity(target) > eval->scratch.arity_room) {
 		relic_diag_internal(eval->ctx, &rule->where,
 		    "a rule's plan does not fit the scratch it runs in");
 		return (-1);
@@ -2224,7 +2224,7 @@ make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 
 	running->plan = *plan;
 	running->rule = rule;
-	running->target.relation = target;
+	running->target.destination = target;
 	running->target.rows.callback = NULL;
 	running->target.rows.callback_ctx = NULL;
 	bzero(&running->history, sizeof(running->history));
@@ -2233,6 +2233,20 @@ make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 
 	*runningp = running;
 	return (0);
+}
+
+static int
+make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
+    const relic_plan_t *plan, relic_relation_t *relation,
+    relic_running_plan_t **runningp)
+{
+	relic_destination_t *destination;
+
+	destination = evaluation_alloc(eval, 1, sizeof(*destination));
+	if (destination == NULL)
+		return (-1);
+	relic_destination_set(destination, relation);
+	return (make_destination_plan(eval, rule, plan, destination, runningp));
 }
 
 /*
@@ -2322,11 +2336,20 @@ plan_members(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 	if (plans->members == NULL)
 		return (-1);
 
+	plans->destinations = evaluation_alloc(eval, component->member_count,
+	    sizeof(*plans->destinations));
+	if (plans->destinations == NULL)
+		return (-1);
 	for (i = 0; i < component->member_count; i++) {
 		plans->members[i] = relic_relation_written(eval->ctx,
 		    schedule->members[component->first_member + i]);
 		if (plans->members[i] == NULL)
 			return (-1);
+		plans->destinations[i] = evaluation_alloc(eval, 1,
+		    sizeof(*plans->destinations[i]));
+		if (plans->destinations[i] == NULL)
+			return (-1);
+		relic_destination_set(plans->destinations[i], plans->members[i]);
 		plans->member_count++;
 	}
 
@@ -2421,7 +2444,7 @@ plan_variant(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 	variant->delta_literal = delta_literal;
 
 	if (relic_plan_variant(eval->ctx, eval->arena, rule,
-	    head_relation_of(eval, plans, rule), delta_literal,
+	    delta_literal,
 	    eval->is_member, &family) != 0)
 		return (-1);
 
@@ -3190,44 +3213,51 @@ relic_materialize(relic_t *ctx)
 }
 
 /*
- * Pass every tuple of a gathered answer relation to the caller as a row of
- * values, in insertion order, until the callback asks to stop.  Returns 0,
- * or -1 when the caller interrupted the delivery, which is looked for
+ * Pass every row of a completed SET or COUNT destination to the caller in
+ * insertion order, until the callback asks to stop. The answer relation
+ * supplies the query's diagnostic identity, not the counted row storage.
+ * Returns 0, or -1 when the caller interrupted the delivery, which is looked for
  * before each row, so that a callback writing a large answer somewhere slow
  * can be stopped.
  *
  * Nothing else here can fail, which is what lets a query promise that no
  * row is delivered unless every row can be; an interrupt is the caller's
  * own request, and the rows delivered before it are a prefix of the answer.
+ * Count integers have all been published before this loop starts; reading
+ * either kind of completed destination allocates and publishes nothing.
  *
  * The context is busy while the callback runs, so a callback that calls
- * back to load or query is refused, and the answer relation cannot be
- * emptied or refilled under the loop.  The tuple is fetched afresh for each
+ * back to load or query is refused, and the completed destination cannot be
+ * emptied or refilled under the loop. The tuple is fetched afresh for each
  * row all the same, so that no pointer into relation storage is held across a
  * call out of the library, and the loop stops at an identifier the relation
  * does not hold rather than read past it, should that ever stop being true.
  */
 static int
-deliver_gathered_answer(relic_t *ctx, const relic_relation_t *answer,
+deliver_gathered_answer(relic_t *ctx, const relic_destination_t *destination,
+    const relic_relation_t *answer,
     const relic_row_sink_t *sink)
 {
 	relic_value_t row[RELIC_MAX_ARITY];
+	relic_dom_t result[RELIC_MAX_ARITY];
 	const relic_dom_t *tuple;
 	relic_tuple_range_t range;
 	relic_tuple_id_t id;
+	uint16_t arity;
 
-	range = relic_relation_all(answer);
+	range = relic_relation_all(relic_destination_relation(destination));
+	arity = relic_destination_result_arity(destination);
 
 	for (id = range.first; id < range.end; id++) {
 		if (relic_refuse_interrupted(ctx, "delivering", answer) != 0)
 			return (-1);
 
-		tuple = relic_relation_tuple(answer, id);
+		tuple = relic_destination_result(ctx, destination, id, result);
 		if (tuple == NULL)
 			return (0);
 
-		decode_row(ctx, tuple, answer->arity, row);
-		if (sink->callback(sink->callback_ctx, row, answer->arity) != 0)
+		decode_row(ctx, tuple, arity, row);
+		if (sink->callback(sink->callback_ctx, row, arity) != 0)
 			return (0);
 	}
 
@@ -3285,11 +3315,8 @@ static int
 gather_query_answer(relic_evaluation_t *eval,
     const relic_running_plan_t *running)
 {
-	relic_relation_t *answer;
 	relic_round_item_t item;
 	relic_round_t round;
-
-	answer = running->target.relation;
 
 	item.plan = &running->plan;
 	item.rule = running->rule;
@@ -3299,13 +3326,95 @@ gather_query_answer(relic_evaluation_t *eval,
 	item.gained = false;
 
 	round.items = &item;
-	round.targets = &answer;
+	round.targets = &running->target.destination;
 	round.env = &eval->env;
 	round.item_count = 1;
 	round.item_capacity = 1;
 	round.target_count = 1;
 
 	return (run_round(eval, &round));
+}
+
+/*
+ * Publish count integers in insertion order, with one boundary per 64 groups
+ * whether their counts are already assigned or pending. Descriptor-only
+ * batches use the ordinary publisher without constructing answer tuples.
+ */
+static int
+publish_counted_values(relic_evaluation_t *eval, const relic_query_t *query,
+    const relic_destination_t *counted)
+{
+	relic_scratch_t *scratch;
+	relic_tuple_range_t range;
+	relic_tuple_id_t id;
+	uint32_t count;
+	size_t groups;
+
+	scratch = &eval->scratch;
+	/* The successful producer round consumed every tuple and descriptor. */
+	assert(scratch->batch_count == 0 && scratch->pending_count == 0);
+	if (scratch->pending == NULL) {
+		scratch->pending = make_pending_room(eval);
+		if (scratch->pending == NULL)
+			return (-1);
+	}
+	range = relic_relation_all(relic_destination_relation(counted));
+	groups = 0;
+	for (id = range.first; id < range.end; id++) {
+		scratch->counters.tuples_scanned++;
+		count = relic_destination_count_value(counted, id);
+		if (relic_value_find_integer(eval->ctx, count) == RELIC_ID_NONE) {
+			scratch->pending[scratch->pending_count].kind = RELIC_PENDING_INTEGER;
+			scratch->pending[scratch->pending_count].u.integer = count;
+			scratch->pending_count++;
+		}
+		groups++;
+		if (groups != RELIC_INSERT_BATCH && id + 1 != range.end)
+			continue;
+		take_counters(eval->ctx, scratch);
+		if (resolve_pending(eval, query->answer) != 0)
+			return (-1);
+		eval->ctx->counters.derivations += groups;
+		groups = 0;
+		if (relic_refuse_interrupted(eval->ctx, "deriving", query->answer) != 0)
+			return (-1);
+	}
+	return (0);
+}
+
+/* Use the ordinary serial/deferred protocol for one certified producer. */
+int
+relic_evaluate_counted(relic_t *ctx, const relic_query_t *query,
+    const relic_rule_t *producer, const relic_plan_t *plan,
+    relic_destination_t *destination, const relic_row_sink_t *rows)
+{
+	relic_evaluation_t eval;
+	relic_running_plan_t *running;
+	relic_round_item_t item;
+	relic_round_t round;
+	int status;
+
+	status = evaluation_begin(&eval, ctx, &ctx->eval_arena, 1,
+	    producer->head_arity);
+	if (status == 0)
+		status = make_destination_plan(&eval, producer, plan, destination, &running);
+	if (status == 0) {
+		bzero(&item, sizeof(item));
+		item.rule = producer;
+		item.plan = &running->plan;
+		bzero(&round, sizeof(round));
+		round.items = &item;
+		round.targets = &destination;
+		round.env = &eval.env;
+		round.item_count = round.item_capacity = round.target_count = 1;
+		status = run_round(&eval, &round);
+	}
+	if (status == 0)
+		status = publish_counted_values(&eval, query, destination);
+	evaluation_end(&eval);
+	if (status == 0)
+		status = deliver_gathered_answer(ctx, destination, query->answer, rows);
+	return (status);
 }
 
 /*
@@ -3393,6 +3502,7 @@ run_query_rule(relic_t *ctx, const relic_rule_t *rule,
     const relic_row_sink_t *rows)
 {
 	relic_running_plan_t *running;
+	relic_destination_t destination;
 	relic_evaluation_t eval;
 	bool streams;
 	int status;
@@ -3424,8 +3534,10 @@ run_query_rule(relic_t *ctx, const relic_rule_t *rule,
 		return (-1);
 	}
 
-	if (!streams)
-		return (deliver_gathered_answer(ctx, answer, rows));
+	if (!streams) {
+		relic_destination_set(&destination, answer);
+		return (deliver_gathered_answer(ctx, &destination, answer, rows));
+	}
 
 	return (0);
 }
@@ -3493,7 +3605,7 @@ static int
 run_group_rules(relic_t *ctx, relic_group_run_t *groups)
 {
 	relic_component_plans_t *plans;
-	relic_relation_t **targets;
+	relic_destination_t **targets;
 	relic_round_item_t *items;
 	relic_round_t round;
 	uint16_t widest;
@@ -3529,7 +3641,7 @@ run_group_rules(relic_t *ctx, relic_group_run_t *groups)
 		items[i].plan = &plans->planned[i].base->plan;
 		items[i].rule = plans->planned[i].rule;
 		items[i].target = i;
-		targets[i] = plans->planned[i].base->target.relation;
+		targets[i] = plans->planned[i].base->target.destination;
 	}
 
 	round.items = items;
@@ -3582,7 +3694,7 @@ group_run_finish(relic_t *ctx, relic_group_run_t *groups)
 	for (i = 0; plans != NULL && i < plans->planned_count; i++) {
 		if (plans->planned[i].base != NULL)
 			relic_relation_clear(ctx,
-			    plans->planned[i].base->target.relation);
+			    plans->planned[i].base->target.destination->relation);
 	}
 
 	evaluation_end(&groups->eval);
@@ -3877,8 +3989,16 @@ compute_answer(relic_t *ctx, const relic_query_t *query,
 	if ((ctx->config.flags & RELIC_F_NO_MAGIC) != 0 ||
 	    relic_relations_current(ctx))
 		status = answer_from_program(ctx, query, &groups, rows);
-	else
-		status = answer_through_rewrite(ctx, query, &groups, rows);
+	else {
+		status = confirm_schedule_current(ctx);
+		if (status == 0) {
+			status = relic_grouped_answer(ctx, query, rows);
+			if (status == 1)
+				status = 0;
+			else if (status == 0)
+				status = answer_through_rewrite(ctx, query, &groups, rows);
+		}
+	}
 	group_run_finish(ctx, &groups);
 
 	return (status);

@@ -214,7 +214,7 @@ fixture_open(fixture_t *fixture, const char *program, const char *scenario)
 	    fixture->ctx->program.rules.count - 1];
 	target = relic_relation_read(fixture->ctx, rule->head);
 	if (target == NULL || relic_plan_rule(fixture->ctx, &fixture->arena,
-	    rule, target, NULL, &fixture->plan) != 0) {
+	    rule, NULL, &fixture->plan) != 0) {
 		check(false, scenario, "the rule should be planned");
 		return (false);
 	}

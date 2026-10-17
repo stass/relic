@@ -5035,6 +5035,126 @@ end_steps(steps_progress_t *progress)
 		relic_query_destroy(progress->queries[i]);
 }
 
+/* Sweep the counted owner's allocations and each arena request separately. */
+static void
+counted_queries_survive_private_refusals(void)
+{
+	const char *definitions =
+	    "p(X,K) :- s(X), K = cat(str(X mod 23), \"key\").\n"
+	    "g(K) :- p(_,K). q(K,N) :- g(K), N = count { p(X,K) }.\n";
+	relic_config_t config;
+	relic_query_t *query;
+	relic_t *ctx;
+	char *program;
+	size_t used, i, mode, threads, before, rows, failed, completed, bytes;
+	long budget;
+	bool undisturbed;
+	int status;
+
+	bytes = 4001 * 24 + strlen(definitions) + 1;
+	program = malloc(bytes);
+	if (program == NULL) {
+		check(false, "counted allocation refusals", "the fixture allocates");
+		return;
+	}
+	used = 0;
+	for (i = 0; i < 4001; i++)
+		used += (size_t)sprintf(program + used, "s(%zu).\n", i);
+	strlcpy(program + used, definitions, bytes - used);
+	for (mode = 0; mode < 2; mode++) {
+		refusing = mode == 0 ? REFUSE_ALLOCATOR : REFUSE_ARENA;
+		for (threads = 1; threads <= 4; threads *= 4) {
+			failed = completed = 0;
+			undisturbed = false;
+			for (budget = 0; budget < AGGREGATE_SWEEP && !undisturbed; budget++) {
+				bzero(&config, sizeof(config));
+				config.threads = threads;
+				config.flags = RELIC_F_PARALLEL_ALWAYS;
+				ctx = relic_create_config(&config);
+				if (ctx == NULL)
+					abort();
+				relic_diag_set(ctx, count_error, NULL);
+				if (relic_load_string(ctx, NULL, program) != 0 || relic_check(ctx) != 0)
+					abort();
+				query = relic_query_prepare(ctx, NULL, "q(K,N)?");
+				if (query == NULL)
+					abort();
+				errors_reported = rows = 0;
+				before = allocations_made();
+				refuse_allocations_after(budget);
+				status = relic_query_run(ctx, query, count_answer, &rows);
+				serve_every_allocation();
+				undisturbed = allocations_made() - before <= (size_t)budget;
+				if (status == 0)
+					completed++;
+				else
+					failed++;
+				checkf(errors_reported == (status != 0 ? 1u : 0u) &&
+				    rows == (status != 0 ? 0u : 23u), "counted allocation refusals",
+				    "mode %zu, %zu workers, budget %ld preserves atomic answer and diagnostic",
+				    mode, threads, budget);
+				check(ctx->account.arena_bytes == 0 &&
+				    relic_atomic_size_load(&ctx->account.round_bytes) == 0 &&
+				    ctx->account.store_bytes == storage_by_hand(ctx),
+				    "counted allocation refusals", "every private allocation is released");
+				rows = 0;
+				check(relic_query_run(ctx, query, count_answer, &rows) == 0 && rows == 23,
+				    "counted allocation refusals", "the prepared query retries successfully");
+				relic_query_destroy(query);
+				relic_destroy(ctx);
+			}
+			check(failed != 0 && completed != 0 && undisturbed,
+			    "counted allocation refusals", "each sweep reaches refused and complete runs");
+		}
+	}
+	refusing = REFUSE_ALLOCATOR;
+	free(program);
+}
+
+static void
+interrupt_after_error(void *argument, enum relic_diag_level level,
+    const relic_location_t *where RELIC_TEST_UNUSED,
+    const char *message RELIC_TEST_UNUSED)
+{
+	if (level != RELIC_ERROR)
+		return;
+	errors_reported++;
+	relic_interrupt(argument);
+}
+
+static void
+counted_preparation_error_remains_final(void)
+{
+	relic_t *ctx;
+	relic_query_t *query;
+	size_t rows;
+	int status;
+
+	ctx = relic_create();
+	if (ctx == NULL)
+		abort();
+	if (relic_load_string(ctx, NULL,
+	    "s(1). p(I,7) :- s(I). g(K) :- p(_,K).\n"
+	    "q(K,N) :- g(K), N = count { p(I,K) }.\n") != 0)
+		abort();
+	query = relic_query_prepare(ctx, NULL, "q(K,N)?");
+	if (query == NULL)
+		abort();
+	relic_diag_set(ctx, interrupt_after_error, ctx);
+	errors_reported = rows = 0;
+	refuse_allocations_after(0);
+	status = relic_query_run(ctx, query, count_answer, &rows);
+	serve_every_allocation();
+	check(status == -1 && errors_reported == 1 && rows == 0 &&
+	    relic_error_class(ctx) == RELIC_ERROR_MEMORY,
+	    "counted preparation diagnostic", "a callback interrupt preserves one preparation error");
+	check(ctx->account.arena_bytes == 0 &&
+	    relic_atomic_size_load(&ctx->account.round_bytes) == 0,
+	    "counted preparation diagnostic", "reported preparation releases every private allocation");
+	relic_query_destroy(query);
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
@@ -5042,6 +5162,8 @@ main(void)
 	main_thread = pthread_self();
 #endif
 
+	counted_preparation_error_remains_final();
+	counted_queries_survive_private_refusals();
 	context_creation_reports_a_failed_allocation();
 	context_creation_fails_without_entropy();
 	interning_a_symbol_survives_a_failed_allocation();

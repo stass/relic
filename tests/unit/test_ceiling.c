@@ -29,6 +29,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -581,9 +582,91 @@ symbol_text(char *text, size_t size, size_t ordinal)
 	(void)snprintf(text, size, "s%zu", ordinal);
 }
 
+/*
+ * Nine symbols supply source identities and 81 distinct two-column keys.
+ * Group n has n source tuples. The odd counts in the first 64 groups are
+ * already assigned; that first group batch fills the integer ceiling with
+ * the even counts. The next group batch fails without publishing a value.
+ */
+static void
+counted_result_batches_share_the_failure_prefix(void)
+{
+	char program[65536];
+	relic_config_t config;
+	relic_stats_t expected, actual;
+	relic_t *ctx;
+	relic_dom_t assigned;
+	size_t used, key, row, rows, errors, threads;
+	int64_t prefix[RELIC_INSERT_BATCH];
+
+	_Static_assert(RELIC_INTEGER_MAX == RELIC_INSERT_BATCH,
+	    "the fixture fills the lowered integer ceiling in one result batch");
+	used = 0;
+	for (key = 0; key < 81; key++)
+		for (row = 0; row <= key; row++)
+			used += (size_t)snprintf(program + used, sizeof(program) - used,
+			    "s(%c,%c,%c,%c).\n", (int)('a' + row / 9),
+			    (int)('a' + row % 9), (int)('a' + key / 9), (int)('a' + key % 9));
+	strlcpy(program + used,
+	    "p(A,B,K,L) :- s(A,B,K,L). g(K,L) :- p(_,_,K,L).\n"
+	    "q(K,L,N) :- g(K,L), N = count { p(A,B,K,L) }.\n", sizeof(program) - used);
+	bzero(&expected, sizeof(expected));
+	for (threads = 1; threads <= 4; threads *= 4) {
+		bzero(&config, sizeof(config));
+		config.threads = threads;
+		config.flags = RELIC_F_PARALLEL_ALWAYS;
+		ctx = relic_create_config(&config);
+		if (ctx == NULL) {
+			check(false, "counted result ceiling", "the context creates");
+			return;
+		}
+		errors = 0;
+		relic_diag_set(ctx, count_error, &errors);
+		check(relic_load_string(ctx, "counted.dl", program) == 0 &&
+		    ctx->values.integer_count == 0,
+		    "counted result ceiling", "the source supplies no preassigned integers");
+		for (row = 1; row < RELIC_INSERT_BATCH; row += 2)
+			check(relic_value_intern_integer(ctx, (int64_t)row, &assigned) == 0,
+			    "counted result ceiling", "half the first group's counts are already assigned");
+		check(query_rows(ctx, "q(K,L,N)?", &rows) == -1 && rows == 0 && errors == 1 &&
+		    diagnosed(ctx, "too many distinct integers"),
+		    "counted result ceiling", "a refused result batch delivers no partial answer");
+		check(ctx->values.integer_count == RELIC_INSERT_BATCH,
+		    "counted result ceiling", "only the complete first count batch is retained");
+		for (row = 0; row < RELIC_INSERT_BATCH; row++) {
+			check(ctx->values.integers[row] == (row < RELIC_INSERT_BATCH / 2 ?
+			    (int64_t)(2 * row + 1) :
+			    (int64_t)(2 * (row - RELIC_INSERT_BATCH / 2 + 1))),
+			    "counted result ceiling", "counts keep group order at the ceiling");
+			if (threads == 1)
+				prefix[row] = ctx->values.integers[row];
+		}
+		relic_stats(ctx, &actual);
+		check(actual.derivations == 3385 && actual.tuples_inserted == 81 &&
+		    actual.tuples_scanned == 3402,
+		    "counted result ceiling", "failed value batches count attempted groups but no finalized rows");
+		if (threads == 1)
+			expected = actual;
+		else
+			check(bcmp(prefix, ctx->values.integers, sizeof(prefix)) == 0 &&
+			    actual.storage_bytes == expected.storage_bytes &&
+			    actual.derivations == expected.derivations &&
+			    actual.tuples_inserted == expected.tuples_inserted &&
+			    actual.tuples_scanned == expected.tuples_scanned,
+			    "counted result ceiling", "thread count preserves the final-batch failure prefix");
+		check(ctx->account.arena_bytes == 0 &&
+		    relic_atomic_size_load(&ctx->account.round_bytes) == 0 && actual.tuples == 3321,
+		    "counted result ceiling", "failure releases private keys, counts and answer rows");
+		check(query_rows(ctx, "s(A,B,K,L)?", &rows) == 0 && rows == 3321,
+		    "counted result ceiling", "the complete source remains usable after failure");
+		relic_destroy(ctx);
+	}
+}
+
 int
 main(void)
 {
+	counted_result_batches_share_the_failure_prefix();
 	the_integer_table_stops_at_its_ceiling();
 	the_symbol_pool_stops_at_its_ceiling();
 	a_deferred_round_stops_as_serially(1);

@@ -66,6 +66,13 @@ typedef struct relic_pending_probe relic_pending_probe_t;
 typedef struct relic_valtab relic_valtab_t;
 typedef struct relic_activity relic_activity_t;
 typedef struct relic_walk relic_walk_t;
+typedef struct relic_row_sink relic_row_sink_t;
+
+/* The callback and context receiving a query's completed or streamed rows. */
+struct relic_row_sink {
+	relic_row_cb	 callback;
+	void		*callback_ctx;
+};
 
 /*
  * Where diagnostics go, and the text of the last error.
@@ -1307,9 +1314,8 @@ int	 relic_stratify(relic_t *ctx);
  * lib/plan.c
  *
  * Plan one rule's ordinary plan into `arena`, creating the relations it
- * reads and the indexes its lookups read.  The caller passes `target` --
- * the relation of the head's predicate, or a query's answer -- so the head
- * arity can be checked against it.  The plan does not retain `target`.
+ * reads and the indexes its lookups read.  The head schema comes from the
+ * rule; the caller checks it against the consumer and scratch at pairing.
  * `incomplete`, indexed by predicate identifier minus one, marks the
  * relations still being derived, whose size the planner assumes rather than
  * measures; NULL marks none.  Returns 0, or -1 with a diagnostic reported:
@@ -1317,7 +1323,7 @@ int	 relic_stratify(relic_t *ctx);
  * invariants, which is an internal error.
  */
 int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
-	    const relic_rule_t *rule, relic_relation_t *target,
+	    const relic_rule_t *rule,
 	    const bool *incomplete, relic_plan_t *plan);
 
 /*
@@ -1333,7 +1339,7 @@ int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
  * relic_plan_rule().
  */
 int	 relic_plan_variant(relic_t *ctx, relic_arena_t *arena,
-	    const relic_rule_t *rule, relic_relation_t *target,
+	    const relic_rule_t *rule,
 	    size_t delta_literal, const bool *incomplete,
 	    relic_plan_family_t *family);
 
@@ -1471,6 +1477,8 @@ bool	 relic_relations_current(const relic_t *ctx);
 void	 relic_discard_derived(relic_t *ctx);
 void	 relic_report_mixed_note(relic_t *ctx, const relic_rule_t *rule,
 	    relic_mixed_note_t *note);
+int	 relic_refuse_interrupted_subject(relic_t *ctx, const char *verb,
+	    const char *subject);
 int	 relic_refuse_interrupted(relic_t *ctx, const char *verb,
 	    const relic_relation_t *relation);
 
@@ -1575,6 +1583,28 @@ _Static_assert(RELIC_IMPORT_WINDOW_RECORDS > 0,
     "a window holds some records");
 
 /*
+ * lib/grouped.c
+ *
+ * Attempt a counted base projection after program readiness and schedule
+ * confirmation, in the nonmaterialized Magic query branch. Returns 1 with
+ * the complete answer delivered (or stopped by its callback), 0 after a
+ * declined certificate or producer shape with no value publication, or -1
+ * after a reported operation error or interrupt. All producer and
+ * private destination state is released before return.
+ */
+int	 relic_grouped_answer(relic_t *ctx, const relic_query_t *query,
+	    const relic_row_sink_t *rows);
+
+/*
+ * lib/eval.c: run the producer, publish counts, release evaluation scratch and
+ * deliver the completed destination. The caller owns the destination and its
+ * borrowed producer plan through the call, including row callbacks.
+ */
+int	 relic_evaluate_counted(relic_t *ctx, const relic_query_t *query,
+	    const relic_rule_t *producer, const relic_plan_t *plan,
+	    relic_destination_t *destination, const relic_row_sink_t *rows);
+
+/*
  * lib/explain.c
  *
  * The lines of explain output, handed to the installed callback.
@@ -1594,6 +1624,9 @@ _Static_assert(RELIC_IMPORT_WINDOW_RECORDS > 0,
  * rewritten program than for one of the program itself; what belongs to
  * the component is indented beneath it.  None can fail.
  */
+void	 relic_explain_counted(relic_t *ctx, const relic_rule_t *producer,
+	    const relic_plan_t *plan, const uint16_t *keys, uint16_t width,
+	    const relic_relation_t *answer);
 bool	 relic_explaining(const relic_t *ctx);
 void	 relic_explain_component(relic_t *ctx,
 	    const relic_schedule_t *schedule, size_t position, size_t facts,

@@ -134,7 +134,7 @@ static int	 candidates_grow(relic_candidates_t *candidates,
 		    const relic_candidates_growth_t *growth);
 static bool	 candidates_have_room(const relic_candidates_t *candidates,
 		    const relic_candidates_growth_t *growth);
-static bool	 candidates_hold(const relic_candidates_t *candidates,
+static relic_candidate_t *candidates_find(relic_candidates_t *candidates,
 		    size_t target, const relic_dom_t *tuple, uint16_t arity,
 		    uint64_t hash);
 static int	 candidates_mark_value(relic_candidates_t *candidates,
@@ -308,6 +308,8 @@ screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
 	uint64_t hashes[RELIC_INSERT_BATCH];
 	bool held[RELIC_INSERT_BATCH];
 	const relic_relation_t *relation;
+	const relic_destination_view_t *destination;
+	relic_candidate_t *first;
 	const relic_dom_t *tuple;
 	relic_scratch_t *scratch;
 	uint16_t arity;
@@ -326,7 +328,9 @@ screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
 		return (0);
 	}
 	target = job->round->items[task->item].target;
-	relation = job->round->targets[target];
+	destination = relic_destination_view(job->round->targets[target]);
+	relation = destination->relation;
+	relic_destination_project(destination, scratch->batch, scratch->batch_count);
 	arity = relic_relation_arity(relation);
 
 	if (mark_pending(&worker->candidates, job->account, scratch,
@@ -341,9 +345,14 @@ screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
 		tuple = &scratch->batch[i * arity];
 		worker->derivations++;
 
-		if (held[i] || candidates_hold(&worker->candidates, target,
-		    tuple, arity, hashes[i]))
+		if (held[i])
 			continue;
+		first = candidates_find(&worker->candidates, target, tuple, arity, hashes[i]);
+		if (first != NULL) {
+			first->contribution = relic_contribution_combine(destination,
+			    first->contribution, 1);
+			continue;
+		}
 		if (candidates_add(&worker->candidates, job->account, target,
 		    tuple, arity, hashes[i]) != 0)
 			return (-1);
@@ -590,11 +599,11 @@ candidates_prefetch(const relic_candidates_t *candidates, size_t target,
 /*
  * Whether the worker has gathered this tuple for this target already.
  */
-static bool
-candidates_hold(const relic_candidates_t *candidates, size_t target,
+static relic_candidate_t *
+candidates_find(relic_candidates_t *candidates, size_t target,
     const relic_dom_t *tuple, uint16_t arity, uint64_t hash)
 {
-	const relic_candidate_t *candidate;
+	relic_candidate_t *candidate;
 	relic_idprobe_t probe;
 	uint32_t position;
 
@@ -605,10 +614,10 @@ candidates_hold(const relic_candidates_t *candidates, size_t target,
 		if (candidate->target == target &&
 		    relic_tuple_equal(&candidates->words[candidate->offset],
 		    tuple, arity))
-			return (true);
+			return (candidate);
 	}
 
-	return (false);
+	return (NULL);
 }
 
 /*
@@ -639,7 +648,7 @@ candidates_add(relic_candidates_t *candidates, relic_account_t *account,
 	candidate->offset = candidates->word_count;
 	candidate->target = (uint32_t)target;
 	candidate->hash = hash;
-	candidate->repeat = false;
+	candidate->contribution = 1;
 	stripe = relic_hash_stripe(hash);
 	candidates->stripes[candidates->count] = (uint8_t)stripe;
 	candidates->by_stripe[stripe]++;

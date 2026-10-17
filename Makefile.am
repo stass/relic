@@ -35,8 +35,9 @@ LIBOBJDIR = compat/
 
 noinst_LTLIBRARIES = librelic_internal.la
 librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c lib/arith.c \
-	lib/cost.c lib/dense.c lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c \
-	lib/explain.c lib/expr.c lib/facts.c lib/fold.c lib/import.c lib/index.c lib/lex.c \
+	lib/cost.c lib/dense.c lib/depgraph.c lib/destination.c lib/diag.c lib/eval.c lib/exec.c \
+	lib/explain.c lib/expr.c lib/facts.c lib/fold.c lib/grouped.c \
+	lib/import.c lib/index.c lib/lex.c \
 	lib/literal.c lib/magic.c lib/merge.c lib/parse.c lib/plan.c \
 	lib/pool.c lib/pred.c lib/regex.c lib/relation.c lib/result.c \
 	lib/round.c lib/rule.c lib/stratify.c lib/strfn.c \
@@ -53,7 +54,7 @@ dist_man1_MANS = man/relic.1
 dist_man3_MANS = man/relic.3
 noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
 	lib/account.h lib/arena.h lib/arith.h lib/ast.h lib/atomic.h \
-	lib/cdefs.h lib/cost.h lib/depgraph.h \
+	lib/cdefs.h lib/cost.h lib/depgraph.h lib/destination.h \
 	lib/exec.h lib/fold.h \
 	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/regex.h \
 	lib/relation.h lib/round.h lib/strfn.h lib/table.h lib/util.h \
@@ -202,7 +203,7 @@ RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
 	tests/unit/test_arith tests/unit/test_compute tests/unit/test_cost \
 	tests/unit/test_dense tests/unit/test_diag \
 	tests/unit/test_eval tests/unit/test_exec \
-	tests/unit/test_facts tests/unit/test_fold tests/unit/test_import \
+	tests/unit/test_facts tests/unit/test_fold tests/unit/test_grouped tests/unit/test_import \
 	tests/unit/test_index tests/unit/test_interrupt \
 	tests/unit/test_lex tests/unit/test_magic tests/unit/test_merge \
 	tests/unit/test_parse \
@@ -258,6 +259,12 @@ tests_unit_test_serial_seen_SOURCES = tests/unit/test_serial_seen.c \
 	tests/unit/harness.c
 tests_unit_test_serial_seen_LDADD = \
 	$(librelic_internal_la_OBJECTS:lib/eval.lo=) $(LTLIBOBJS)
+
+## Include the ordinary round driver so shared retry and worker coordination
+## are tested without exposing a runtime fault interface.
+tests_unit_test_grouped_SOURCES = tests/unit/test_grouped.c tests/unit/harness.c
+tests_unit_test_grouped_LDADD = \
+	$(librelic_internal_la_OBJECTS:lib/round.lo=) $(LTLIBOBJS)
 
 tests_unit_test_exec_SOURCES = tests/unit/test_exec.c tests/unit/harness.c
 tests_unit_test_exec_LDADD = librelic_internal.la $(LTLIBOBJS)

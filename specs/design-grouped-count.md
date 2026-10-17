@@ -14,6 +14,7 @@ Related: [query modes](architecture.md#query-modes),
 [source comparison](../bench/compare/recorded/duckdb-files-analysis/README.md),
 [collector measurements](../bench/compare/recorded/counted-projection/README.md),
 [shared-publication measurements](../bench/compare/recorded/counted-destination/README.md),
+[direct-delivery measurements](../bench/compare/recorded/counted-delivery/README.md),
 [performance work](../docs/todo-benchmark-performance.md).
 
 ## Model and boundary
@@ -299,7 +300,9 @@ and repeated keys spanning several tasks must combine every contribution.
 Performance validation proves that workers retain keys and their distinct
 pending values, not one candidate per P row. It measures long computed keys
 and high-cardinality keys as well as files, with ordinary joins and recursion
-as controls for the common evaluator changes. The
-[forward plan](../docs/todo-benchmark-performance.md) sets adoption gates.
+as controls for the common evaluator changes. Comparisons follow the
+[measurement protocol](../docs/todo-performance-measurements.md); the
+[measurement record](../bench/compare/recorded/counted-delivery/README.md)
+retains their declared adoption gates and results.
 Expression interpretation and input interning remain real costs; this design
 makes no claim that query fusion alone closes the import gap.

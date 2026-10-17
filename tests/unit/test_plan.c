@@ -267,8 +267,8 @@ fixture_load(fixture_t *fixture, const char *program, unsigned int flags,
 }
 
 /*
- * Plan the rule at `rule_index` among the program's rules, in load order, into
- * the relation of its head, with the relations `incomplete` marks taken to be
+ * Plan the rule at `rule_index` among the program's rules, in load order,
+ * with the relations `incomplete` marks taken to be
  * still derived. Returns whether the plan was built; a test that expects a
  * refusal reads the error count.
  */
@@ -277,17 +277,12 @@ fixture_plan_rule(fixture_t *fixture, size_t rule_index,
     const bool *incomplete)
 {
 	const relic_rule_t *rule;
-	relic_relation_t *target;
 
 	if (rule_index >= fixture->ctx->program.rules.count)
 		return (false);
 
 	rule = &fixture->ctx->program.rules.entries[rule_index];
-	target = relic_relation_read(fixture->ctx, rule->head);
-	if (target == NULL)
-		return (false);
-
-	return (relic_plan_rule(fixture->ctx, &fixture->arena, rule, target,
+	return (relic_plan_rule(fixture->ctx, &fixture->arena, rule,
 	    incomplete, &fixture->plan) == 0);
 }
 
@@ -323,27 +318,21 @@ fixture_plan_variant(fixture_t *fixture, const char *program,
 
 /*
  * Plan the delta variant of the rule at `rule_index` for the body literal at
- * `delta_literal`, the whole family of its plans, into the relation of its
- * head.
+ * `delta_literal`, the whole family of its plans.
  */
 static bool
 fixture_plan_variants(fixture_t *fixture, size_t rule_index,
     size_t delta_literal, const bool *incomplete, relic_plan_family_t *family)
 {
 	const relic_rule_t *rule;
-	relic_relation_t *target;
 
 	bzero(family, sizeof(*family));
 	if (rule_index >= fixture->ctx->program.rules.count)
 		return (false);
 
 	rule = &fixture->ctx->program.rules.entries[rule_index];
-	target = relic_relation_read(fixture->ctx, rule->head);
-	if (target == NULL)
-		return (false);
-
 	return (relic_plan_variant(fixture->ctx, &fixture->arena, rule,
-	    target, delta_literal, incomplete, family) == 0);
+	    delta_literal, incomplete, family) == 0);
 }
 
 static bool
@@ -1534,20 +1523,11 @@ a_delta_literal_must_be_positive(void)
 	fixture_release(&fixture);
 }
 
-/*
- * The EMIT carries the head's terms and arity, and the predicate the head
- * names, and no relation.  The relation the caller names is the taker's:
- * it must have a column for each head argument, and a rule planned into a
- * relation of another arity is an internal error rather than a plan that
- * reads past its head or leaves a column unwritten.  The operation is not
- * an atom, so nothing can read the head as a source.
- */
+/* The EMIT schema is independent of any physical destination. */
 static void
 the_emit_carries_the_head_schema(void)
 {
 	fixture_t fixture;
-	relic_relation_t *answer;
-	relic_relation_t *wide;
 	const relic_rule_t *rule;
 	const relic_op_t *emit;
 
@@ -1558,36 +1538,14 @@ the_emit_carries_the_head_schema(void)
 		return;
 	}
 	rule = &fixture.ctx->program.rules.entries[0];
-
-	answer = relic_relation_create(fixture.ctx, RELIC_ID_NONE, 7, 1);
-	wide = relic_relation_create(fixture.ctx, RELIC_ID_NONE, 8, 2);
-	if (answer == NULL || wide == NULL) {
-		check(false, SCENARIO_EMIT_TARGET, "the relations are created");
-		relic_relation_free(answer);
-		relic_relation_free(wide);
-		fixture_release(&fixture);
-		return;
-	}
-
-	check(relic_plan_rule(fixture.ctx, &fixture.arena, rule, answer,
+	check(relic_plan_rule(fixture.ctx, &fixture.arena, rule,
 	    NULL, &fixture.plan) == 0,
-	    SCENARIO_EMIT_TARGET, "a relation of the head's arity is accepted");
+	    SCENARIO_EMIT_TARGET, "a rule plans without a destination");
 	emit = &fixture.plan.ops[fixture.plan.op_count - 1];
 	check(emit->kind == RELIC_OP_EMIT && relic_op_atom(emit) == NULL &&
 	    emit->u.emit.arity == 1 && emit->u.emit.terms != NULL &&
 	    emit->u.emit.pred == rule->head,
 	    SCENARIO_EMIT_TARGET, "the EMIT carries the head and no relation");
-
-	check(relic_plan_rule(fixture.ctx, &fixture.arena, rule, wide,
-	    NULL, &fixture.plan) != 0,
-	    SCENARIO_EMIT_TARGET, "a relation of another arity is refused");
-	checkf(fixture.errors == 1, SCENARIO_EMIT_TARGET,
-	    "one error should be reported, %zu were", fixture.errors);
-	check(strstr(relic_error(fixture.ctx), "relation $q8/2") != NULL,
-	    SCENARIO_EMIT_TARGET, "the error names the relation");
-
-	relic_relation_free(answer);
-	relic_relation_free(wide);
 	fixture_release(&fixture);
 }
 
@@ -1626,7 +1584,7 @@ a_bodyless_rule_is_a_lone_emit_of_constants(void)
 	}
 
 	if (target == NULL || relic_plan_rule(fixture.ctx, &fixture.arena,
-	    &rule, target, NULL, &fixture.plan) != 0) {
+	    &rule, NULL, &fixture.plan) != 0) {
 		check(false, SCENARIO_FACT, "the rule is planned");
 		fixture_release(&fixture);
 		return;

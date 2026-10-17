@@ -470,7 +470,7 @@ round_expectation(const relic_round_t *round)
 			continue;
 
 		arity = relic_relation_arity(
-		    round->targets[round->items[i].target]);
+		    relic_destination_relation(round->targets[round->items[i].target]));
 		expected.candidates += insertions->inserted;
 		expected.words += insertions->inserted * arity;
 	}
@@ -547,7 +547,7 @@ round_reads_no_target(const relic_round_t *round)
 			if (relation == NULL)
 				continue;
 			for (t = 0; t < round->target_count; t++) {
-				if (relation == round->targets[t])
+				if (relation == relic_destination_relation(round->targets[t]))
 					return (false);
 			}
 		}
@@ -630,7 +630,7 @@ round_needs(const relic_round_t *round, size_t *op_roomp,
 
 	*arity_roomp = 1;
 	for (i = 0; i < round->target_count; i++) {
-		arity = relic_relation_arity(round->targets[i]);
+		arity = relic_destination_input_arity(round->targets[i]);
 		if (arity > *arity_roomp)
 			*arity_roomp = arity;
 	}
@@ -835,7 +835,7 @@ report_task_notes(relic_t *ctx, relic_pool_t *pool,
 		task = &pool->tasks[i];
 		relic_report_mixed_note(ctx, round->items[task->item].rule,
 		    &task->note);
-		if (relic_refuse_interrupted(ctx, "deriving",
+		if (relic_destination_refuse_interrupted(ctx, "deriving",
 		    round->targets[round->items[task->item].target]) != 0)
 			return (-1);
 	}

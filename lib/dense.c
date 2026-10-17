@@ -107,7 +107,8 @@ relic_dense_open(relic_dense_t *dense, relic_pool_t *pool,
 	round = job->round;
 	if (!RELIC_DENSE_ATOMICS || sizeof(*dense->ranks) != 8 ||
 	    round->target_count != 1 || pool->task_count >= UINT32_MAX ||
-	    relic_relation_arity(round->targets[0]) != 2)
+	    relic_destination_set_relation(round->targets[0]) == NULL ||
+	    relic_relation_arity(relic_destination_relation(round->targets[0])) != 2)
 		return (0);
 	for (i = 0; i < round->item_count; i++) {
 		if (round->items[i].target != 0)
@@ -136,7 +137,7 @@ relic_dense_open(relic_dense_t *dense, relic_pool_t *pool,
 	dense->cells = relic_saturating_product(dense->width, dense->width);
 	if (dense->cells == 0 || dense->cells > UINT32_MAX)
 		return (0);
-	held = relic_relation_count(round->targets[0]);
+	held = relic_relation_count(relic_destination_relation(round->targets[0]));
 	if (held > dense->cells)
 		return (0);
 	copies = relic_saturating_product(dense->parts, held);
@@ -183,7 +184,7 @@ static void
 seed_part(void *argument, size_t part, size_t worker RELIC_UNUSED)
 {
 	relic_dense_t *dense = argument;
-	const relic_relation_t *target = dense->job->round->targets[0];
+	const relic_relation_t *target = relic_destination_relation(dense->job->round->targets[0]);
 	const relic_dom_t *tuple;
 	size_t a, b, count, end, i;
 
@@ -307,7 +308,7 @@ relic_dense_order(relic_dense_t *dense)
 		dense->count += held;
 	}
 	if (dense->count > dense->job->admissible || dense->count >
-	    RELIC_TUPLE_MAX - relic_relation_count(dense->job->round->targets[0])) {
+	    RELIC_TUPLE_MAX - relic_relation_count(relic_destination_relation(dense->job->round->targets[0]))) {
 		dense->pool->limit_declines++;
 		return (-1);
 	}

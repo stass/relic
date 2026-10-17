@@ -2992,7 +2992,7 @@ a_generated_rule_is_planned_from_its_mentions(void)
 	if (rule != NULL && rule->body_length == 1) {
 		target = relic_relation_read(ctx, rule->head);
 		planned = target != NULL && relic_plan_rule(ctx, &arena, rule,
-		    target, NULL, &plan) == 0 && plan.op_count == 2;
+		    NULL, &plan) == 0 && plan.op_count == 2;
 	}
 	checkf(planned, SCENARIO_MENTIONS, "b's magic rule should be drafted "
 	    "with one literal and planned, and the rewrite %s",

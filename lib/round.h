@@ -14,6 +14,7 @@
 #include <relic.h>
 
 #include "atomic.h"
+#include "destination.h"
 #include "exec.h"
 #include "frozen.h"
 #include "plan.h"
@@ -108,7 +109,7 @@ struct relic_round_item {
  */
 struct relic_round {
 	relic_round_item_t	 *items;
-	relic_relation_t	**targets;
+	relic_destination_t	*const *targets;
 	const relic_exec_env_t	 *env;
 	size_t			  item_count;
 	size_t			  item_capacity;
@@ -146,15 +147,17 @@ struct relic_round_task {
  * in the worker's `words`, its wide hash, which the merge probes by without
  * hashing again, and the target it is for.  The hash of a tuple holding a
  * pending value is over its markers until the merge rewrites them to
- * identifiers and hashes it again.  `repeat` is the merge's: set
- * when another worker's earlier candidate is the same tuple for the same
- * target, so that this one is not new after all.
+ * identifiers and hashes it again. `contribution` is one for a set's first
+ * occurrence, or the multiplicity of a counted key. Worker-local repeats
+ * combine into their first candidate. The merge combines equal keys into
+ * their earliest candidate and zeros later contributions, so zero means the
+ * candidate is discarded. The word occupies the set candidate's flags space.
  */
 struct relic_candidate {
 	size_t		offset;
 	uint64_t	hash;
 	uint32_t	target;
-	bool		repeat;
+	uint32_t	contribution;
 };
 
 /*
