@@ -15,6 +15,14 @@ gains accompany a repeatable parallel duplicate-loading CPU cost. Keep the
 ordinary identifier-table representation; that result selects no follow-up
 probe variant or publication redesign.
 
+The [serial-expression study](../bench/compare/recorded/serial-expressions/README.md)
+retains separate interpreter and inline-helper sample views and tests one
+local checked-argument prototype. Its serial files gain falls below the
+declared 5% gate, and parallel files is slower in both screen pairs. Keep the
+ordinary CALL implementation. Batching operations across rows still needs
+evidence that its benefit justifies the added text lifetimes, error ordering
+and publication coordination. This study selects no broader executor change.
+
 ## Choosing another experiment
 
 Identify a material operation or live allocation, the work a change removes,

@@ -150,6 +150,16 @@ dictionary indexes; its execution model does not require Relic's one
 context-wide namespace for every value. The representation difference does
 not itself establish a difference in which queries an engine can express.
 
+The [serial-expression study](../bench/compare/recorded/serial-expressions/README.md)
+profiles the accepted evaluator and tests a local CALL-argument conversion
+prototype. Its checked views reuse an existing type and preserve publication
+and string ownership, but the complete-command screen misses its adoption
+gate. The record keeps inline-helper samples separate and avoids treating
+interpreter-frame weights as dispatch cost. It also identifies the added
+text lifetimes and ordering obligations for batching the existing expression
+pipeline across rows. It selects neither prototype nor a broader batching
+design.
+
 The [input-constraint control](../bench/compare/recorded/remaining-costs/duckdb-pk/README.md)
 adds a complete-tuple primary key to the same unique inputs. DuckDB's
 [indexing guide](https://duckdb.org/docs/guides/performance/indexing)
