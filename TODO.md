@@ -19,17 +19,15 @@ of which `contrib/` holds only the homebrew formula, so
 `contrib/pkgsrc/devel/relic/` are to write; and the
 [release procedure](specs/design-release.md#the-release-procedure).
 
-**Files/import work reduction.** [Medium, components: `lib/relation.c`,
-`lib/import.c`, `bench/compare/`] Investigate a shared canonical-storage
-preparation boundary and whether contiguous unary domain IDs can eliminate
-a relation's separate hash index, with transactional promotion for other
-inputs. The [performance work](docs/todo-benchmark-performance.md) defines the
-design and measurement sequence, using the
-[counted-query measurements](bench/compare/recorded/counted-delivery/README.md)
-as the reference and the
-[DuckDB comparison](bench/compare/recorded/duckdb-files-analysis/README.md)
-to identify input work. This is a design investigation, not an approved
-representation change.
+**Reduce shared table-probe work.** [Medium, components: `lib/util.h`,
+`lib/util.c`, `bench/compare/`] Test metadata-first probing within the existing
+identifier table, preserving its storage and publication contracts. The
+[performance work](docs/todo-benchmark-performance.md) gives a bounded
+experiment and a 5% complete-command gate. The
+[remaining-cost investigation](bench/compare/recorded/remaining-costs/README.md)
+supports selective ordinary Datalog rules for joins and accepting residual
+bulk-SQL gaps; it does not select a new evaluator, value representation or
+unary-index refactor.
 
 ## Engine
 

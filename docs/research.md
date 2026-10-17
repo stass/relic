@@ -51,6 +51,15 @@ construction with origin columns for correlated requests. Its certificate
 and local proof determine eligibility; the paper's broader rule classes do
 not automatically qualify.
 
+### Selective intermediate relations — Related; measured query formulation
+
+The [remaining-cost investigation](../bench/compare/recorded/remaining-costs/README.md#a-useful-query-shape-with-the-existing-engine)
+expresses two selective reads as ordinary Datalog predicates before their
+join. Existing Magic rules, relation storage and access paths then operate
+on smaller derived relations. This is a measured program formulation, not an
+automatic optimizer transformation or a new join implementation. Its value
+depends on selectivity and reuse; extra intermediates can also cost more.
+
 ### Strongly connected components — Used; method reference
 
 Robert E. Tarjan, *Depth-First Search and Linear Graph Algorithms*
@@ -92,7 +101,9 @@ of the composition; its threat model and rationale are stated locally.
 
 ## Parallel ownership and storage
 
-### Control bytes before payload — Related; local proposal
+<a id="control-bytes-before-payload--related-local-proposal"></a>
+
+### Control bytes before payload — Proposed; local adaptation
 
 Abseil, [Swiss Tables Design Notes](https://abseil.io/about/design/swisstables),
 describes separate metadata carrying occupancy and a hash fingerprint, with
@@ -102,9 +113,11 @@ applies that separation to Relic's identifier table. It uses scalar linear probi
 zero for emptiness and aliases hash high bytes zero and one. It does not
 adopt Abseil's SIMD groups, seven-bit encoding, deletion support or container.
 The exact encoding and invariants are local; the reference does not establish
-a performance gain for relic. The [investigation](../bench/compare/recorded/files-grouping-design/README.md)
-records the workload evidence. This proposal is unimplemented and is not the
-active files/grouping performance direction.
+a performance gain for relic. The [initial investigation](../bench/compare/recorded/files-grouping-design/README.md)
+records operation counts. The
+[remaining-cost assessment](../bench/compare/recorded/remaining-costs/README.md#proposed-engine-work)
+selects a bounded experiment because the table already owns every writer;
+the representation is not implemented and its speed benefit is unproven.
 
 ### Vector pipelines and local grouped aggregation — Related; implementation reference
 
@@ -121,6 +134,13 @@ pins the source and distinguishes direct phase observations from claims
 about individual features. Relic does not adopt DuckDB's vector engine,
 spill manager or string representation. The relevant idea is to consume a
 projection into group state before retaining its rows.
+
+The [input-constraint control](../bench/compare/recorded/remaining-costs/duckdb-pk/README.md)
+adds a complete-tuple primary key to the same unique inputs. DuckDB's
+[indexing guide](https://duckdb.org/docs/guides/performance/indexing)
+describes the resulting ART constraint index and its loading tradeoff. The
+control measures the whole changed schema, not isolated index work or the
+cost of Relic's different set and canonical-value contracts.
 
 ### A counted destination sharing evaluation — Used; local adaptation
 
