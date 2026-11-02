@@ -9,9 +9,10 @@ what was done. Each item carries a severity and a component pointer.
 What remains, per the design's
 [release gate](specs/design-release.md#the-release-gate): a green run of
 `extended.yml`, its random-program and fuzz jobs included, and `macos.yml`
-on the release commit, since every job of the matrix must pass on it; FreeBSD, OpenBSD and NetBSD, which no workflow
-reaches, built and tested from the tarball by hand with no autotools
-present, the result recorded in the release's `NEWS` entry; the packaging
+on the release commit, since every job of the matrix must pass on it;
+OpenBSD and NetBSD, which no workflow reaches, built and tested from the
+tarball by hand with no autotools present, the result recorded in the
+release's `NEWS` entry; the packaging
 skeletons the design's
 [packaging skeletons](specs/design-release.md#packaging-skeletons) describe,
 of which `contrib/` holds only the homebrew formula, so

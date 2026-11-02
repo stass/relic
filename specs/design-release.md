@@ -138,7 +138,8 @@ distributed whole, by directory, so a new document cannot be left out.
 
 It builds with a C11 compiler, `make` and a POSIX shell, and nothing else:
 the autotools are maintainer tools, `libedit` is optional, and `mandoc`,
-`nm` and `pkg-config` are wanted by some tests and by nothing that is built.
+`nm`, `pkg-config` and `python3` are wanted by some tests and by nothing that
+is built.
 A test that lacks one skips, and a strict run turns that skip into a
 failure (see [testing](design-testing.md)).
 
@@ -197,6 +198,7 @@ fail rather than skip the lint. They need no jobs of their own.
 | Linux clang, ASan + UBSan | `make check-asan`, `make check-ubsan`, leaks included | every push |
 | distcheck | out-of-tree build, `DESTDIR` install, installcheck, all from the tarball | every push |
 | tarball, glibc and musl | `make dist` on Linux, then configure, build and test it in Debian and Alpine containers with no autotools installed | every push |
+| tarball, FreeBSD | the same tarball configured, built with the base system's clang and `make`, tested, installed and checked with `installcheck` in a FreeBSD virtual machine as an unprivileged user, with no autotools installed | every push |
 | Linux clang, MSan | uninitialized reads ASan cannot see | weekly |
 | Linux clang, TSan | `make check-tsan`, the pool's threads under ThreadSanitizer | weekly |
 | Linux gcc `-m32` | `size_t` and pointer-width assumptions | weekly |
@@ -214,14 +216,18 @@ break, because they are the only ones that build what users download, on a
 system that has never seen the repository. The musl job exercises the
 `compat/` replacements a glibc build never compiles.
 
+The FreeBSD job runs on a Linux runner, which bills at the Linux rate, so it
+belongs with the per-push jobs. It is the one job that builds with the BSD
+`make`, which the other tarball jobs never run.
+
 ## The release gate
 
 A release is made only when all of the following hold on the release
 commit:
 
-1. Every job of the matrix passes. FreeBSD, OpenBSD and NetBSD, the primary
-   target platforms, which no workflow reaches, are built and tested from
-   the tarball by hand, with the result recorded in the release's `NEWS`
+1. Every job of the matrix passes. OpenBSD and NetBSD, primary target
+   platforms which no workflow reaches, are built and tested from the
+   tarball by hand, with the result recorded in the release's `NEWS`
    entry. The tarball must build, install and pass its own suite with no
    autotools present on FreeBSD, OpenBSD, NetBSD, macOS, and Linux with
    both glibc and musl.
