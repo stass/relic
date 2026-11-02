@@ -197,7 +197,7 @@ array. There is no `P * U` tuple-storage term.
 With 4,000 assigned integers and an empty symbol pool, the rank array is
 128 MB in decimal units. The ordinary append, indexes, final relation,
 expression scratch and allocation overlap remain real costs.
-[Measurements](../bench/compare/recorded/dense-rounds/README.md) distinguish
+Measurements (relic-bench `dense-rounds/README.md`) distinguish
 requested storage from process RSS.
 
 ## Alternatives not taken

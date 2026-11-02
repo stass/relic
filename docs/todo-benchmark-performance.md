@@ -7,15 +7,15 @@ publication and no third-party runtime dependency. Matching an unindexed
 bulk-SQL command is not an acceptance requirement. Improvements must earn
 their owners, states and coordination obligations across the whole system.
 
-The [remaining-cost investigation](../bench/compare/recorded/remaining-costs/README.md)
+The remaining-cost investigation (relic-bench `remaining-costs/README.md`)
 separates input maintenance, query formulation and representation costs. The
-[metadata-first probe comparison](../bench/compare/recorded/metadata-probe/README.md)
+metadata-first probe comparison (relic-bench `metadata-probe/README.md`)
 retains the bounded table experiment and its rejection: clear serial target
 gains accompany a repeatable parallel duplicate-loading CPU cost. Keep the
 ordinary identifier-table representation; that result selects no follow-up
 probe variant or publication redesign.
 
-The [serial-expression study](../bench/compare/recorded/serial-expressions/README.md)
+The serial-expression study (relic-bench `serial-expressions/README.md`)
 retains separate interpreter and inline-helper sample views and tests one
 local checked-argument prototype. Its serial files gain falls below the
 declared 5% gate, and parallel files is slower in both screen pairs. Keep the

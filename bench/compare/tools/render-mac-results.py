@@ -4,6 +4,7 @@ import collections
 import csv
 import json
 import math
+import os
 import re
 import shutil
 import statistics
@@ -14,7 +15,12 @@ arguments = parser.parse_args()
 accepted_copies = []
 
 repo = Path(__file__).resolve().parents[3]
-record = repo / 'bench/compare/recorded/m3-max'
+# The recorded evidence lives in the relic-bench repository, a sibling checkout
+# by default; RELIC_BENCH names another location.
+bench_repo = Path(os.environ.get('RELIC_BENCH') or repo.parent / 'relic-bench')
+record = bench_repo / 'm3-max'
+if not record.is_dir():
+    raise SystemExit(f'recorded evidence not found at {record}; set RELIC_BENCH')
 engines = ['relic', 'souffle', 'souffle-magic', 'souffle-interp', 'nemo', 'swipl', 'clingo', 'duckdb', 'sqlite']
 parallel = ['relic', 'souffle', 'souffle-magic', 'souffle-interp', 'duckdb']
 labels = ['relic', 'Souffl\u00e9 compiled', 'Souffl\u00e9 Magic', 'Souffl\u00e9 interpreter', 'Nemo', 'SWI-Prolog', 'clingo', 'DuckDB', 'SQLite']
@@ -420,7 +426,7 @@ requesting another 32 GiB, beyond this machine's physical RAM. Raw failures
 and retry outcomes are retained separately. The interrupted scale-8 serial
 graph-left verification is replaced by a complete fresh attempt, which
 times out. The scale-4 serial report's missing shell epilogue is documented
-in [environment metadata](bench/compare/recorded/m3-max/environment.json);
+in environment metadata (relic-bench `m3-max/environment.json`);
 its cell matrix and samples are independently validated.
 
 The huge scale-8 tree verification uses the
@@ -441,18 +447,18 @@ for scale, threads, rows in scenarios:
                  '**Maximum peak resident memory across timed runs**', '', metric_table(rows, 'peak_bytes'), '', '</details>', ''])
 full.extend(['## Raw results and reproduction', '',
              '| Artifact | Contents |', '| --- | --- |',
-             '| [Canonical results](bench/compare/recorded/m3-max/results.tsv) | All 1,610 cells; median, fastest, spread, user CPU, peak bytes, row counts, compilation time and requested/accepted repetitions |',
+             '| Canonical results (relic-bench `m3-max/results.tsv`) | All 1,610 cells; median, fastest, spread, user CPU, peak bytes, row counts, compilation time and requested/accepted repetitions |',
              '| [Comparison summary](bench/compare/suite-summary.tsv) | Fastest completed competitor for every workload and scenario |',
-             '| [Raw cohort reports](bench/compare/recorded/m3-max/) | Original per-scenario TSVs, text reports, exit statuses and diagnostics |',
-             '| [Individual timed samples](bench/compare/recorded/m3-max/samples/) | Every original timing sample in hyperfine JSON |',
-             '| [Retry samples](bench/compare/recorded/m3-max/retry-samples/) | Fresh reference measurements; original failures remain in the cohort reports |',
-             '| [Investigated failures](bench/compare/recorded/m3-max/investigated-failures.json) | Cell-specific diagnostic evidence and classifications |',
-             '| [Environment](bench/compare/recorded/m3-max/environment.json) | Hardware, versions, flags, resource allowances and interruption provenance |',
+             '| Raw cohort reports (relic-bench `m3-max/`) | Original per-scenario TSVs, text reports, exit statuses and diagnostics |',
+             '| Individual timed samples (relic-bench `m3-max/samples/`) | Every original timing sample in hyperfine JSON |',
+             '| Retry samples (relic-bench `m3-max/retry-samples/`) | Fresh reference measurements; original failures remain in the cohort reports |',
+             '| Investigated failures (relic-bench `m3-max/investigated-failures.json`) | Cell-specific diagnostic evidence and classifications |',
+             '| Environment (relic-bench `m3-max/environment.json`) | Hardware, versions, flags, resource allowances and interruption provenance |',
              '| [Build instructions](bench/compare/tools/README.md) | Native engine builds and patches |',
-             '| [Execution counters](bench/compare/recorded/m3-max/baseline.txt) | One instrumented relic execution per workload/thread count at scale 1 |',
-             '| [Earlier Xeon study](bench/compare/recorded/xeon-w3245/README.md) | Separate sessions preserved with their conditions |', '',
+             '| Execution counters (relic-bench `m3-max/baseline.txt`) | One instrumented relic execution per workload/thread count at scale 1 |',
+             '| Earlier Xeon study (relic-bench `xeon-w3245/README.md`) | Separate sessions preserved with their conditions |', '',
              'The results directories contain measurements and diagnostics; query answer dumps and temporary engine binaries are generated rather than committed.', '',
-             'Regenerate and validate this report without running engines:', '',
+             'Regenerate and validate this report without running engines. The recorded evidence is the relic-bench repository, a sibling checkout of this one; set `RELIC_BENCH` to use another location:', '',
              '```sh', 'python3 bench/compare/tools/render-mac-results.py --check',
              'python3 bench/compare/tools/render-mac-results.py', '```', '',
              'The recorded tables use file exports for Souffle/Nemo. The comparison harness serializes timed answers to discarded stdout for every engine. Preserve measurements from these output policies in separate cohorts; rerunning these commands does not reproduce the recorded file-output policy.', '',
@@ -464,7 +470,7 @@ full.extend(['## Raw results and reproduction', '',
              '    -e souffle-interp,souffle,souffle-magic,duckdb -o parallel.tsv', '```', '',
              'Include `-w cspa-httpd,cspa-postgresql,cspa-linux` in separate scale-1 invocations for the downloaded datasets. Repeat generated workloads at scales 2, 4 and 8 with `BENCH_RUNS=3`. See [methodology](specs/design-bench.md).', ''])
 (repo/'BENCHMARKS.md').write_text('\n'.join(full))
-(record/'README.md').write_text('# Apple M3 Max raw benchmark results\n\nSee [BENCHMARKS.md](../../../../BENCHMARKS.md) for all comparison tables, conditions, limitations and reproduction commands.\n\nThe files here retain all original cohorts, retry outcomes, diagnostics and individual timed samples. [results.tsv](results.tsv) is the validated canonical matrix; [investigated-failures.json](investigated-failures.json) explains diagnosed limits.\n')
+(record/'README.md').write_text('# Apple M3 Max raw benchmark results\n\nSee BENCHMARKS.md (relic `BENCHMARKS.md`) for all comparison tables, conditions, limitations and reproduction commands.\n\nThe files here retain all original cohorts, retry outcomes, diagnostics and individual timed samples. [results.tsv](results.tsv) is the validated canonical matrix; [investigated-failures.json](investigated-failures.json) explains diagnosed limits.\n')
 
 highlight_workloads = ['startup', 'andersen', 'chain-closure', 'chain-left', 'cspa',
                        'cspa-httpd', 'cspa-linux', 'cspa-postgresql', 'files-grouped',
@@ -510,7 +516,7 @@ performance = '\n'.join(['## Performance', '',
     'that output policy belong in a separate cohort.', '',
     'The [full benchmark report](BENCHMARKS.md) contains every workload and scale,',
     'separate CPU and memory tables, build conditions and diagnosed limits.',
-    '[Raw results and individual samples](bench/compare/recorded/m3-max/) are',
+    'Raw results and individual samples (relic-bench `m3-max/`) are',
     'preserved, including default-memory failures and separately recorded retries.',
     '[Methodology](specs/design-bench.md) explains measurement and reproduction.', '',
     'FreeBSD results are excluded from these tables.', '',])

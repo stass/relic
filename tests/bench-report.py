@@ -3,13 +3,18 @@
 import hashlib
 import json
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 
 source = Path(__file__).resolve().parents[1]
-relative_record = Path('bench/compare/recorded/m3-max')
+# The recorded evidence is the relic-bench repository, a sibling checkout by
+# default; RELIC_BENCH names another location.
+source_record = Path(os.environ.get('RELIC_BENCH') or source.parent / 'relic-bench') / 'm3-max'
+if not source_record.is_dir():
+    sys.exit(f'recorded evidence not found at {source_record}; set RELIC_BENCH')
 relative_renderer = Path('bench/compare/tools/render-mac-results.py')
 
 
@@ -30,15 +35,16 @@ with tempfile.TemporaryDirectory() as directory:
     script = fixture / relative_renderer
     script.parent.mkdir(parents=True)
     shutil.copy2(source / relative_renderer, script)
-    record = fixture / relative_record
-    shutil.copytree(source / relative_record, record)
+    record = fixture / 'relic-bench/m3-max'
+    shutil.copytree(source_record, record)
     for dataset in (source / 'bench/compare').glob('*/dataset'):
         target = fixture / 'bench/compare' / dataset.parent.name / 'dataset'
         target.parent.mkdir()
         shutil.copy2(dataset, target)
 
     def check(expected=None):
-        result = subprocess.run([sys.executable, str(script), '--check'], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, str(script), '--check'], capture_output=True, text=True,
+                                env={**os.environ, 'RELIC_BENCH': str(fixture / 'relic-bench')})
         if expected is None:
             assert result.returncode == 0, result.stderr
         else:

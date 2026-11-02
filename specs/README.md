@@ -123,6 +123,11 @@ that is not built, belongs in [TODO.md](../TODO.md). What changed in a
 release, for its users, belongs in [NEWS](../NEWS). Why and when something
 changed belongs in commit messages.
 
+**Recorded evidence.** Raw benchmark results, profiles and the written
+investigations behind the design documents live in the separate relic-bench
+repository, a sibling checkout of this one. A reference written as
+"relic-bench `path`" names a file inside it.
+
 **Design before code.** A subsystem gets its `design-<subsystem>.md`, and a
 link from the [pipeline](architecture.md#pipeline) or the contracts of
 architecture.md, before its code is written.

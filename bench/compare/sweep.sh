@@ -6,7 +6,7 @@
 # be on PATH. The default parallel setting is 64 workers for the FreeBSD host.
 freeze_sources() {
 	tar -C "$root" --exclude 'bench/compare/cache' \
-		--exclude 'bench/compare/recorded' --exclude '*.o' --exclude '*.lo' \
+		--exclude '*.o' --exclude '*.lo' \
 	    --exclude '.deps' --exclude '.libs' --exclude 'bench/compare/results.tsv' \
 		--exclude 'bench/compare/suite-summary.tsv' -cf "$work/source.tar" \
 		bench/datasets.sh bench/compare

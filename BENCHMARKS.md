@@ -58,7 +58,7 @@ requesting another 32 GiB, beyond this machine's physical RAM. Raw failures
 and retry outcomes are retained separately. The interrupted scale-8 serial
 graph-left verification is replaced by a complete fresh attempt, which
 times out. The scale-4 serial report's missing shell epilogue is documented
-in [environment metadata](bench/compare/recorded/m3-max/environment.json);
+in environment metadata (relic-bench `m3-max/environment.json`);
 its cell matrix and samples are independently validated.
 
 The huge scale-8 tree verification uses the
@@ -941,20 +941,20 @@ Souffle is the compiled mode; SF Magic is compiled with Magic Sets; SF interp is
 
 | Artifact | Contents |
 | --- | --- |
-| [Canonical results](bench/compare/recorded/m3-max/results.tsv) | All 1,610 cells; median, fastest, spread, user CPU, peak bytes, row counts, compilation time and requested/accepted repetitions |
+| Canonical results (relic-bench `m3-max/results.tsv`) | All 1,610 cells; median, fastest, spread, user CPU, peak bytes, row counts, compilation time and requested/accepted repetitions |
 | [Comparison summary](bench/compare/suite-summary.tsv) | Fastest completed competitor for every workload and scenario |
-| [Raw cohort reports](bench/compare/recorded/m3-max/) | Original per-scenario TSVs, text reports, exit statuses and diagnostics |
-| [Individual timed samples](bench/compare/recorded/m3-max/samples/) | Every original timing sample in hyperfine JSON |
-| [Retry samples](bench/compare/recorded/m3-max/retry-samples/) | Fresh reference measurements; original failures remain in the cohort reports |
-| [Investigated failures](bench/compare/recorded/m3-max/investigated-failures.json) | Cell-specific diagnostic evidence and classifications |
-| [Environment](bench/compare/recorded/m3-max/environment.json) | Hardware, versions, flags, resource allowances and interruption provenance |
+| Raw cohort reports (relic-bench `m3-max/`) | Original per-scenario TSVs, text reports, exit statuses and diagnostics |
+| Individual timed samples (relic-bench `m3-max/samples/`) | Every original timing sample in hyperfine JSON |
+| Retry samples (relic-bench `m3-max/retry-samples/`) | Fresh reference measurements; original failures remain in the cohort reports |
+| Investigated failures (relic-bench `m3-max/investigated-failures.json`) | Cell-specific diagnostic evidence and classifications |
+| Environment (relic-bench `m3-max/environment.json`) | Hardware, versions, flags, resource allowances and interruption provenance |
 | [Build instructions](bench/compare/tools/README.md) | Native engine builds and patches |
-| [Execution counters](bench/compare/recorded/m3-max/baseline.txt) | One instrumented relic execution per workload/thread count at scale 1 |
-| [Earlier Xeon study](bench/compare/recorded/xeon-w3245/README.md) | Separate sessions preserved with their conditions |
+| Execution counters (relic-bench `m3-max/baseline.txt`) | One instrumented relic execution per workload/thread count at scale 1 |
+| Earlier Xeon study (relic-bench `xeon-w3245/README.md`) | Separate sessions preserved with their conditions |
 
 The results directories contain measurements and diagnostics; query answer dumps and temporary engine binaries are generated rather than committed.
 
-Regenerate and validate this report without running engines:
+Regenerate and validate this report without running engines. The recorded evidence is the relic-bench repository, a sibling checkout of this one; set `RELIC_BENCH` to use another location:
 
 ```sh
 python3 bench/compare/tools/render-mac-results.py --check

@@ -53,7 +53,7 @@ not automatically qualify.
 
 ### Selective intermediate relations — Related; measured query formulation
 
-The [remaining-cost investigation](../bench/compare/recorded/remaining-costs/README.md#a-useful-query-shape-with-the-existing-engine)
+The remaining-cost investigation (relic-bench `remaining-costs/README.md#a-useful-query-shape-with-the-existing-engine`)
 expresses two selective reads as ordinary Datalog predicates before their
 join. Existing Magic rules, relation storage and access paths then operate
 on smaller derived relations. This is a measured program formulation, not an
@@ -109,14 +109,14 @@ of the composition; its threat model and rationale are stated locally.
 Abseil, [Swiss Tables Design Notes](https://abseil.io/about/design/swisstables),
 describes separate metadata carrying occupancy and a hash fingerprint, with
 candidate payloads read after filtering. The archived
-[control-byte proposal](../bench/compare/recorded/files-grouping-design/control-bytes-proposal.md)
+control-byte proposal (relic-bench `files-grouping-design/control-bytes-proposal.md`)
 applies that separation to Relic's identifier table. It uses scalar linear probing, reserves
 zero for emptiness and aliases hash high bytes zero and one. It does not
 adopt Abseil's SIMD groups, seven-bit encoding, deletion support or container.
 The exact encoding and invariants are local; the reference does not establish
-a performance gain for relic. The [initial investigation](../bench/compare/recorded/files-grouping-design/README.md)
+a performance gain for relic. The initial investigation (relic-bench `files-grouping-design/README.md`)
 records operation counts. The
-[native comparison](../bench/compare/recorded/metadata-probe/README.md)
+native comparison (relic-bench `metadata-probe/README.md`)
 retains the isolated prototype, conditional-load assembly evidence and
 complete-command results. It improves the serial files and facts targets
 but consumes more user CPU on parallel duplicate loading in every decisive
@@ -135,7 +135,7 @@ retains local hash tables across chunks and combines their partial data.
 Its [external-aggregation explanation](https://duckdb.org/2024/03/29/external-aggregation.html)
 describes the broader partitioning and memory-management approach.
 
-The [Relic comparison](../bench/compare/recorded/duckdb-files-analysis/README.md)
+The Relic comparison (relic-bench `duckdb-files-analysis/README.md`)
 pins the source and distinguishes direct phase observations from claims
 about individual features. Relic does not adopt DuckDB's vector engine,
 spill manager or string representation. The relevant idea is to consume a
@@ -150,7 +150,7 @@ dictionary indexes; its execution model does not require Relic's one
 context-wide namespace for every value. The representation difference does
 not itself establish a difference in which queries an engine can express.
 
-The [serial-expression study](../bench/compare/recorded/serial-expressions/README.md)
+The serial-expression study (relic-bench `serial-expressions/README.md`)
 profiles the accepted evaluator and tests a local CALL-argument conversion
 prototype. Its checked views reuse an existing type and preserve publication
 and string ownership, but the complete-command screen misses its adoption
@@ -160,7 +160,7 @@ text lifetimes and ordering obligations for batching the existing expression
 pipeline across rows. It selects neither prototype nor a broader batching
 design.
 
-The [input-constraint control](../bench/compare/recorded/remaining-costs/duckdb-pk/README.md)
+The input-constraint control (relic-bench `remaining-costs/duckdb-pk/README.md`)
 adds a complete-tuple primary key to the same unique inputs. DuckDB's
 [indexing guide](https://duckdb.org/docs/guides/performance/indexing)
 describes the resulting ART constraint index and its loading tradeoff. The
@@ -170,10 +170,10 @@ cost of Relic's different set and canonical-value contracts.
 ### A counted destination sharing evaluation — Used; local adaptation
 
 [Design](../specs/design-grouped-count.md),
-[source comparison](../bench/compare/recorded/duckdb-files-analysis/README.md),
-[private-collector experiment](../bench/compare/recorded/counted-projection/README.md),
-[shared-publication experiment](../bench/compare/recorded/counted-destination/README.md),
-[direct-delivery measurements](../bench/compare/recorded/counted-delivery/README.md).
+source comparison (relic-bench `duckdb-files-analysis/README.md`),
+private-collector experiment (relic-bench `counted-projection/README.md`),
+shared-publication experiment (relic-bench `counted-destination/README.md`),
+direct-delivery measurements (relic-bench `counted-delivery/README.md`).
 
 A full count query over one base scan owns a canonical key/count destination
 whose completed contents supply the answer. The existing emitted-tuple
@@ -210,7 +210,7 @@ Tasks read fixed views while private candidates wait for ordered publication.
 The frozen header boundary prevents workers from mutating the store. This
 preserves serial identifiers, diagnostics, counters and refusal behavior.
 There is no claimed external paper for the complete combination. The
-[measured memory costs](../bench/compare/recorded/m3-max/merge-screen-reuse/README.md)
+measured memory costs (relic-bench `m3-max/merge-screen-reuse/README.md`)
 are implementation evidence, not an inherent lower bound for determinism.
 
 ### Souffle's concurrent B-tree — Related; external implementation
@@ -244,9 +244,9 @@ does not establish that a particular retained benchmark used it.
 ### Earliest-occurrence ranks — Used; local adaptation
 
 [Dense round design](../specs/design-dense-rounds.md),
-[abstract model](../bench/compare/recorded/dense-round-design/README.md),
+abstract model (relic-bench `dense-round-design/README.md`),
 [implementation](../lib/dense.c),
-[measurements](../bench/compare/recorded/dense-rounds/README.md).
+measurements (relic-bench `dense-rounds/README.md`).
 
 A fixed cell per possible pair stores an atomic minimum occurrence rank;
 sorting surviving cells reconstructs serial insertion order. The local proof
@@ -259,7 +259,7 @@ measured performance applies to the recorded workloads and build policies.
 
 [Design](../specs/design-serial-membership.md),
 [implementation](../lib/eval.c),
-[measurements](../bench/compare/recorded/serial-membership/README.md).
+measurements (relic-bench `serial-membership/README.md`).
 
 A bitmap remembers tuples whose ordinary insertion has completed during one
 serial plan. An unset bit makes no absence claim, and append-only storage
