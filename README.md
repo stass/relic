@@ -133,8 +133,7 @@ that output policy belong in a separate cohort.
 
 The [full benchmark report](BENCHMARKS.md) contains every workload and scale,
 separate CPU and memory tables, build conditions and diagnosed limits.
-Raw results and individual samples (relic-bench `m3-max/`) are
-preserved, including default-memory failures and separately recorded retries.
+It also describes the retries with raised memory limits and their outcomes.
 [Methodology](specs/design-bench.md) explains measurement and reproduction.
 
 FreeBSD results are excluded from these tables.
