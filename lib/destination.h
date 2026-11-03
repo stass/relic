@@ -66,7 +66,10 @@ relic_contribution_combine(const relic_destination_view_t *view,
 #ifndef RELIC_FROZEN_ONLY
 #include "relation.h"
 
-/* SET borrows its relation; COUNT owns the anonymous relation and count store. */
+/*
+ * SET borrows its relation; COUNT owns the anonymous relation and count
+ * store.
+ */
 struct relic_destination {
 	relic_relation_t		*relation;
 	relic_count_store_t	*count;
@@ -163,7 +166,8 @@ size_t	 relic_destination_bytes_during_append(
 	    const relic_destination_t *destination,
 	    const relic_destination_append_t *append);
 int	 relic_destination_reserve_append(relic_t *ctx,
-	    relic_destination_t *destination, relic_destination_append_t *append);
+	    relic_destination_t *destination,
+	    relic_destination_append_t *append);
 void	 relic_destination_take_append(relic_t *ctx,
 	    relic_destination_t *destination,
 	    const relic_destination_append_t *append);

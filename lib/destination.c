@@ -20,6 +20,9 @@
 
 #include "internal.h"
 
+/* A counted producer scans its source first and emits last. */
+#define	PRODUCER_MIN_OPS	2
+
 struct relic_count_store {
 	uint32_t	*values;
 	size_t		 capacity;
@@ -91,7 +94,8 @@ relic_destination_count(relic_t *ctx, relic_destination_t *destination,
 	size_t operation;
 
 	bzero(destination, sizeof(*destination));
-	if (plan->op_count < 2 || plan->ops[0].kind != RELIC_OP_SCAN ||
+	if (plan->op_count < PRODUCER_MIN_OPS ||
+	    plan->ops[0].kind != RELIC_OP_SCAN ||
 	    plan->ops[0].u.atom.view != RELIC_VIEW_ALL ||
 	    !relic_plan_derives_distinct(plan))
 		return (0);
@@ -119,11 +123,13 @@ relic_destination_count(relic_t *ctx, relic_destination_t *destination,
 		destination->view.columns[key] = columns[key];
 		keys |= UINT64_C(1) << columns[key];
 	}
-	for (i = 0; i < emit->u.emit.arity; i++)
+	for (i = 0; i < emit->u.emit.arity; i++) {
 		if ((keys & (UINT64_C(1) << i)) == 0 &&
 		    !relic_emit_term_assigned(emit->u.emit.terms[i].action))
 			return (0);
-	destination->relation = relic_relation_create(ctx, RELIC_ID_NONE, 0, width);
+	}
+	destination->relation = relic_relation_create(ctx, RELIC_ID_NONE, 0,
+	    width);
 	if (destination->relation == NULL)
 		return (-1);
 	destination->count = calloc(1, sizeof(*destination->count));
@@ -183,13 +189,14 @@ relic_destination_arity(const relic_destination_t *destination)
 }
 
 const char *
-relic_destination_describe(relic_t *ctx, const relic_destination_t *destination,
-    char *buffer, size_t size)
+relic_destination_describe(relic_t *ctx,
+    const relic_destination_t *destination, char *buffer, size_t size)
 {
 	if (destination->view.kind == RELIC_DESTINATION_COUNT)
-		return (relic_pred_describe(ctx, destination->count->producer_pred,
-		    buffer, size));
-	return (relic_relation_describe(ctx, destination->relation, buffer, size));
+		return (relic_pred_describe(ctx,
+		    destination->count->producer_pred, buffer, size));
+	return (relic_relation_describe(ctx, destination->relation, buffer,
+	    size));
 }
 
 int
@@ -228,7 +235,7 @@ relic_destination_result(const relic_t *ctx,
 {
 	const relic_dom_t *key;
 	relic_dom_t count;
-	uint16_t column, source;
+	uint16_t arity, column, source;
 
 	key = relic_relation_tuple(destination->relation, id);
 	if (key == NULL || destination->view.kind == RELIC_DESTINATION_SET)
@@ -236,9 +243,13 @@ relic_destination_result(const relic_t *ctx,
 	count = relic_value_find_integer(ctx,
 	    relic_destination_count_value(destination, id));
 	assert(count != RELIC_ID_NONE);
-	for (column = 0; column < relic_destination_result_arity(destination); column++) {
+	arity = relic_destination_result_arity(destination);
+	for (column = 0; column < arity; column++) {
 		source = destination->count->output[column];
-		result[column] = source == destination->view.arity ? count : key[source];
+		if (source == destination->view.arity)
+			result[column] = count;
+		else
+			result[column] = key[source];
 	}
 	return (result);
 }
@@ -267,13 +278,15 @@ relic_destination_begin_round(relic_t *ctx,
 {
 	if (destination->view.kind == RELIC_DESTINATION_SET)
 		return (0);
-	if (items != 1 || targets != 1 || plan == NULL || plan->op_count < 2 ||
+	if (items != 1 || targets != 1 || plan == NULL ||
+	    plan->op_count < PRODUCER_MIN_OPS ||
 	    plan->ops != destination->count->producer_ops ||
 	    relic_relation_count(plan->ops[0].u.atom.relation) !=
 	    destination->view.source_bound ||
 	    !relic_plan_derives_distinct(plan) ||
 	    relic_relation_count(destination->relation) != 0) {
-		relic_diag_internal(ctx, NULL, "a counted destination requires one complete producer into empty keys");
+		relic_diag_internal(ctx, NULL,
+		    "a counted destination requires one complete producer into empty keys");
 		return (-1);
 	}
 	return (0);
@@ -289,10 +302,12 @@ relic_destination_project(const relic_destination_view_t *view,
 	width = view->arity;
 	if (width == view->input_arity)
 		return;
-	for (row = 0; row < count; row++)
+	for (row = 0; row < count; row++) {
 		for (column = 0; column < width; column++)
-			tuples[row * width + column] = tuples[row * view->input_arity +
+			tuples[row * width + column] =
+			    tuples[row * view->input_arity +
 			    view->columns[column]];
+	}
 }
 
 /*
@@ -311,7 +326,8 @@ reserve_counts(relic_t *ctx, relic_destination_t *destination, size_t added)
 
 	if (destination->view.kind == RELIC_DESTINATION_SET || added == 0)
 		return (COUNTS_GROWN);
-	capacity = relic_grow_array_capacity_stepwise(destination->count->capacity,
+	capacity = relic_grow_array_capacity_stepwise(
+	    destination->count->capacity,
 	    relic_relation_count(destination->relation), added, 1);
 	if (capacity == 0 || capacity > SIZE_MAX / sizeof(*counts))
 		return (COUNTS_NO_MEMORY);
@@ -361,6 +377,7 @@ relic_destination_insert(relic_t *ctx, relic_destination_t *destination,
 	const relic_dom_t *tuple;
 	enum count_growth growth;
 	relic_tuple_id_t id;
+	uint32_t *value;
 	size_t row;
 
 	if (destination->view.kind == RELIC_DESTINATION_SET)
@@ -372,19 +389,20 @@ relic_destination_insert(relic_t *ctx, relic_destination_t *destination,
 		tuple = tuples + row * destination->relation->arity;
 		id = relic_relation_find(destination->relation, tuple);
 		if (id != RELIC_ID_NONE) {
-			destination->count->values[id - 1] = relic_contribution_combine(
-			    &destination->view, destination->count->values[id - 1], 1);
+			value = &destination->count->values[id - 1];
+			*value = relic_contribution_combine(&destination->view,
+			    *value, 1);
 		} else {
 			growth = reserve_counts(ctx, destination, 1);
 			if (growth != COUNTS_GROWN) {
-				relic_destination_refuse_memory(ctx, destination,
-				    growth == COUNTS_LIMITED);
+				relic_destination_refuse_memory(ctx,
+				    destination, growth == COUNTS_LIMITED);
 				return (-1);
 			}
 			id = relic_relation_end(destination->relation);
 			destination->count->values[id - 1] = 1;
-			if (relic_relation_insert(ctx, destination->relation, tuple,
-			    &added[row]) != 0)
+			if (relic_relation_insert(ctx, destination->relation,
+			    tuple, &added[row]) != 0)
 				return (-1);
 			assert(added[row]);
 		}
@@ -441,8 +459,10 @@ relic_destination_bytes_during_append(const relic_destination_t *destination,
 	growth = 0;
 	if (destination->view.kind == RELIC_DESTINATION_COUNT &&
 	    append->relation.count != 0) {
-		capacity = relic_grow_array_capacity_stepwise(destination->count->capacity,
-		    relic_relation_count(destination->relation), append->relation.count, 1);
+		capacity = relic_grow_array_capacity_stepwise(
+		    destination->count->capacity,
+		    relic_relation_count(destination->relation),
+		    append->relation.count, 1);
 		if (capacity == 0 ||
 		    capacity > SIZE_MAX / sizeof(*destination->count->values))
 			return (SIZE_MAX);
@@ -473,7 +493,8 @@ relic_destination_take_append(relic_t *ctx, relic_destination_t *destination,
 		bcopy(append->contributions,
 		    destination->count->values + append->relation.first - 1,
 		    append->relation.count * sizeof(*append->contributions));
-	relic_relation_take_append(ctx, destination->relation, &append->relation);
+	relic_relation_take_append(ctx, destination->relation,
+	    &append->relation);
 }
 
 void
@@ -495,7 +516,8 @@ relic_destination_close(relic_t *ctx, relic_destination_t *destination)
 		}
 		free(destination->count->values);
 		relic_account_release_round(&ctx->account,
-		    destination->count->capacity * sizeof(*destination->count->values));
+		    destination->count->capacity *
+		    sizeof(*destination->count->values));
 		free(destination->count);
 	}
 	bzero(destination, sizeof(*destination));

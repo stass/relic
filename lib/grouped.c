@@ -15,7 +15,15 @@
 
 #include "internal.h"
 
-#define GROUP_VISITS 256u
+/*
+ * Rule headers and literals the recognizer may inspect before it declines,
+ * so that recognizing a query costs a bounded amount whatever the program
+ * holds.  A rule costs one for its header and one per literal.
+ */
+#define	GROUP_VISITS	256u
+
+/* The count's result rule joins its guard and its count, and nothing else. */
+#define	GROUP_RESULT_LITERALS	2
 
 typedef struct grouped_answer grouped_answer_t;
 
@@ -49,6 +57,16 @@ distinct_variables(const relic_arg_t *args, uint16_t arity)
 	return (true);
 }
 
+/* Spend `count` of the GROUP_VISITS allowance, or false when it is spent. */
+static bool
+spend_visits(size_t *visits, size_t count)
+{
+	if (count > GROUP_VISITS - *visits)
+		return (false);
+	*visits += count;
+	return (true);
+}
+
 /* Header searches and literal inspections spend the same bounded allowance. */
 static const relic_rule_t *
 unique_rule(relic_t *ctx, relic_pred_id_t pred, size_t *visits)
@@ -60,15 +78,13 @@ unique_rule(relic_t *ctx, relic_pred_id_t pred, size_t *visits)
 	    relic_base_count(ctx, pred) != 0)
 		return (NULL);
 	for (i = 0; i < ctx->program.rules.count; i++) {
-		if (*visits == GROUP_VISITS)
+		if (!spend_visits(visits, 1))
 			return (NULL);
-		(*visits)++;
 		rule = &ctx->program.rules.entries[i];
 		if (rule->head != pred)
 			continue;
-		if (rule->body_length > GROUP_VISITS - *visits)
+		if (!spend_visits(visits, rule->body_length))
 			return (NULL);
-		*visits += rule->body_length;
 		return (rule);
 	}
 	return (NULL);
@@ -97,13 +113,15 @@ recognize_query(grouped_answer_t *answer, const relic_rule_t **resultp,
 	    !distinct_variables(root_atom->args, root_arity))
 		return (false);
 
-	visits = 2;
+	visits = 0;
+	if (!spend_visits(&visits, 1 + root->body_length))
+		return (false);
 	result = unique_rule(answer->ctx, root_atom->pred, &visits);
-	if (result == NULL || result->body_length != 2)
+	if (result == NULL || result->body_length != GROUP_RESULT_LITERALS)
 		return (false);
 	guard_atom = NULL;
 	fold = NULL;
-	for (i = 0; i < 2; i++) {
+	for (i = 0; i < GROUP_RESULT_LITERALS; i++) {
 		literal = &result->body[i];
 		if (literal->kind == RELIC_LITERAL_POSITIVE)
 			guard_atom = &literal->u.atom;
@@ -118,13 +136,14 @@ recognize_query(grouped_answer_t *answer, const relic_rule_t **resultp,
 	    !distinct_variables(guard_atom->args, key_arity) ||
 	    !distinct_variables(result->head_args, result->head_arity) ||
 	    fold->body->head != RELIC_ID_NONE || fold->body->body_length != 1 ||
-	    visits > GROUP_VISITS - 2 ||
 	    fold->body->body[0].kind != RELIC_LITERAL_POSITIVE)
 		return (false);
-	visits += 2;
+	if (!spend_visits(&visits, 1 + fold->body->body_length))
+		return (false);
 	fold_atom = &fold->body->body[0].u.atom;
 	if (fold_atom->pred != fold->source ||
-	    !distinct_variables(fold_atom->args, atom_arity(answer->ctx, fold_atom)))
+	    !distinct_variables(fold_atom->args,
+	    atom_arity(answer->ctx, fold_atom)))
 		return (false);
 
 	guard = unique_rule(answer->ctx, guard_atom->pred, &visits);
@@ -144,65 +163,133 @@ recognize_query(grouped_answer_t *answer, const relic_rule_t **resultp,
 	return (true);
 }
 
+/* The first head position of `rule` holding `slot`, or its head arity. */
+static uint16_t
+head_position(const relic_rule_t *rule, uint16_t slot)
+{
+	uint16_t position;
+
+	for (position = 0; position < rule->head_arity; position++) {
+		if (rule->head_args[position].u.slot == slot)
+			break;
+	}
+	return (position);
+}
+
 /*
- * A key's guard-head position and fold slot must describe the same P column.
- * Keeping these maps in P order also determines pending-value publication.
+ * Map the count's keys to producer columns: answer->key_columns[k] is the
+ * producer column key k counts by.  The guard projects the producer's
+ * columns onto distinct variables or wildcards.  A key's column must be a
+ * variable of that projection, and the guard's head must pass it on at the
+ * position where the result rule's guard atom holds the fold's shared slot
+ * for the key: then the guard and the count name the same producer column.
+ * Keeping the keys in producer-column order also fixes the order pending
+ * values publish in.
+ */
+static bool
+map_key_columns(grouped_answer_t *answer, const relic_rule_t *guard,
+    const relic_atom_t *guard_atom, const relic_aggregate_t *fold)
+{
+	const relic_atom_t *projection = &guard->body[0].u.atom;
+	const relic_arg_t *arg;
+	uint16_t column, key, position;
+	uint64_t projected_slots, slot_bit;
+
+	key = 0;
+	projected_slots = 0;
+	for (column = 0; column < answer->producer->head_arity; column++) {
+		arg = &projection->args[column];
+		if (arg->kind == RELIC_ARG_CONSTANT)
+			return (false);
+		if (arg->kind == RELIC_ARG_VARIABLE) {
+			slot_bit = UINT64_C(1) << arg->u.slot;
+			if ((projected_slots & slot_bit) != 0)
+				return (false);
+			projected_slots |= slot_bit;
+		}
+		if ((fold->key_mask & (UINT32_C(1) << column)) == 0)
+			continue;
+		if (key >= answer->width || arg->kind != RELIC_ARG_VARIABLE)
+			return (false);
+		position = head_position(guard, arg->u.slot);
+		if (position == guard->head_arity ||
+		    guard_atom->args[position].u.slot != fold->shared[key])
+			return (false);
+		answer->key_columns[key] = column;
+		key++;
+	}
+	return (key == answer->width);
+}
+
+/*
+ * Map the result rule's head: result_columns[c] is the key its column c
+ * holds, or answer->width for the count itself.
+ */
+static bool
+map_result_columns(const grouped_answer_t *answer, const relic_rule_t *result,
+    const relic_aggregate_t *fold, uint16_t *result_columns)
+{
+	uint16_t column, key, slot;
+
+	for (column = 0; column < result->head_arity; column++) {
+		slot = result->head_args[column].u.slot;
+		for (key = 0; key < answer->width; key++) {
+			if (slot == fold->shared[key])
+				break;
+		}
+		if (key == answer->width && slot != fold->result)
+			return (false);
+		result_columns[column] = key;
+	}
+	return (true);
+}
+
+/*
+ * Map the query's head through its one literal, an atom of the result
+ * rule's predicate: output[c] is what the result column that query column
+ * c names holds, by result_columns.
+ */
+static bool
+map_output_columns(const grouped_answer_t *answer,
+    const uint16_t *result_columns, uint16_t *output)
+{
+	const relic_rule_t *root = &answer->query->rule;
+	const relic_atom_t *root_atom = &root->body[0].u.atom;
+	const relic_arg_t *arg;
+	uint16_t column, position;
+
+	for (column = 0; column < root->head_arity; column++) {
+		arg = &root->head_args[column];
+		for (position = 0; position < root->head_arity; position++) {
+			if (arg->kind == RELIC_ARG_VARIABLE &&
+			    arg->u.slot == root_atom->args[position].u.slot)
+				break;
+		}
+		if (position == root->head_arity)
+			return (false);
+		output[column] = result_columns[position];
+	}
+	return (true);
+}
+
+/*
+ * Map the answer's columns from the producer's through the guard, the
+ * count's result rule and the query's head.  Each step checks that the
+ * rules name the same columns the counted path assumes, and declines
+ * otherwise.
  */
 static bool
 map_columns(grouped_answer_t *answer, const relic_rule_t *result,
     const relic_rule_t *guard, const relic_atom_t *guard_atom,
     const relic_aggregate_t *fold, uint16_t *output)
 {
-	const relic_rule_t *root = &answer->query->rule;
-	const relic_atom_t *root_atom = &root->body[0].u.atom;
-	const relic_atom_t *projection = &guard->body[0].u.atom;
 	uint16_t result_columns[RELIC_MAX_ARITY];
-	uint16_t producer_arity, i, j, key;
-	uint64_t projected_slots;
 
-	producer_arity = answer->producer->head_arity;
-	key = 0;
-	projected_slots = 0;
-	for (i = 0; i < producer_arity; i++) {
-		if (projection->args[i].kind == RELIC_ARG_CONSTANT)
-			return (false);
-		if (projection->args[i].kind == RELIC_ARG_VARIABLE) {
-			if ((projected_slots & (UINT64_C(1) << projection->args[i].u.slot)) != 0)
-				return (false);
-			projected_slots |= UINT64_C(1) << projection->args[i].u.slot;
-		}
-		if ((fold->key_mask & (UINT32_C(1) << i)) == 0)
-			continue;
-		if (key >= answer->width || projection->args[i].kind != RELIC_ARG_VARIABLE)
-			return (false);
-		for (j = 0; j < guard->head_arity; j++)
-			if (guard->head_args[j].u.slot == projection->args[i].u.slot)
-				break;
-		if (j == guard->head_arity || guard_atom->args[j].u.slot != fold->shared[key])
-			return (false);
-		answer->key_columns[key++] = i;
-	}
-	if (key != answer->width)
+	if (!map_key_columns(answer, guard, guard_atom, fold))
 		return (false);
-
-	for (i = 0; i < result->head_arity; i++) {
-		for (j = 0; j < answer->width; j++)
-			if (result->head_args[i].u.slot == fold->shared[j])
-				break;
-		if (j == answer->width && result->head_args[i].u.slot != fold->result)
-			return (false);
-		result_columns[i] = j;
-	}
-	for (i = 0; i < root->head_arity; i++) {
-		for (j = 0; j < root->head_arity; j++)
-			if (root->head_args[i].kind == RELIC_ARG_VARIABLE &&
-			    root->head_args[i].u.slot == root_atom->args[j].u.slot)
-				break;
-		if (j == root->head_arity)
-			return (false);
-		output[i] = result_columns[j];
-	}
-	return (true);
+	if (!map_result_columns(answer, result, fold, result_columns))
+		return (false);
+	return (map_output_columns(answer, result_columns, output));
 }
 
 static bool
@@ -232,7 +319,6 @@ certify(grouped_answer_t *answer, uint16_t *output)
 	return (map_columns(answer, result, guard, guard_atom, fold, output));
 }
 
-
 /* A declined certificate publishes nothing; a started evaluation is final. */
 int
 relic_grouped_answer(relic_t *ctx, const relic_query_t *query,
@@ -259,7 +345,8 @@ relic_grouped_answer(relic_t *ctx, const relic_query_t *query,
 	if (relic_plan_rule(ctx, &arena, answer.producer, NULL, &plan) != 0)
 		goto done;
 	status = relic_destination_count(ctx, &destination, answer.producer,
-	    &plan, answer.key_columns, answer.width, output, query->rule.head_arity);
+	    &plan, answer.key_columns, answer.width, output,
+	    query->rule.head_arity);
 	if (status <= 0)
 		goto done;
 	status = -1;

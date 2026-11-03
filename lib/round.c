@@ -155,18 +155,28 @@ static size_t	 worker_share(uint64_t expected, size_t workers,
  * An interrupt observed before the merge declines the round for its serial
  * run to report.  An interrupt raised while reporting a merged round's
  * notes fails that evaluation; a published round cannot be replayed.
+ *
+ * The round owns its dense collector, zeroed on entry so that closing it
+ * is always safe: it opens it once the tasks are cut and closes it at
+ * `done`, the one exit after that, whatever the outcome.  The merge orders
+ * the collector's ranks, charging the arrays that takes, and releases the
+ * ordered positions once it has staged them, so after a merge that
+ * succeeds the collector holds nothing while the notes are reported.
  */
 enum relic_round_outcome
 relic_round_run(relic_t *ctx, relic_round_t *round)
 {
+	enum relic_round_outcome outcome;
 	relic_round_job_t job;
 	relic_dense_t dense;
 	relic_pool_t *pool;
 	size_t texts_bytes;
 	size_t workers;
 	bool always;
+	int collector;
 	int status;
 
+	bzero(&dense, sizeof(dense));
 	always = (ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0;
 	if (!always && !round_is_worth_sharing(ctx, round))
 		return (RELIC_ROUND_DECLINED);
@@ -192,26 +202,24 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 		return (RELIC_ROUND_DECLINED);
 	}
 	job_begin(&job, ctx, pool, round);
-	status = relic_dense_open(&dense, pool, &job);
-	if (status < 0 ||
-	    (status == 0 && reserve_candidates(ctx, pool, round) != 0)) {
-		relic_dense_close(&dense);
+	outcome = RELIC_ROUND_DECLINED;
+	collector = relic_dense_open(&dense, pool, &job);
+	if (collector < 0 ||
+	    (collector == 0 && reserve_candidates(ctx, pool, round) != 0)) {
 		decline_round(ctx, pool);
-		return (RELIC_ROUND_DECLINED);
+		goto done;
 	}
-	job.dense = status == 1 ? &dense : NULL;
+	job.dense = collector == 1 ? &dense : NULL;
 	relic_pool_for(pool, pool->task_count, relic_round_run_task, &job);
 	texts_bytes = end_worker_texts(pool);
 
 	if (relic_atomic_bool_load_relaxed(&job.abandoned) ||
 	    relic_signal_flag_raised(&ctx->interrupted) ||
 	    !relic_round_merge(ctx, pool, round, texts_bytes, job.dense)) {
-		relic_dense_close(&dense);
 		abandon_round(ctx, pool);
 		pool->abandoned_rounds++;
-		return (RELIC_ROUND_DECLINED);
+		goto done;
 	}
-	relic_dense_close(&dense);
 
 	status = report_task_notes(ctx, pool, round);
 	take_worker_counters(pool, &ctx->counters);
@@ -224,8 +232,11 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 	pool->thread_tasks += tasks_run_by_threads(pool);
 	if (pool->worker_count > 1)
 		ctx->counters.parallel_rounds++;
+	outcome = status == 0 ? RELIC_ROUND_MERGED : RELIC_ROUND_FAILED;
 
-	return (status == 0 ? RELIC_ROUND_MERGED : RELIC_ROUND_FAILED);
+done:
+	relic_dense_close(&dense);
+	return (outcome);
 }
 
 /*
@@ -459,6 +470,7 @@ static relic_round_expectation_t
 round_expectation(const relic_round_t *round)
 {
 	const relic_insert_history_t *insertions;
+	const relic_destination_t *target;
 	relic_round_expectation_t expected;
 	uint16_t arity;
 	size_t i;
@@ -469,8 +481,9 @@ round_expectation(const relic_round_t *round)
 		if (insertions == NULL || !insertions->ran)
 			continue;
 
+		target = round->targets[round->items[i].target];
 		arity = relic_relation_arity(
-		    relic_destination_relation(round->targets[round->items[i].target]));
+		    relic_destination_relation(target));
 		expected.candidates += insertions->inserted;
 		expected.words += insertions->inserted * arity;
 	}
@@ -531,6 +544,7 @@ decline_round(relic_t *ctx, relic_pool_t *pool)
 static bool
 round_reads_no_target(const relic_round_t *round)
 {
+	const relic_destination_t *target;
 	const relic_relation_t *relation;
 	const relic_plan_t *plan;
 	size_t i;
@@ -547,7 +561,9 @@ round_reads_no_target(const relic_round_t *round)
 			if (relation == NULL)
 				continue;
 			for (t = 0; t < round->target_count; t++) {
-				if (relation == relic_destination_relation(round->targets[t]))
+				target = round->targets[t];
+				if (relation ==
+				    relic_destination_relation(target))
 					return (false);
 			}
 		}

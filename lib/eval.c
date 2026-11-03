@@ -7,6 +7,7 @@
 #include "config.h"
 
 #include <assert.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <strings.h>
@@ -112,9 +113,15 @@
  */
 
 /*
- * Positive membership evidence for one serial plan and its fixed target.
- * An unset bit says nothing. Only completed ordinary insertions set bits,
- * and append-only storage keeps those facts true until the plan returns.
+ * Positive membership evidence for one serial plan and its fixed binary
+ * target (specs/design-serial-membership.md): one bit per cell of the pair
+ * grid snapshotted when the plan begins, `bytes` long.  An unset bit says
+ * nothing. Only completed ordinary insertions set bits, and append-only
+ * storage keeps those facts true until the plan returns.
+ *
+ * A target holding fewer than SERIAL_SEEN_MIN_TUPLES gets no bitmap, nor
+ * does a grid whose bitmap would exceed SERIAL_SEEN_MAX_BYTES; neither is a
+ * public tuning switch.
  */
 #define	SERIAL_SEEN_MIN_TUPLES	4096u
 #define	SERIAL_SEEN_MAX_BYTES	(4u * 1024u * 1024u)
@@ -122,11 +129,9 @@
 typedef struct relic_serial_seen relic_serial_seen_t;
 
 struct relic_serial_seen {
-	uint8_t		*bits;
-	size_t		 integers;
-	size_t		 symbols;
-	size_t		 width;
-	size_t		 bytes;
+	uint8_t			*bits;
+	relic_pair_grid_t	 grid;
+	size_t			 bytes;
 };
 
 /*
@@ -492,7 +497,8 @@ static void	 decode_row(const relic_t *ctx, const relic_dom_t *tuple,
 static void	 deliver_batch(relic_evaluation_t *eval,
 		    const relic_row_sink_t *sink, uint16_t arity);
 static int	 insert_batch(relic_evaluation_t *eval,
-		    relic_destination_t *destination, relic_serial_seen_t *seen);
+		    relic_destination_t *destination,
+		    relic_serial_seen_t *seen);
 static relic_pending_t *make_pending_room(relic_evaluation_t *eval);
 static int	 fit_scratch(relic_evaluation_t *eval,
 		    const relic_plan_t *plan);
@@ -500,11 +506,14 @@ static void	 set_delta(relic_evaluation_t *eval, relic_relation_t *member,
 		    relic_tuple_range_t delta);
 static int	 take_batch(relic_evaluation_t *eval,
 		    const relic_rule_t *rule,
-		    const relic_emit_target_t *target, relic_serial_seen_t *seen);
+		    const relic_emit_target_t *target,
+		    relic_serial_seen_t *seen);
 static void	 serial_seen_open(relic_evaluation_t *eval,
-		    const relic_emit_target_t *target, relic_serial_seen_t *seen);
-static size_t	 serial_seen_coordinate(const relic_serial_seen_t *seen,
-		    relic_dom_t value);
+		    const relic_emit_target_t *target,
+		    relic_serial_seen_t *seen);
+static bool	 serial_seen_has(const relic_serial_seen_t *seen,
+		    size_t cell);
+static void	 serial_seen_learn(relic_serial_seen_t *seen, size_t cell);
 static int	 serial_seen_insert(relic_evaluation_t *eval,
 		    relic_relation_t *relation, relic_serial_seen_t *seen,
 		    bool *added, size_t *completedp);
@@ -883,34 +892,42 @@ deliver_batch(relic_evaluation_t *eval, const relic_row_sink_t *sink,
 }
 
 /*
- * The optional bitmap belongs to this plan, never its relation. Bounds keep
- * setup small relative to the target. A finite memory limit declines it so
- * scratch cannot move the ordinary insertion's refusal boundary.
+ * The optional bitmap belongs to this plan, never its relation. A finite
+ * memory limit declines it so scratch cannot move the ordinary insertion's
+ * refusal boundary.
+ *
+ * The bitmap must also cost no more than one byte per tuple the target
+ * already holds.  A binary tuple's columns alone take
+ * RELIC_PAIR_GRID_ARITY * sizeof(relic_dom_t) bytes, so the bitmap stays a
+ * fraction of the relation it serves and zeroing it costs less than one
+ * pass over that relation; a sparse domain, whose grid is large beside the
+ * tuples it holds, gets no bitmap rather than one mostly empty.
  */
 static void
 serial_seen_open(relic_evaluation_t *eval, const relic_emit_target_t *target,
     relic_serial_seen_t *seen)
 {
-	size_t cells;
+	const relic_relation_t *relation;
 	size_t bytes;
+	size_t held;
 
 	bzero(seen, sizeof(*seen));
 	if (target->rows.callback != NULL ||
-	    relic_destination_set_relation(target->destination) == NULL ||
-	    target->destination->relation->arity != 2 ||
-	    relic_relation_count(target->destination->relation) < SERIAL_SEEN_MIN_TUPLES ||
+	    relic_destination_set_relation(target->destination) == NULL)
+		return;
+	relation = target->destination->relation;
+	held = relic_relation_count(relation);
+	if (relation->arity != RELIC_PAIR_GRID_ARITY ||
+	    held < SERIAL_SEEN_MIN_TUPLES ||
 	    relic_limit_set(eval->ctx->account.limit))
 		return;
 
-	relic_value_spans(eval->ctx, &seen->integers, &seen->symbols);
-	seen->width = relic_saturating_sum(seen->integers,
-	    relic_saturating_product(2, seen->symbols));
-	cells = relic_saturating_product(seen->width, seen->width);
-	if (cells == 0 || cells == SIZE_MAX)
+	relic_pair_grid_take(eval->ctx, &seen->grid);
+	if (seen->grid.cells == 0 || seen->grid.cells == SIZE_MAX)
 		return;
-	bytes = cells / 8 + (cells % 8 != 0);
-	if (bytes > SERIAL_SEEN_MAX_BYTES ||
-	    bytes > relic_relation_count(target->destination->relation))
+	bytes = seen->grid.cells / CHAR_BIT +
+	    (seen->grid.cells % CHAR_BIT != 0);
+	if (bytes > SERIAL_SEEN_MAX_BYTES || bytes > held)
 		return;
 	if (!relic_account_charge_round(&eval->ctx->account, bytes))
 		return;
@@ -922,42 +939,30 @@ serial_seen_open(relic_evaluation_t *eval, const relic_emit_target_t *target,
 	seen->bytes = bytes;
 }
 
-/* Fixed typed spans stay disjoint as later interning appends values. */
-static size_t
-serial_seen_coordinate(const relic_serial_seen_t *seen, relic_dom_t value)
+static bool
+serial_seen_has(const relic_serial_seen_t *seen, size_t cell)
 {
-	size_t index;
+	return ((seen->bits[cell / CHAR_BIT] & (1U << (cell % CHAR_BIT))) != 0);
+}
 
-	index = value & RELIC_DOM_INDEX_MASK;
-	if (index == 0)
-		return (SIZE_MAX);
-	switch (value & RELIC_DOM_TYPE_MASK) {
-	case RELIC_DOM_INTEGER:
-		if (index <= seen->integers)
-			return (index - 1);
-		break;
-	case RELIC_DOM_SYMBOL:
-		if (index <= seen->symbols)
-			return (seen->integers + index - 1);
-		break;
-	case RELIC_DOM_STRING:
-		if (index <= seen->symbols)
-			return (seen->integers + seen->symbols + index - 1);
-		break;
-	}
-	return (SIZE_MAX);
+static void
+serial_seen_learn(relic_serial_seen_t *seen, size_t cell)
+{
+	seen->bits[cell / CHAR_BIT] |= 1U << (cell % CHAR_BIT);
 }
 
 /*
  * Compact unknown tuples without changing their order. Bits are learned only
  * after ordinary insertion succeeds. A refusal maps back to its original
  * position, so cached duplicates after that position are not counted either.
+ * A tuple holding a value interned after the grid was taken has no cell,
+ * SIZE_MAX, and is always unknown.
  */
 static int
 serial_seen_insert(relic_evaluation_t *eval, relic_relation_t *relation,
     relic_serial_seen_t *seen, bool *added, size_t *completedp)
 {
-	relic_dom_t unknown[2 * RELIC_INSERT_BATCH];
+	relic_dom_t unknown[RELIC_PAIR_GRID_ARITY * RELIC_INSERT_BATCH];
 	size_t cells[RELIC_INSERT_BATCH];
 	size_t positions[RELIC_INSERT_BATCH];
 	bool inserted[RELIC_INSERT_BATCH];
@@ -965,7 +970,7 @@ serial_seen_insert(relic_evaluation_t *eval, relic_relation_t *relation,
 	size_t original_count;
 	size_t miss_count;
 	size_t miss_completed;
-	size_t cell, i, left, right;
+	size_t cell, i;
 	int status;
 
 	original_count = eval->scratch.batch_count;
@@ -973,17 +978,15 @@ serial_seen_insert(relic_evaluation_t *eval, relic_relation_t *relation,
 	bzero(added, original_count * sizeof(*added));
 	miss_count = 0;
 	for (i = 0; i < original_count; i++) {
-		tuple = &eval->scratch.batch[2 * i];
-		left = serial_seen_coordinate(seen, tuple[0]);
-		right = serial_seen_coordinate(seen, tuple[1]);
-		cell = left == SIZE_MAX || right == SIZE_MAX ? SIZE_MAX :
-		    left * seen->width + right;
+		tuple = &eval->scratch.batch[RELIC_PAIR_GRID_ARITY * i];
+		if (!relic_pair_grid_cell(&seen->grid, tuple, &cell))
+			cell = SIZE_MAX;
 		cells[i] = cell;
-		if (cell != SIZE_MAX &&
-		    (seen->bits[cell / 8] & (1U << (cell % 8))) != 0)
+		if (cell != SIZE_MAX && serial_seen_has(seen, cell))
 			continue;
 		positions[miss_count] = i;
-		bcopy(tuple, &unknown[2 * miss_count], 2 * sizeof(*tuple));
+		bcopy(tuple, &unknown[RELIC_PAIR_GRID_ARITY * miss_count],
+		    RELIC_PAIR_GRID_ARITY * sizeof(*tuple));
 		miss_count++;
 	}
 
@@ -993,7 +996,7 @@ serial_seen_insert(relic_evaluation_t *eval, relic_relation_t *relation,
 		added[positions[i]] = inserted[i];
 		cell = cells[positions[i]];
 		if (cell != SIZE_MAX)
-			seen->bits[cell / 8] |= 1U << (cell % 8);
+			serial_seen_learn(seen, cell);
 	}
 	assert(status == 0 || miss_completed < miss_count);
 	*completedp = status == 0 ? original_count : positions[miss_completed];
@@ -1021,8 +1024,8 @@ insert_batch(relic_evaluation_t *eval, relic_destination_t *destination,
 		return (0);
 
 	if (seen->bits != NULL)
-		status = serial_seen_insert(eval, destination->relation, seen, added,
-		    &completed);
+		status = serial_seen_insert(eval, destination->relation, seen,
+		    added, &completed);
 	else
 		status = relic_destination_insert(eval->ctx, destination,
 		    scratch->batch, scratch->batch_count, added, &completed);
@@ -1099,8 +1102,9 @@ take_batch(relic_evaluation_t *eval, const relic_rule_t *rule,
 	}
 
 	if (target->rows.callback == NULL) {
-		relic_destination_project(relic_destination_view(target->destination), scratch->batch,
-		    scratch->batch_count);
+		relic_destination_project(
+		    relic_destination_view(target->destination),
+		    scratch->batch, scratch->batch_count);
 		if (resolve_pending(eval, target->destination->relation) != 0)
 			return (-1);
 		return (insert_batch(eval, target->destination, seen));
@@ -1108,7 +1112,8 @@ take_batch(relic_evaluation_t *eval, const relic_rule_t *rule,
 
 	assert(scratch->pending_count == 0);
 
-	deliver_batch(eval, &target->rows, target->destination->relation->arity);
+	deliver_batch(eval, &target->rows,
+	    target->destination->relation->arity);
 
 	return (0);
 }
@@ -1134,7 +1139,8 @@ count_derivation(relic_evaluation_t *eval, bool added)
  * failure here leaves the context as any other failure there does.
  */
 int
-relic_refuse_interrupted_subject(relic_t *ctx, const char *verb, const char *subject)
+relic_refuse_interrupted_subject(relic_t *ctx, const char *verb,
+    const char *subject)
 {
 	if (!relic_signal_flag_raised(&ctx->interrupted))
 		return (0);
@@ -1148,11 +1154,13 @@ relic_refuse_interrupted(relic_t *ctx, const char *verb,
     const relic_relation_t *relation)
 {
 	char described[RELIC_PRED_TEXT_MAX];
+	const char *subject;
 
 	if (!relic_signal_flag_raised(&ctx->interrupted))
 		return (0);
-	return (relic_refuse_interrupted_subject(ctx, verb,
-	    relic_relation_describe(ctx, relation, described, sizeof(described))));
+	subject = relic_relation_describe(ctx, relation, described,
+	    sizeof(described));
+	return (relic_refuse_interrupted_subject(ctx, verb, subject));
 }
 
 /*
@@ -1277,15 +1285,18 @@ static int
 run_round(relic_evaluation_t *eval, relic_round_t *round)
 {
 	const relic_round_item_t *calling;
+	const relic_round_item_t *item;
 	enum relic_exec_failure failure;
 	int status;
 	size_t i;
 
-	for (i = 0; i < round->item_count; i++)
+	for (i = 0; i < round->item_count; i++) {
+		item = &round->items[i];
 		if (relic_destination_begin_round(eval->ctx,
-		    round->targets[round->items[i].target], round->items[i].plan,
+		    round->targets[item->target], item->plan,
 		    round->item_count, round->target_count) != 0)
 			return (-1);
+	}
 
 	if (rounds_may_be_deferred(eval->ctx)) {
 		switch (relic_round_run(eval->ctx, round)) {
@@ -1303,7 +1314,8 @@ run_round(relic_evaluation_t *eval, relic_round_t *round)
 	    relic_scratch_begin_texts(&eval->scratch, &eval->ctx->account,
 	    &failure) != 0) {
 		relic_destination_refuse_memory(eval->ctx,
-		    round->targets[calling->target], failure == RELIC_FAIL_LIMIT);
+		    round->targets[calling->target],
+		    failure == RELIC_FAIL_LIMIT);
 		return (-1);
 	}
 
@@ -1338,7 +1350,8 @@ run_item(relic_evaluation_t *eval, const relic_round_t *round,
 
 	eval->derived = false;
 	if (item->plan == NULL)
-		status = insert_seed(eval, item->rule, target.destination->relation);
+		status = insert_seed(eval, item->rule,
+		    target.destination->relation);
 	else
 		status = execute_plan(eval, item->plan, item->rule, &target);
 	item->gained = eval->derived;
@@ -2326,7 +2339,8 @@ plan_members(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 		    sizeof(*plans->destinations[i]));
 		if (plans->destinations[i] == NULL)
 			return (-1);
-		relic_destination_set(plans->destinations[i], plans->members[i]);
+		relic_destination_set(plans->destinations[i],
+		    plans->members[i]);
 		plans->member_count++;
 	}
 
@@ -3193,9 +3207,9 @@ relic_materialize(relic_t *ctx)
  * Pass every row of a completed SET or COUNT destination to the caller in
  * insertion order, until the callback asks to stop. The answer relation
  * supplies the query's diagnostic identity, not the counted row storage.
- * Returns 0, or -1 when the caller interrupted the delivery, which is looked for
- * before each row, so that a callback writing a large answer somewhere slow
- * can be stopped.
+ * Returns 0, or -1 when the caller interrupted the delivery, which is looked
+ * for before each row, so that a callback writing a large answer somewhere
+ * slow can be stopped.
  *
  * Nothing else here can fail, which is what lets a query promise that no
  * row is delivered unless every row can be; an interrupt is the caller's
@@ -3284,9 +3298,9 @@ stream_query_plan(relic_evaluation_t *eval,
 }
 
 /*
- * Run a query plan whose EMIT inserts into the query's answer relation, as
- * a round of that one item.  Nothing reads the answer, so the round may be
- * deferred.
+ * Run a query plan whose EMIT inserts into the query's answer relation, or
+ * into the counted destination that stands for it, as a round of that one
+ * item.  Nothing reads the answer, so the round may be deferred.
  */
 static int
 gather_query_answer(relic_evaluation_t *eval,
@@ -3313,9 +3327,11 @@ gather_query_answer(relic_evaluation_t *eval,
 }
 
 /*
- * Publish count integers in insertion order, with one boundary per 64 groups
- * whether their counts are already assigned or pending. Descriptor-only
- * batches use the ordinary publisher without constructing answer tuples.
+ * Publish count integers in insertion order, with one boundary per
+ * RELIC_INSERT_BATCH groups whether their counts are already assigned or
+ * pending, as the ordinary path publishes one per batch of answer tuples.
+ * Descriptor-only batches use the ordinary publisher without constructing
+ * answer tuples.
  */
 static int
 publish_counted_values(relic_evaluation_t *eval, const relic_query_t *query,
@@ -3323,6 +3339,7 @@ publish_counted_values(relic_evaluation_t *eval, const relic_query_t *query,
 {
 	relic_scratch_t *scratch;
 	relic_tuple_range_t range;
+	relic_pending_t *pending;
 	relic_tuple_id_t id;
 	uint32_t count;
 	size_t groups;
@@ -3340,9 +3357,11 @@ publish_counted_values(relic_evaluation_t *eval, const relic_query_t *query,
 	for (id = range.first; id < range.end; id++) {
 		scratch->counters.tuples_scanned++;
 		count = relic_destination_count_value(counted, id);
-		if (relic_value_find_integer(eval->ctx, count) == RELIC_ID_NONE) {
-			scratch->pending[scratch->pending_count].kind = RELIC_PENDING_INTEGER;
-			scratch->pending[scratch->pending_count].u.integer = count;
+		if (relic_value_find_integer(eval->ctx, count) ==
+		    RELIC_ID_NONE) {
+			pending = &scratch->pending[scratch->pending_count];
+			pending->kind = RELIC_PENDING_INTEGER;
+			pending->u.integer = count;
 			scratch->pending_count++;
 		}
 		groups++;
@@ -3353,7 +3372,8 @@ publish_counted_values(relic_evaluation_t *eval, const relic_query_t *query,
 			return (-1);
 		eval->ctx->counters.derivations += groups;
 		groups = 0;
-		if (relic_refuse_interrupted(eval->ctx, "deriving", query->answer) != 0)
+		if (relic_refuse_interrupted(eval->ctx, "deriving",
+		    query->answer) != 0)
 			return (-1);
 	}
 	return (0);
@@ -3367,31 +3387,23 @@ relic_evaluate_counted(relic_t *ctx, const relic_query_t *query,
 {
 	relic_evaluation_t eval;
 	relic_running_plan_t *running;
-	relic_round_item_t item;
-	relic_round_t round;
 	int status;
 
 	status = evaluation_begin(&eval, ctx, &ctx->eval_arena, 1,
 	    producer->head_arity);
 	if (status == 0)
-		status = make_destination_plan(&eval, producer, plan, destination, &running);
-	if (status == 0) {
-		bzero(&item, sizeof(item));
-		item.rule = producer;
-		item.plan = &running->plan;
-		bzero(&round, sizeof(round));
-		round.items = &item;
-		round.targets = &destination;
-		round.env = &eval.env;
-		round.item_count = round.item_capacity = round.target_count = 1;
-		status = run_round(&eval, &round);
-	}
+		status = make_destination_plan(&eval, producer, plan,
+		    destination, &running);
+	if (status == 0)
+		status = gather_query_answer(&eval, running);
 	if (status == 0)
 		status = publish_counted_values(&eval, query, destination);
 	evaluation_end(&eval);
-	if (status == 0)
-		status = deliver_gathered_answer(ctx, destination, query->answer, rows);
-	return (status);
+	if (status != 0)
+		return (status);
+
+	return (deliver_gathered_answer(ctx, destination, query->answer,
+	    rows));
 }
 
 /*
@@ -3513,7 +3525,8 @@ run_query_rule(relic_t *ctx, const relic_rule_t *rule,
 
 	if (!streams) {
 		relic_destination_set(&destination, answer);
-		return (deliver_gathered_answer(ctx, &destination, answer, rows));
+		return (deliver_gathered_answer(ctx, &destination, answer,
+		    rows));
 	}
 
 	return (0);
@@ -3662,6 +3675,7 @@ static void
 group_run_finish(relic_t *ctx, relic_group_run_t *groups)
 {
 	const relic_component_plans_t *plans;
+	const relic_running_plan_t *base;
 	size_t i;
 
 	if (!groups->begun)
@@ -3669,9 +3683,10 @@ group_run_finish(relic_t *ctx, relic_group_run_t *groups)
 
 	plans = groups->eval.components;
 	for (i = 0; plans != NULL && i < plans->planned_count; i++) {
-		if (plans->planned[i].base != NULL)
+		base = plans->planned[i].base;
+		if (base != NULL)
 			relic_relation_clear(ctx,
-			    plans->planned[i].base->target.destination->relation);
+			    base->target.destination->relation);
 	}
 
 	evaluation_end(&groups->eval);
@@ -3973,7 +3988,8 @@ compute_answer(relic_t *ctx, const relic_query_t *query,
 			if (status == 1)
 				status = 0;
 			else if (status == 0)
-				status = answer_through_rewrite(ctx, query, &groups, rows);
+				status = answer_through_rewrite(ctx, query,
+				    &groups, rows);
 		}
 	}
 	group_run_finish(ctx, &groups);

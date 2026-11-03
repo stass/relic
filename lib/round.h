@@ -287,7 +287,7 @@ struct relic_pool {
 	uint64_t		 thread_tasks;
 	uint64_t		 expected_candidates;
 	uint64_t		 reservation_declines;
-	uint64_t		 dense_rounds;	/* successful dense publications */
+	uint64_t		 dense_rounds;	/* dense rounds merged */
 };
 
 /*
@@ -298,12 +298,12 @@ struct relic_pool {
  * Tasks charge candidate growth through the account's frozen interface.
  * The dense collector instead lowers fixed shared ranks. `admissible` is
  * how many more tuples the limit can admit, SIZE_MAX when none is set:
- * a worker gathering more
- * candidates than that holds a round the merge would refuse part way, and
- * abandons it rather than fill memory first.  `interrupted` is the
- * context's interrupt flag, which a worker reads after each return of the
- * executor and abandons the job on finding raised, so that the calling
- * thread meets the interrupt in the round's serial run and reports it.
+ * a worker gathering more candidates than that holds a round the merge
+ * would refuse part way, and abandons it rather than fill memory first.
+ * `interrupted` is the context's interrupt flag, which a worker reads after
+ * each return of the executor and abandons the job on finding raised, so
+ * that the calling thread meets the interrupt in the round's serial run and
+ * reports it.
  * `abandoned` is set by a worker whose task cannot go on, after which a
  * task claimed is not run.
  */
@@ -319,7 +319,14 @@ struct relic_round_job {
 };
 
 /*
- * A fixed pair rectangle for one frozen round. Gathering only lowers ranks;
+ * Dense gathering, ordering and staging look for an interrupt once every
+ * RELIC_DENSE_POLL_MASK + 1 cells, tuples or positions.
+ */
+#define	RELIC_DENSE_POLL_MASK	4095u
+
+/*
+ * A rank per cell of the pair grid for one frozen round, snapshotted when
+ * the collector opens (relic_pair_grid_take()). Gathering only lowers ranks;
  * after the barrier, order and scratch alternate as radix input and output.
  * Only the final order array is fully sorted by rank.
  * Histograms belong to ordered parts, not the workers claiming those parts.
@@ -340,10 +347,7 @@ struct relic_dense {
 	uint32_t		*order;
 	uint32_t		*scratch;
 	size_t			*histograms;
-	size_t			 integers;
-	size_t			 symbols;
-	size_t			 width;
-	size_t			 cells;
+	relic_pair_grid_t	 grid;
 	size_t			 count;
 	size_t			 parts;
 	size_t			 charged;

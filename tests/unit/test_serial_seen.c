@@ -141,7 +141,7 @@ positive_evidence_and_appended_values(void)
 	relic_relation_t *relation;
 	relic_dom_t batch[12], integer, symbol, string, later;
 	bool added[6];
-	size_t completed, count;
+	size_t completed, count, position;
 
 	relation = fixture(&eval, &seen);
 	if (relation == NULL)
@@ -185,7 +185,7 @@ positive_evidence_and_appended_values(void)
 
 	check(relic_value_intern_integer(eval.ctx, 9999, &later) == 0, SCENARIO,
 	    "append value after coordinate snapshot");
-	check(serial_seen_coordinate(&seen, later) == SIZE_MAX, SCENARIO,
+	check(!relic_pair_grid_position(&seen.grid, later, &position), SCENARIO,
 	    "new pool position remains an ordinary miss");
 	batch[0] = later;
 	batch[1] = integer;
@@ -196,14 +196,14 @@ positive_evidence_and_appended_values(void)
 	    == 0 && completed == 1 && !added[0], SCENARIO, "find out-of-span duplicate");
 	check(relic_value_intern_bytes(eval.ctx, RELIC_STRING,
 	    "later", 5, &later) == 0, SCENARIO, "append string after snapshot");
-	check(serial_seen_coordinate(&seen, later) == SIZE_MAX, SCENARIO,
+	check(!relic_pair_grid_position(&seen.grid, later, &position), SCENARIO,
 	    "new string position remains an ordinary miss");
 	batch[0] = later;
 	check(serial_seen_insert(&eval, relation, &seen, added, &completed)
 	    == 0 && completed == 1 && added[0], SCENARIO, "insert new string pair");
 	check(serial_seen_insert(&eval, relation, &seen, added, &completed)
 	    == 0 && completed == 1 && !added[0], SCENARIO, "find new string duplicate");
-	check(serial_seen_coordinate(&seen, 0) == SIZE_MAX, SCENARIO,
+	check(!relic_pair_grid_position(&seen.grid, 0, &position), SCENARIO,
 	    "zero domain is outside bitmap");
 	close_fixture(&eval, &seen);
 }

@@ -726,10 +726,14 @@ relic_value_find_integer(const relic_t *ctx, int64_t integer)
 }
 
 void
-relic_value_spans(const relic_t *ctx, size_t *integers, size_t *symbols)
+relic_pair_grid_take(const relic_t *ctx, relic_pair_grid_t *grid)
 {
-	*integers = ctx->values.integer_count;
-	*symbols = ctx->symbols.count;
+	grid->integers = ctx->values.integer_count;
+	grid->symbols = ctx->symbols.count;
+	grid->width = relic_saturating_sum(grid->integers,
+	    relic_saturating_product(RELIC_PAIR_GRID_POOL_SPANS,
+	    grid->symbols));
+	grid->cells = relic_saturating_product(grid->width, grid->width);
 }
 
 /*

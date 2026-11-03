@@ -7,6 +7,7 @@
 #ifndef RELIC_FROZEN_H
 #define RELIC_FROZEN_H
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -48,6 +49,7 @@
 typedef struct relic_account relic_account_t;
 typedef struct relic_builder relic_builder_t;
 typedef struct relic_index relic_index_t;
+typedef struct relic_pair_grid relic_pair_grid_t;
 typedef struct relic_relation relic_relation_t;
 typedef struct relic_tuple_range relic_tuple_range_t;
 
@@ -257,9 +259,99 @@ const char *relic_value_bytes(const relic_t *ctx, relic_dom_t dom,
 relic_dom_t relic_value_find_integer(const relic_t *ctx, int64_t integer);
 relic_dom_t relic_value_find_string(const relic_t *ctx, const char *bytes,
 	    size_t length);
-/* Frozen identifier spans, including unused symbol type-use positions. */
-void	 relic_value_spans(const relic_t *ctx, size_t *integers,
-	    size_t *symbols);
+
+/*
+ * Every binary tuple of the values a context holds, numbered as one cell of
+ * a square grid.  Taking the grid snapshots the integer table's span I and
+ * the symbol pool's span S.  Each typed value then has one position below
+ * `width`: integers occupy [0, I), symbols [I, I + S) and strings
+ * [I + S, I + 2S).  Symbol and string values share the pool's bytes, so
+ * their spans have the same length, and a symbol and a string with
+ * identical bytes still take distinct positions; a position whose pool
+ * entry is never used with that type is a hole.  The tuple (a, b) of
+ * RELIC_PAIR_GRID_ARITY values is cell `a * width + b` of `cells`.  Both
+ * `width` and `cells` saturate, so a caller declines a grid whose `cells`
+ * is SIZE_MAX, or larger than it can index, before asking for any cell.
+ *
+ * Interning after the snapshot appends values without renumbering, so a
+ * value the snapshot lacks has no position, and a tuple holding one has no
+ * cell; the grid's users treat it as outside the grid.
+ */
+struct relic_pair_grid {
+	size_t	integers;
+	size_t	symbols;
+	size_t	width;
+	size_t	cells;
+};
+
+/* The arity of the tuples the grid numbers. */
+#define	RELIC_PAIR_GRID_ARITY		2
+
+/* Positions per pool entry: one as a symbol and one as a string. */
+#define	RELIC_PAIR_GRID_POOL_SPANS	2
+
+void	 relic_pair_grid_take(const relic_t *ctx, relic_pair_grid_t *grid);
+
+/* The position of `value`, or false when the snapshot does not hold it. */
+static inline bool
+relic_pair_grid_position(const relic_pair_grid_t *grid, relic_dom_t value,
+    size_t *positionp)
+{
+	size_t index;
+
+	index = value & RELIC_DOM_INDEX_MASK;
+	if (index == 0)
+		return (false);
+	switch (value & RELIC_DOM_TYPE_MASK) {
+	case RELIC_DOM_INTEGER:
+		*positionp = index - 1;
+		return (index <= grid->integers);
+	case RELIC_DOM_SYMBOL:
+		*positionp = grid->integers + index - 1;
+		return (index <= grid->symbols);
+	case RELIC_DOM_STRING:
+		*positionp = grid->integers + grid->symbols + index - 1;
+		return (index <= grid->symbols);
+	}
+	return (false);
+}
+
+/* The cell of a binary tuple, or false when either value has no position. */
+static inline bool
+relic_pair_grid_cell(const relic_pair_grid_t *grid, const relic_dom_t *tuple,
+    size_t *cellp)
+{
+	size_t left, right;
+
+	if (!relic_pair_grid_position(grid, tuple[0], &left) ||
+	    !relic_pair_grid_position(grid, tuple[1], &right))
+		return (false);
+	assert(grid->cells != SIZE_MAX);
+	*cellp = left * grid->width + right;
+	return (true);
+}
+
+/* The value at `position`, the inverse of relic_pair_grid_position(). */
+static inline relic_dom_t
+relic_pair_grid_value(const relic_pair_grid_t *grid, size_t position)
+{
+	if (position < grid->integers)
+		return (RELIC_DOM_INTEGER | (relic_dom_t)(position + 1));
+	position -= grid->integers;
+	if (position < grid->symbols)
+		return (RELIC_DOM_SYMBOL | (relic_dom_t)(position + 1));
+	return (RELIC_DOM_STRING |
+	    (relic_dom_t)(position - grid->symbols + 1));
+}
+
+/* The tuple whose cell is `cell`, the inverse of relic_pair_grid_cell(). */
+static inline void
+relic_pair_grid_tuple(const relic_pair_grid_t *grid, size_t cell,
+    relic_dom_t *tuple)
+{
+	tuple[0] = relic_pair_grid_value(grid, cell / grid->width);
+	tuple[1] = relic_pair_grid_value(grid, cell % grid->width);
+}
 
 /*
  * A value as its type and its contents, whether or not the context has

@@ -8,27 +8,62 @@
 #include "config.h"
 
 #include <assert.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <strings.h>
 
 #include "cdefs.h"
 #include "round.h"
 
-/* A fixed pair rectangle collects first occurrences without worker tuple copies. */
-#define	DENSE_POLL_MASK	4095u
-#define	DENSE_DIGITS	256u
+/*
+ * The dense collector records the first occurrence of each new tuple of a
+ * binary round as one rank per cell of the context's pair grid, so that
+ * workers copy no tuples (specs/design-dense-rounds.md).
+ */
+
+/*
+ * A cell's rank is DENSE_RANK_HELD for a tuple the target already holds,
+ * DENSE_RANK_UNCLAIMED while no task has claimed it, and otherwise the
+ * claiming task above DENSE_TASK_SHIFT and the claim's sequence below it
+ * (relic_dense_take()).
+ */
+#define	DENSE_RANK_HELD		UINT64_C(0)
+#define	DENSE_RANK_UNCLAIMED	UINT64_MAX
+#define	DENSE_TASK_SHIFT	32
+
+/*
+ * Ordering sorts the ranks one digit at a time, low digit first.  A digit
+ * is a byte, which radix_part() reads as a uint8_t.
+ */
+#define	DENSE_RANK_BITS		64
+#define	DENSE_DIGIT_BITS	8
+#define	DENSE_DIGITS		(1u << DENSE_DIGIT_BITS)
+
+_Static_assert(DENSE_RANK_BITS == sizeof(uint64_t) * CHAR_BIT,
+    "a rank is one 64-bit word");
+_Static_assert(DENSE_DIGIT_BITS == sizeof(uint8_t) * CHAR_BIT,
+    "a radix digit is one byte");
+_Static_assert(DENSE_TASK_SHIFT == sizeof(uint32_t) * CHAR_BIT,
+    "a rank's sequence is its low 32-bit word");
 
 static void	*allocate(relic_dense_t *dense, size_t bytes);
-static size_t	 boundary(const relic_dense_t *dense, size_t count, size_t part);
-static bool	 coordinate(const relic_dense_t *dense, relic_dom_t value,
-		    size_t *position);
-static relic_dom_t decode(const relic_dense_t *dense, size_t position);
+static size_t	 boundary(const relic_dense_t *dense, size_t count,
+		    size_t part);
+static bool	 count_task_insertions(relic_dense_t *dense);
+static size_t	 dense_bytes(const relic_dense_t *dense, size_t room);
+static bool	 dense_is_smaller(const relic_dense_t *dense, size_t held);
 static void	 initialize_part(void *argument, size_t part, size_t worker);
 static void	 list_part(void *argument, size_t part, size_t worker);
+static size_t	 ordinary_bytes(const relic_dense_t *dense, size_t held,
+		    size_t copies);
+static size_t	 ordinary_candidate_bytes(void);
 static void	 radix_part(void *argument, size_t part, size_t worker);
+static bool	 radix_sort(relic_dense_t *dense);
 static void	 release_ranking(relic_dense_t *dense);
+static bool	 round_is_dense_shaped(const relic_round_t *round);
 static void	 seed_part(void *argument, size_t part, size_t worker);
 static bool	 stopped(relic_dense_t *dense);
+static const relic_relation_t *target_relation(const relic_dense_t *dense);
 
 static bool
 stopped(relic_dense_t *dense)
@@ -54,107 +89,171 @@ allocate(relic_dense_t *dense, size_t bytes)
 	return (memory);
 }
 
-/* Typed pool positions are disjoint, even when symbol and string share bytes. */
-static bool
-coordinate(const relic_dense_t *dense, relic_dom_t value, size_t *position)
-{
-	size_t index;
-
-	index = value & RELIC_DOM_INDEX_MASK;
-	if (index == 0)
-		return (false);
-	switch (value & RELIC_DOM_TYPE_MASK) {
-	case RELIC_DOM_INTEGER:
-		*position = index - 1;
-		return (index <= dense->integers);
-	case RELIC_DOM_SYMBOL:
-		*position = dense->integers + index - 1;
-		return (index <= dense->symbols);
-	case RELIC_DOM_STRING:
-		*position = dense->integers + dense->symbols + index - 1;
-		return (index <= dense->symbols);
-	}
-	return (false);
-}
-
-static relic_dom_t
-decode(const relic_dense_t *dense, size_t position)
-{
-	if (position < dense->integers)
-		return (RELIC_DOM_INTEGER | (relic_dom_t)(position + 1));
-	position -= dense->integers;
-	if (position < dense->symbols)
-		return (RELIC_DOM_SYMBOL | (relic_dom_t)(position + 1));
-	return (RELIC_DOM_STRING |
-	    (relic_dom_t)(position - dense->symbols + 1));
-}
-
 static size_t
 boundary(const relic_dense_t *dense, size_t count, size_t part)
 {
 	return ((size_t)((uint64_t)count * part / dense->parts));
 }
 
-int
-relic_dense_open(relic_dense_t *dense, relic_pool_t *pool,
-    relic_round_job_t *job)
+static const relic_relation_t *
+target_relation(const relic_dense_t *dense)
 {
-	const relic_round_t *round;
+	return (relic_destination_relation(dense->job->round->targets[0]));
+}
+
+/*
+ * Whether the round has the one shape the collector serves: a single set
+ * target, binary, that every item writes, and every plan ending in an emit
+ * of two values its operations assigned, so a derived tuple is always a
+ * pair of identifiers the grid can number.
+ */
+static bool
+round_is_dense_shaped(const relic_round_t *round)
+{
+	const relic_relation_t *target;
 	const relic_op_emit_t *emit;
 	const relic_plan_t *plan;
-	size_t c, copies, held, i, ordinary, projected, room;
+	size_t c, i;
 
-	bzero(dense, sizeof(*dense));
-	round = job->round;
-	if (!RELIC_DENSE_ATOMICS || sizeof(*dense->ranks) != 8 ||
-	    round->target_count != 1 || pool->task_count >= UINT32_MAX ||
-	    relic_destination_set_relation(round->targets[0]) == NULL ||
-	    relic_relation_arity(relic_destination_relation(round->targets[0])) != 2)
-		return (0);
+	if (round->target_count != 1 ||
+	    relic_destination_set_relation(round->targets[0]) == NULL)
+		return (false);
+	target = relic_destination_relation(round->targets[0]);
+	if (relic_relation_arity(target) != RELIC_PAIR_GRID_ARITY)
+		return (false);
 	for (i = 0; i < round->item_count; i++) {
 		if (round->items[i].target != 0)
-			return (0);
+			return (false);
 		plan = round->items[i].plan;
 		if (plan == NULL)
 			continue;
 		if (plan->op_count == 0 ||
 		    plan->ops[plan->op_count - 1].kind != RELIC_OP_EMIT)
-			return (0);
+			return (false);
 		emit = &plan->ops[plan->op_count - 1].u.emit;
-		if (emit->arity != 2)
-			return (0);
-		for (c = 0; c < 2; c++) {
+		if (emit->arity != RELIC_PAIR_GRID_ARITY)
+			return (false);
+		for (c = 0; c < RELIC_PAIR_GRID_ARITY; c++) {
 			if (!relic_emit_term_assigned(emit->terms[c].action))
-				return (0);
+				return (false);
 		}
 	}
+	return (true);
+}
+
+/*
+ * Bytes the ordinary collector holds for one binary candidate: in its
+ * worker's candidates, its entry, its columns in `words` and its stripe;
+ * in the merge, its reference among its stripe's firsts (a
+ * relic_merge_ref_t, a worker and a position) and its position in its
+ * worker's stripe list (relic_merge_list_t).  Screen tables are counted
+ * apart, by relic_idtab_bytes_for().
+ */
+static size_t
+ordinary_candidate_bytes(void)
+{
+	size_t bytes;
+
+	/* The worker's entry, its columns in `words` and its stripe. */
+	bytes = sizeof(relic_candidate_t);
+	bytes += RELIC_PAIR_GRID_ARITY * sizeof(relic_dom_t);
+	bytes += sizeof(uint8_t);
+	/* The merge's reference, a worker and a position, and list position. */
+	bytes += sizeof(uint32_t) + sizeof(uint32_t);
+	bytes += sizeof(uint32_t);
+	return (bytes);
+}
+
+/*
+ * The ordinary collector's bytes when each worker gathers `held`
+ * candidates, `copies` in all: the candidates themselves, each worker's
+ * screen over its own, and one table over all of them standing for the
+ * merge's stripe tables, whose actual distribution is not known yet.
+ */
+static size_t
+ordinary_bytes(const relic_dense_t *dense, size_t held, size_t copies)
+{
+	size_t bytes;
+
+	bytes = relic_saturating_product(copies, ordinary_candidate_bytes());
+	bytes = relic_saturating_sum(bytes, relic_saturating_product(
+	    dense->parts, relic_idtab_bytes_for(true, held)));
+	bytes = relic_saturating_sum(bytes,
+	    relic_idtab_bytes_for(true, copies));
+	return (bytes);
+}
+
+/*
+ * The dense collector's bytes when it finds `room` new tuples: a rank per
+ * cell, the order and scratch position arrays the radix sort alternates
+ * between, and each part's histogram.
+ */
+static size_t
+dense_bytes(const relic_dense_t *dense, size_t room)
+{
+	size_t bytes;
+
+	bytes = relic_saturating_product(dense->grid.cells,
+	    sizeof(*dense->ranks));
+	bytes = relic_saturating_sum(bytes, relic_saturating_product(room,
+	    sizeof(*dense->order) + sizeof(*dense->scratch)));
+	bytes = relic_saturating_sum(bytes,
+	    dense->parts * DENSE_DIGITS * sizeof(*dense->histograms));
+	return (bytes);
+}
+
+/*
+ * Whether the dense layout is expected to be the smaller.  The model has
+ * each worker gather as many candidates as the target holds, `held`; the
+ * new tuples among them are at most the grid's free cells.  This is a
+ * heuristic: the arrays are charged at their actual sizes either way, and a
+ * poor guess costs time or memory, never a different result.  An estimate
+ * that saturates declines the dense layout.
+ */
+static bool
+dense_is_smaller(const relic_dense_t *dense, size_t held)
+{
+	size_t copies, dense_estimate, free_cells, ordinary_estimate, room;
+
+	copies = relic_saturating_product(dense->parts, held);
+	free_cells = dense->grid.cells - held;
+	room = free_cells < copies ? free_cells : copies;
+	dense_estimate = dense_bytes(dense, room);
+	ordinary_estimate = ordinary_bytes(dense, held, copies);
+	if (dense_estimate == SIZE_MAX || ordinary_estimate == SIZE_MAX)
+		return (false);
+	return (dense_estimate < ordinary_estimate);
+}
+
+/*
+ * Select the dense collector for a round of the right shape whose grid a
+ * rank array can cover and which the byte model favours, then initialize
+ * every rank and seed the cells of the tuples the target already holds.
+ */
+int
+relic_dense_open(relic_dense_t *dense, relic_pool_t *pool,
+    relic_round_job_t *job)
+{
+	size_t held, i;
+
+	bzero(dense, sizeof(*dense));
+	if (!RELIC_DENSE_ATOMICS || sizeof(*dense->ranks) != sizeof(uint64_t) ||
+	    pool->task_count >= UINT32_MAX)
+		return (0);
+	if (!round_is_dense_shaped(job->round))
+		return (0);
 	dense->job = job;
 	dense->pool = pool;
 	dense->parts = relic_pool_workers(pool);
-	relic_value_spans(round->env->ctx, &dense->integers, &dense->symbols);
-	dense->width = relic_saturating_sum(dense->integers,
-	    relic_saturating_product(2, dense->symbols));
-	dense->cells = relic_saturating_product(dense->width, dense->width);
-	if (dense->cells == 0 || dense->cells > UINT32_MAX)
+	relic_pair_grid_take(job->round->env->ctx, &dense->grid);
+	if (dense->grid.cells == 0 || dense->grid.cells > UINT32_MAX)
 		return (0);
-	held = relic_relation_count(relic_destination_relation(round->targets[0]));
-	if (held > dense->cells)
+	held = relic_relation_count(target_relation(dense));
+	if (held > dense->grid.cells || !dense_is_smaller(dense, held))
 		return (0);
-	copies = relic_saturating_product(dense->parts, held);
-	room = dense->cells - held < copies ? dense->cells - held : copies;
-	projected = relic_saturating_sum(relic_saturating_product(8,
-	    relic_saturating_sum(dense->cells, room)),
-	    dense->parts * DENSE_DIGITS * sizeof(size_t));
-	ordinary = relic_saturating_product(copies,
-	    sizeof(relic_candidate_t) + 3 * sizeof(uint32_t) + 1 + 8);
-	ordinary = relic_saturating_sum(ordinary, relic_saturating_product(
-	    dense->parts, relic_idtab_bytes_for(true, held)));
-	ordinary = relic_saturating_sum(ordinary,
-	    relic_idtab_bytes_for(true, copies));
-	if (projected == SIZE_MAX || ordinary == SIZE_MAX || projected >= ordinary)
-		return (0);
-	dense->ranks = allocate(dense,
-	    relic_saturating_product(dense->cells, sizeof(*dense->ranks)));
+
+	dense->ranks = allocate(dense, relic_saturating_product(
+	    dense->grid.cells, sizeof(*dense->ranks)));
 	if (dense->ranks == NULL)
 		return (-1);
 	for (i = 0; i < dense->parts; i++)
@@ -171,42 +270,48 @@ initialize_part(void *argument, size_t part, size_t worker RELIC_UNUSED)
 	relic_dense_t *dense = argument;
 	size_t end, i;
 
-	end = boundary(dense, dense->cells, part + 1);
-	for (i = boundary(dense, dense->cells, part); i < end; i++) {
-		if ((i & DENSE_POLL_MASK) == 0 && stopped(dense))
+	end = boundary(dense, dense->grid.cells, part + 1);
+	for (i = boundary(dense, dense->grid.cells, part); i < end; i++) {
+		if ((i & RELIC_DENSE_POLL_MASK) == 0 && stopped(dense))
 			return;
-		relic_atomic_u64_init(&dense->ranks[i], UINT64_MAX);
-	}
-}
-
-/* Initialization has its own barrier: no seed can race a cell's initialization. */
-static void
-seed_part(void *argument, size_t part, size_t worker RELIC_UNUSED)
-{
-	relic_dense_t *dense = argument;
-	const relic_relation_t *target = relic_destination_relation(dense->job->round->targets[0]);
-	const relic_dom_t *tuple;
-	size_t a, b, count, end, i;
-
-	count = relic_relation_count(target);
-	end = boundary(dense, count, part + 1);
-	for (i = boundary(dense, count, part); i < end; i++) {
-		if ((i & DENSE_POLL_MASK) == 0 && stopped(dense))
-			return;
-		tuple = relic_relation_tuple(target, (relic_tuple_id_t)(i + 1));
-		if (!coordinate(dense, tuple[0], &a) ||
-		    !coordinate(dense, tuple[1], &b)) {
-			relic_atomic_bool_store_relaxed(&dense->job->abandoned, true);
-			return;
-		}
-		relic_atomic_u64_store_release(&dense->ranks[a * dense->width + b], 0);
+		relic_atomic_u64_init(&dense->ranks[i], DENSE_RANK_UNCLAIMED);
 	}
 }
 
 /*
- * A cell holds zero for a tuple the target already has, UINT64_MAX while
- * no task has claimed it, or task << 32 | sequence for the claim that
- * holds it; UINT64_MAX names a task above every real one.  A task claims a
+ * Initialization has its own barrier: no seed can race a cell's
+ * initialization.
+ */
+static void
+seed_part(void *argument, size_t part, size_t worker RELIC_UNUSED)
+{
+	relic_dense_t *dense = argument;
+	const relic_relation_t *target;
+	const relic_dom_t *tuple;
+	size_t cell, count, end, i;
+
+	target = target_relation(dense);
+	count = relic_relation_count(target);
+	end = boundary(dense, count, part + 1);
+	for (i = boundary(dense, count, part); i < end; i++) {
+		if ((i & RELIC_DENSE_POLL_MASK) == 0 && stopped(dense))
+			return;
+		tuple = relic_relation_tuple(target, (relic_tuple_id_t)(i + 1));
+		if (!relic_pair_grid_cell(&dense->grid, tuple, &cell)) {
+			relic_atomic_bool_store_relaxed(&dense->job->abandoned,
+			    true);
+			return;
+		}
+		relic_atomic_u64_store_release(&dense->ranks[cell],
+		    DENSE_RANK_HELD);
+	}
+}
+
+/*
+ * A cell holds DENSE_RANK_HELD for a tuple the target already has,
+ * DENSE_RANK_UNCLAIMED while no task has claimed it, or
+ * task << DENSE_TASK_SHIFT | sequence for the claim that holds it;
+ * DENSE_RANK_UNCLAIMED names a task above every real one.  A task claims a
  * cell only from a higher-numbered task, so a cell's task only decreases,
  * and once every task has run it names the lowest task that derives the
  * tuple, whatever the schedule.  That task claims the cell at its first
@@ -240,17 +345,19 @@ relic_dense_take(relic_dense_t *dense RELIC_UNUSED, size_t task RELIC_UNUSED,
 #if RELIC_DENSE_ATOMICS
 	relic_atomic_u64_t *cell;
 	uint64_t before, rank;
-	size_t a, b;
+	size_t cell_index;
 
 	if (task >= dense->pool->task_count || task >= UINT32_MAX ||
-	    !coordinate(dense, tuple[0], &a) || !coordinate(dense, tuple[1], &b))
+	    !relic_pair_grid_cell(&dense->grid, tuple, &cell_index))
 		return (false);
-	cell = &dense->ranks[a * dense->width + b];
+	cell = &dense->ranks[cell_index];
 	before = relic_atomic_u64_load_relaxed(cell);
-	while (before != 0 && (before >> 32) > task) {
+	while (before != DENSE_RANK_HELD &&
+	    (before >> DENSE_TASK_SHIFT) > task) {
 		if (*sequence == UINT32_MAX)
 			return (false);
-		rank = ((uint64_t)task << 32) | ((uint64_t)*sequence + 1);
+		rank = ((uint64_t)task << DENSE_TASK_SHIFT) |
+		    ((uint64_t)*sequence + 1);
 		if (relic_atomic_u64_swap_if_relaxed(cell, &before, rank)) {
 			(*sequence)++;
 			return (*sequence <= dense->job->admissible);
@@ -262,7 +369,10 @@ relic_dense_take(relic_dense_t *dense RELIC_UNUSED, size_t task RELIC_UNUSED,
 #endif
 }
 
-/* Without order this counts cells; with it, each part fills its prefixed range. */
+/*
+ * Without order this counts claimed cells; with it, each part fills its
+ * prefixed range.
+ */
 static void
 list_part(void *argument, size_t part, size_t worker RELIC_UNUSED)
 {
@@ -270,13 +380,14 @@ list_part(void *argument, size_t part, size_t worker RELIC_UNUSED)
 	size_t end, i, next;
 	uint64_t rank;
 
-	next = dense->order == NULL ? 0 : dense->histograms[part * DENSE_DIGITS];
-	end = boundary(dense, dense->cells, part + 1);
-	for (i = boundary(dense, dense->cells, part); i < end; i++) {
-		if ((i & DENSE_POLL_MASK) == 0 && stopped(dense))
+	next = dense->order == NULL ? 0 :
+	    dense->histograms[part * DENSE_DIGITS];
+	end = boundary(dense, dense->grid.cells, part + 1);
+	for (i = boundary(dense, dense->grid.cells, part); i < end; i++) {
+		if ((i & RELIC_DENSE_POLL_MASK) == 0 && stopped(dense))
 			return;
 		rank = relic_atomic_u64_load_relaxed(&dense->ranks[i]);
-		if (rank == 0 || rank == UINT64_MAX)
+		if (rank == DENSE_RANK_HELD || rank == DENSE_RANK_UNCLAIMED)
 			continue;
 		if (dense->order != NULL)
 			dense->order[next] = (uint32_t)i;
@@ -297,7 +408,7 @@ radix_part(void *argument, size_t part, size_t worker RELIC_UNUSED)
 		bzero(histogram, DENSE_DIGITS * sizeof(*histogram));
 	end = boundary(dense, dense->count, part + 1);
 	for (i = boundary(dense, dense->count, part); i < end; i++) {
-		if ((i & DENSE_POLL_MASK) == 0 && stopped(dense))
+		if ((i & RELIC_DENSE_POLL_MASK) == 0 && stopped(dense))
 			return;
 		digit = (uint8_t)(relic_atomic_u64_load_relaxed(
 		    &dense->ranks[dense->order[i]]) >> dense->shift);
@@ -308,14 +419,16 @@ radix_part(void *argument, size_t part, size_t worker RELIC_UNUSED)
 	}
 }
 
+/*
+ * Order the claimed cells by rank, which is the order a serial run first
+ * derives their tuples, and count each task's.  The claimed cells are
+ * counted before the two position arrays are allocated, so both are exact.
+ */
 int
 relic_dense_order(relic_dense_t *dense)
 {
-	size_t bytes, digit, held, i, next, p, task;
-	uint32_t *swap;
-	uint64_t rank;
+	size_t bytes, held, i, p;
 
-	/* Count winners before allocating the two exact position arrays. */
 	for (i = 0; i < dense->pool->task_count; i++)
 		dense->pool->tasks[i].inserted = 0;
 	dense->histograms = allocate(dense,
@@ -331,7 +444,7 @@ relic_dense_order(relic_dense_t *dense)
 		dense->count += held;
 	}
 	if (dense->count > dense->job->admissible || dense->count >
-	    RELIC_TUPLE_MAX - relic_relation_count(relic_destination_relation(dense->job->round->targets[0]))) {
+	    RELIC_TUPLE_MAX - relic_relation_count(target_relation(dense))) {
 		dense->pool->limit_declines++;
 		return (-1);
 	}
@@ -339,6 +452,7 @@ relic_dense_order(relic_dense_t *dense)
 		release_ranking(dense);
 		return (0);
 	}
+
 	bytes = relic_saturating_product(dense->count, sizeof(*dense->order));
 	dense->order = allocate(dense, bytes);
 	if (dense->order == NULL)
@@ -348,14 +462,34 @@ relic_dense_order(relic_dense_t *dense)
 		return (-1);
 	relic_pool_for(dense->pool, dense->parts, list_part, dense);
 
-	/* Stable passes preserve input order within each digit and ordered part. */
-	for (dense->shift = 0; dense->shift < 64; dense->shift += 8) {
+	if (!radix_sort(dense))
+		return (-1);
+	if (!count_task_insertions(dense))
+		return (-1);
+	release_ranking(dense);
+	return (0);
+}
+
+/*
+ * Sort `order` by rank, one digit per pass, low digit first.  Each pass is
+ * stable: it keeps input order within each digit and, across parts, the
+ * parts' order, so the last pass leaves the positions sorted by the whole
+ * rank.
+ */
+static bool
+radix_sort(relic_dense_t *dense)
+{
+	size_t digit, held, i, next, p;
+	uint32_t *swap;
+
+	for (dense->shift = 0; dense->shift < DENSE_RANK_BITS;
+	    dense->shift += DENSE_DIGIT_BITS) {
 		if (stopped(dense))
-			return (-1);
+			return (false);
 		dense->scattering = false;
 		relic_pool_for(dense->pool, dense->parts, radix_part, dense);
 		if (stopped(dense))
-			return (-1);
+			return (false);
 		next = 0;
 		for (digit = 0; digit < DENSE_DIGITS; digit++) {
 			for (p = 0; p < dense->parts; p++) {
@@ -371,18 +505,33 @@ relic_dense_order(relic_dense_t *dense)
 		dense->order = dense->scratch;
 		dense->scratch = swap;
 	}
-	/* One caller owns task counts; staging later uses their prefix positions. */
+	return (true);
+}
+
+/*
+ * Count each task's new tuples from the ordered ranks, on the calling
+ * thread alone, so that staging can place each task's tuples at its
+ * prefix position.  A rank whose task is out of range, or whose sequence
+ * is zero, which no claim writes, cannot have come from gathering, and
+ * fails the order.
+ */
+static bool
+count_task_insertions(relic_dense_t *dense)
+{
+	uint64_t rank;
+	size_t i, task;
+
 	for (i = 0; i < dense->count; i++) {
-		if ((i & DENSE_POLL_MASK) == 0 && stopped(dense))
-			return (-1);
-		rank = relic_atomic_u64_load_relaxed(&dense->ranks[dense->order[i]]);
-		task = (size_t)(rank >> 32);
+		if ((i & RELIC_DENSE_POLL_MASK) == 0 && stopped(dense))
+			return (false);
+		rank = relic_atomic_u64_load_relaxed(
+		    &dense->ranks[dense->order[i]]);
+		task = (size_t)(rank >> DENSE_TASK_SHIFT);
 		if (task >= dense->pool->task_count || (uint32_t)rank == 0)
-			return (-1);
+			return (false);
 		dense->pool->tasks[task].inserted++;
 	}
-	release_ranking(dense);
-	return (0);
+	return (true);
 }
 
 /*
@@ -416,20 +565,17 @@ relic_dense_release_order(relic_dense_t *dense)
 	dense->order = NULL;
 	dense->count = 0;
 	if (dense->charged != 0)
-		relic_account_release_round(dense->job->account, dense->charged);
+		relic_account_release_round(dense->job->account,
+		    dense->charged);
 	dense->charged = 0;
 }
 
 void
-relic_dense_tuple(const relic_dense_t *dense, size_t position, relic_dom_t *tuple)
+relic_dense_tuple(const relic_dense_t *dense, size_t position,
+    relic_dom_t *tuple)
 {
-	size_t cell;
-
 	assert(position < dense->count);
-	cell = dense->order[position];
-
-	tuple[0] = decode(dense, cell / dense->width);
-	tuple[1] = decode(dense, cell % dense->width);
+	relic_pair_grid_tuple(&dense->grid, dense->order[position], tuple);
 }
 
 void
@@ -440,6 +586,7 @@ relic_dense_close(relic_dense_t *dense)
 	free(dense->scratch);
 	free(dense->histograms);
 	if (dense->charged != 0)
-		relic_account_release_round(dense->job->account, dense->charged);
+		relic_account_release_round(dense->job->account,
+		    dense->charged);
 	bzero(dense, sizeof(*dense));
 }

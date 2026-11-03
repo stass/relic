@@ -320,8 +320,10 @@ screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
 	if (job->dense != NULL) {
 		for (i = 0; i < scratch->batch_count; i++) {
 			worker->derivations++;
-			if (!relic_dense_take(job->dense, (size_t)(task - job->tasks),
-			    &worker->dense_sequence, &scratch->batch[2 * i]))
+			tuple = &scratch->batch[RELIC_PAIR_GRID_ARITY * i];
+			if (!relic_dense_take(job->dense,
+			    (size_t)(task - job->tasks),
+			    &worker->dense_sequence, tuple))
 				return (-1);
 		}
 		scratch->batch_count = 0;
@@ -330,7 +332,8 @@ screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
 	target = job->round->items[task->item].target;
 	destination = relic_destination_view(job->round->targets[target]);
 	relation = destination->relation;
-	relic_destination_project(destination, scratch->batch, scratch->batch_count);
+	relic_destination_project(destination, scratch->batch,
+	    scratch->batch_count);
 	arity = relic_relation_arity(relation);
 
 	if (mark_pending(&worker->candidates, job->account, scratch,
@@ -347,10 +350,11 @@ screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
 
 		if (held[i])
 			continue;
-		first = candidates_find(&worker->candidates, target, tuple, arity, hashes[i]);
+		first = candidates_find(&worker->candidates, target, tuple,
+		    arity, hashes[i]);
 		if (first != NULL) {
-			first->contribution = relic_contribution_combine(destination,
-			    first->contribution, 1);
+			first->contribution = relic_contribution_combine(
+			    destination, first->contribution, 1);
 			continue;
 		}
 		if (candidates_add(&worker->candidates, job->account, target,
@@ -734,7 +738,8 @@ candidates_storage(const relic_candidates_t *candidates,
 			},
 			[RELIC_CANDIDATE_WORDS] = {
 				.capacity = candidates->word_capacity,
-				.needed = candidates->word_count + growth->words,
+				.needed = candidates->word_count +
+				    growth->words,
 				.size = sizeof(*candidates->words),
 				.grows = growth->tuples > 0,
 			},
