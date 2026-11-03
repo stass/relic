@@ -7,18 +7,16 @@ publication and no third-party runtime dependency. Matching an unindexed
 bulk-SQL command is not an acceptance requirement. Improvements must earn
 their owners, states and coordination obligations across the whole system.
 
-The remaining-cost investigation (relic-bench `remaining-costs/README.md`)
-separates input maintenance, query formulation and representation costs. The
-metadata-first probe comparison (relic-bench `metadata-probe/README.md`)
-retains the bounded table experiment and its rejection: clear serial target
+The remaining-cost investigation separates input maintenance, query
+formulation and representation costs. The metadata-first probe comparison
+rejects a bounded table experiment: clear serial target
 gains accompany a repeatable parallel duplicate-loading CPU cost. Keep the
 ordinary identifier-table representation; that result selects no follow-up
 probe variant or publication redesign.
 
-The serial-expression study (relic-bench `serial-expressions/README.md`)
-retains separate interpreter and inline-helper sample views and tests one
-local checked-argument prototype. Its serial files gain falls below the
-declared 5% gate, and parallel files is slower in both screen pairs. Keep the
+The serial-expression study keeps separate interpreter and inline-helper
+sample views and tests one local checked-argument prototype. Its serial
+files gain falls below the declared 5% gate, and parallel files is slower in both screen pairs. Keep the
 ordinary CALL implementation. Batching operations across rows still needs
 evidence that its benefit justifies the added text lifetimes, error ordering
 and publication coordination. This study selects no broader executor change.

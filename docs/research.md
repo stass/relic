@@ -53,9 +53,8 @@ not automatically qualify.
 
 ### Selective intermediate relations — Related; measured query formulation
 
-The remaining-cost investigation (relic-bench `remaining-costs/README.md#a-useful-query-shape-with-the-existing-engine`)
-expresses two selective reads as ordinary Datalog predicates before their
-join. Existing Magic rules, relation storage and access paths then operate
+The remaining-cost investigation expresses two selective reads as ordinary
+Datalog predicates before their join. Existing Magic rules, relation storage and access paths then operate
 on smaller derived relations. This is a measured program formulation, not an
 automatic optimizer transformation or a new join implementation. Its value
 depends on selectivity and reuse; extra intermediates can also cost more.
@@ -108,18 +107,16 @@ of the composition; its threat model and rationale are stated locally.
 
 Abseil, [Swiss Tables Design Notes](https://abseil.io/about/design/swisstables),
 describes separate metadata carrying occupancy and a hash fingerprint, with
-candidate payloads read after filtering. The archived
-control-byte proposal (relic-bench `files-grouping-design/control-bytes-proposal.md`)
-applies that separation to Relic's identifier table. It uses scalar linear probing, reserves
-zero for emptiness and aliases hash high bytes zero and one. It does not
-adopt Abseil's SIMD groups, seven-bit encoding, deletion support or container.
-The exact encoding and invariants are local; the reference does not establish
-a performance gain for relic. The initial investigation (relic-bench `files-grouping-design/README.md`)
-records operation counts. The
-native comparison (relic-bench `metadata-probe/README.md`)
-retains the isolated prototype, conditional-load assembly evidence and
-complete-command results. It improves the serial files and facts targets
-but consumes more user CPU on parallel duplicate loading in every decisive
+candidate payloads read after filtering. A control-byte proposal
+applies that separation to Relic's identifier table. It uses scalar linear
+probing, reserves zero for emptiness and aliases hash high bytes zero and
+one. It does not adopt Abseil's SIMD groups, seven-bit encoding, deletion
+support or container. The exact encoding and invariants are local; the
+reference does not establish a performance gain for relic. An initial
+investigation counts operations; a native comparison checks the
+conditional-load assembly and measures the isolated prototype and complete
+commands. The prototype improves the serial files and facts targets but
+consumes more user CPU on parallel duplicate loading in every decisive
 pair. That control cost fails the experiment's adoption rule; the production
 table keeps its existing tag encoding and probe. The added representation
 obligations are local: zero-tag/zero-ID equivalence and the zero/one alias.
@@ -135,11 +132,11 @@ retains local hash tables across chunks and combines their partial data.
 Its [external-aggregation explanation](https://duckdb.org/2024/03/29/external-aggregation.html)
 describes the broader partitioning and memory-management approach.
 
-The Relic comparison (relic-bench `duckdb-files-analysis/README.md`)
-pins the source and distinguishes direct phase observations from claims
-about individual features. Relic does not adopt DuckDB's vector engine,
-spill manager or string representation. The relevant idea is to consume a
-projection into group state before retaining its rows.
+The Relic/DuckDB comparison pins the source and distinguishes direct phase
+observations from claims about individual features. Relic does not adopt
+DuckDB's vector engine, spill manager or string representation. The
+relevant idea is to consume a projection into group state before retaining
+its rows.
 
 Canonical IDs and batching are independent choices. Relic batches import and
 publication work, while its expression interpreter evaluates individual
@@ -150,18 +147,17 @@ dictionary indexes; its execution model does not require Relic's one
 context-wide namespace for every value. The representation difference does
 not itself establish a difference in which queries an engine can express.
 
-The serial-expression study (relic-bench `serial-expressions/README.md`)
-profiles the accepted evaluator and tests a local CALL-argument conversion
-prototype. Its checked views reuse an existing type and preserve publication
-and string ownership, but the complete-command screen misses its adoption
-gate. The record keeps inline-helper samples separate and avoids treating
-interpreter-frame weights as dispatch cost. It also identifies the added
-text lifetimes and ordering obligations for batching the existing expression
-pipeline across rows. It selects neither prototype nor a broader batching
-design.
+The serial-expression study profiles the accepted evaluator and tests a
+local CALL-argument conversion prototype. Its checked views reuse an
+existing type and preserve publication and string ownership, but the
+complete-command screen misses its adoption gate. The study keeps
+inline-helper samples separate and avoids treating interpreter-frame weights
+as dispatch cost. It also identifies the added text lifetimes and ordering
+obligations for batching the existing expression pipeline across rows. It
+selects neither prototype nor a broader batching design.
 
-The input-constraint control (relic-bench `remaining-costs/duckdb-pk/README.md`)
-adds a complete-tuple primary key to the same unique inputs. DuckDB's
+The input-constraint control adds a complete-tuple primary key to the same
+unique inputs. DuckDB's
 [indexing guide](https://duckdb.org/docs/guides/performance/indexing)
 describes the resulting ART constraint index and its loading tradeoff. The
 control measures the whole changed schema, not isolated index work or the
@@ -169,11 +165,7 @@ cost of Relic's different set and canonical-value contracts.
 
 ### A counted destination sharing evaluation — Used; local adaptation
 
-[Design](../specs/design-grouped-count.md),
-source comparison (relic-bench `duckdb-files-analysis/README.md`),
-private-collector experiment (relic-bench `counted-projection/README.md`),
-shared-publication experiment (relic-bench `counted-destination/README.md`),
-direct-delivery measurements (relic-bench `counted-delivery/README.md`).
+[Design](../specs/design-grouped-count.md).
 
 A full count query over one base scan owns a canonical key/count destination
 whose completed contents supply the answer. The existing emitted-tuple
@@ -210,8 +202,8 @@ Tasks read fixed views while private candidates wait for ordered publication.
 The frozen header boundary prevents workers from mutating the store. This
 preserves serial identifiers, diagnostics, counters and refusal behavior.
 There is no claimed external paper for the complete combination. The
-measured memory costs (relic-bench `m3-max/merge-screen-reuse/README.md`)
-are implementation evidence, not an inherent lower bound for determinism.
+method's measured memory costs are implementation evidence, not an
+inherent lower bound for determinism.
 
 ### Souffle's concurrent B-tree — Related; external implementation
 
@@ -244,9 +236,7 @@ does not establish that a particular retained benchmark used it.
 ### Earliest-occurrence ranks — Used; local adaptation
 
 [Dense round design](../specs/design-dense-rounds.md),
-abstract model (relic-bench `dense-round-design/README.md`),
-[implementation](../lib/dense.c),
-measurements (relic-bench `dense-rounds/README.md`).
+[implementation](../lib/dense.c).
 
 A fixed cell per possible pair stores an atomic minimum occurrence rank;
 sorting surviving cells reconstructs serial insertion order. The local proof
@@ -258,8 +248,7 @@ measured performance applies to the recorded workloads and build policies.
 ### Plan-local positive membership — Used; local method
 
 [Design](../specs/design-serial-membership.md),
-[implementation](../lib/eval.c),
-measurements (relic-bench `serial-membership/README.md`).
+[implementation](../lib/eval.c).
 
 A bitmap remembers tuples whose ordinary insertion has completed during one
 serial plan. An unset bit makes no absence claim, and append-only storage

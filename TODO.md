@@ -65,8 +65,8 @@ error, but undercharges acquisition until then.
 
 **Refresh published comparisons with consistent output and host coverage.**
 [Medium, component: `bench/compare/`]
-The composition check (relic-bench `m3-max/composition/README.md`)
-uses stdout for every timed engine; it does not replace the full
+The M3 Max composition check of the accepted changes together uses
+stdout for every timed engine; it does not replace the full
 [file-output tables](BENCHMARKS.md). When publishing a broader comparison,
 keep those cohorts separate, validate second-host coverage, and distinguish
 OS/compiler/engine-version differences from core-count effects. The selected
@@ -79,8 +79,8 @@ performance-plan comparisons take precedence over a full publication sweep.
 working shadow propagation through libc memory streams and instrumented
 ncurses/libedit; a standalone C program reproduces the stdio failure. Also
 resolve the observed MSan worker-startup/loader-atfork stall before treating
-this host as a full MSan validator. The preserved investigation (relic-bench `dense-rounds/README.md#validation`)
-records 324 passes, four failures and two unfinished tests without suppressions.
+this host as a full MSan validator. Under MSan on this host, without suppressions,
+the suite records 324 passes, four failures and two unfinished tests.
 
 **Native global merging hides source ownership from the object audit.**
 [Medium, component: `tests/globals.sh`] On Apple clang at `-O3`, a mutable

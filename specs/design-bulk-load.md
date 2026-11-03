@@ -990,9 +990,7 @@ design, and forced batching at each worker count against the scalar
 importer, with serial time, parallel time and peak memory reported
 separately. `RELIC_IMPORT_BATCH_WORKERS` is the least worker count at
 which forced batching beats the scalar importer on most large tables on
-both machines. A table may still lose at that count; the
-benchmark investigations (relic-bench `focused-investigations.md`)
-record the measurements and trade-offs.
+both machines. A table may still lose at that count.
 
 Acceptance requires lower first-load peak memory and serial load time,
 then a substantial measured parallel gain on large imports without a

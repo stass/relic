@@ -115,17 +115,17 @@ instead of silently reducing the comparison. For the source-build layout
 above and the installed ports:
 
 ```sh
-cd "$HOME/relic-bench/src/relic"
-export PATH="$HOME/relic-bench/tools/installed/hyperfine/bin:$PATH"
-export SOUFFLE="$HOME/relic-bench/tools/installed/souffle/bin/souffle"
-export NMO="$HOME/relic-bench/tools/installed/nemo/bin/nmo"
+cd "$HOME/relic-work/src/relic"
+export PATH="$HOME/relic-work/tools/installed/hyperfine/bin:$PATH"
+export SOUFFLE="$HOME/relic-work/tools/installed/souffle/bin/souffle"
+export NMO="$HOME/relic-work/tools/installed/nemo/bin/nmo"
 export RELIC="$PWD/relic" CXX=/usr/bin/c++ CC=/usr/bin/cc
 
 # Check tools and actual stdout exports without starting the sweep.
-sh bench/compare/sweep.sh -n -j 64 -o "$HOME/relic-bench/results/stdout-01"
+sh bench/compare/sweep.sh -n -j 64 -o "$HOME/relic-work/results/stdout-01"
 
 # Start after competing workloads have stopped.
-sh bench/compare/sweep.sh -j 64 -o "$HOME/relic-bench/results/stdout-01"
+sh bench/compare/sweep.sh -j 64 -o "$HOME/relic-work/results/stdout-01"
 ```
 
 The default parallel setting is 64; `-j` selects another worker count.
@@ -141,11 +141,11 @@ For a run that survives SSH disconnection, FreeBSD's base `daemon` can
 supervise the same command (after exporting the environment above):
 
 ```sh
-mkdir -p "$HOME/relic-bench/logs"
-daemon -o "$HOME/relic-bench/logs/stdout-01.log" \
-    -p "$HOME/relic-bench/logs/stdout-01.pid" \
-    sh bench/compare/sweep.sh -j 64 -o "$HOME/relic-bench/results/stdout-01"
-tail -f "$HOME/relic-bench/logs/stdout-01.log"
+mkdir -p "$HOME/relic-work/logs"
+daemon -o "$HOME/relic-work/logs/stdout-01.log" \
+    -p "$HOME/relic-work/logs/stdout-01.pid" \
+    sh bench/compare/sweep.sh -j 64 -o "$HOME/relic-work/results/stdout-01"
+tail -f "$HOME/relic-work/logs/stdout-01.log"
 ```
 
 Each scenario retains its TSV, report, diagnostics, exit code and raw JSON

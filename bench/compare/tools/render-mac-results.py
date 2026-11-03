@@ -15,12 +15,13 @@ arguments = parser.parse_args()
 accepted_copies = []
 
 repo = Path(__file__).resolve().parents[3]
-# The recorded evidence lives in the relic-bench repository, a sibling checkout
-# by default; RELIC_BENCH names another location.
-bench_repo = Path(os.environ.get('RELIC_BENCH') or repo.parent / 'relic-bench')
-record = bench_repo / 'm3-max'
+# RELIC_BENCH names a directory of recorded benchmark results; its m3-max
+# subdirectory holds this study.
+if not os.environ.get('RELIC_BENCH'):
+    raise SystemExit('RELIC_BENCH must name a directory of recorded benchmark results')
+record = Path(os.environ['RELIC_BENCH']) / 'm3-max'
 if not record.is_dir():
-    raise SystemExit(f'recorded evidence not found at {record}; set RELIC_BENCH')
+    raise SystemExit(f'recorded benchmark results not found at {record}; check RELIC_BENCH')
 engines = ['relic', 'souffle', 'souffle-magic', 'souffle-interp', 'nemo', 'swipl', 'clingo', 'duckdb', 'sqlite']
 parallel = ['relic', 'souffle', 'souffle-magic', 'souffle-interp', 'duckdb']
 labels = ['relic', 'Souffl\u00e9 compiled', 'Souffl\u00e9 Magic', 'Souffl\u00e9 interpreter', 'Nemo', 'SWI-Prolog', 'clingo', 'DuckDB', 'SQLite']

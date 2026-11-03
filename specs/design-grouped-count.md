@@ -11,10 +11,6 @@ Related: [query modes](architecture.md#query-modes),
 [aggregates](design-aggregates.md), [planning](design-planning.md),
 [executor](design-eval.md), [parallel evaluation](design-parallel.md),
 [values](design-values.md#interning-computed-values),
-source comparison (relic-bench `duckdb-files-analysis/README.md`),
-collector measurements (relic-bench `counted-projection/README.md`),
-shared-publication measurements (relic-bench `counted-destination/README.md`),
-direct-delivery measurements (relic-bench `counted-delivery/README.md`),
 [performance direction](../docs/todo-benchmark-performance.md).
 
 ## Model and boundary
@@ -301,8 +297,7 @@ Performance validation proves that workers retain keys and their distinct
 pending values, not one candidate per P row. It measures long computed keys
 and high-cardinality keys as well as files, with ordinary joins and recursion
 as controls for the common evaluator changes. Comparisons follow the
-[measurement protocol](../docs/todo-performance-measurements.md); the
-measurement record (relic-bench `counted-delivery/README.md`)
-retains their declared adoption gates and results.
+[measurement protocol](../docs/todo-performance-measurements.md), with
+declared adoption gates.
 Expression interpretation and input interning remain real costs; this design
 makes no claim that query fusion alone closes the import gap.
