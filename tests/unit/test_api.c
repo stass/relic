@@ -270,8 +270,8 @@ static void	 an_answer_does_not_outlive_its_delivery(void);
 static void	 every_diagnostic_reaches_the_callback(void);
 static void	 a_failure_says_what_kind_it_is(void);
 static void	 check_failure_kind(relic_t *ctx, int status,
-		    enum relic_error_class expected, const char *what);
-static const char *class_name(enum relic_error_class error_class);
+		    relic_error_class_t expected, const char *what);
+static const char *class_name(relic_error_class_t error_class);
 static void	 a_context_takes_at_most_the_maximum_threads(void);
 static void	 a_configuration_is_read_to_the_size_given(void);
 static void	 an_import_is_read_to_the_size_given(void);
@@ -893,7 +893,7 @@ every_diagnostic_reaches_the_callback(void)
 
 /* The enumerator's name of an error class, for a message. */
 static const char *
-class_name(enum relic_error_class error_class)
+class_name(relic_error_class_t error_class)
 {
 	switch (error_class) {
 	case RELIC_ERROR_NONE:
@@ -922,10 +922,10 @@ class_name(enum relic_error_class error_class)
  * Check that a call failed with an error of class `expected`.
  */
 static void
-check_failure_kind(relic_t *ctx, int status, enum relic_error_class expected,
+check_failure_kind(relic_t *ctx, int status, relic_error_class_t expected,
     const char *what)
 {
-	enum relic_error_class actual;
+	relic_error_class_t actual;
 	const char *error;
 
 	error = relic_error(ctx);
@@ -2556,7 +2556,7 @@ main(void)
 	 * threads: they come as the serial evaluator's do, from the merge on
 	 * the calling thread.
 	 */
-	mixed_flags = RELIC_F_PARALLEL_ALWAYS;
+	mixed_flags = RELIC_UNSTABLE_PARALLEL_ALWAYS;
 	mixed_threads = 4;
 	a_mixed_comparison_is_noted_once_per_rule();
 	mixed_flags = 0;

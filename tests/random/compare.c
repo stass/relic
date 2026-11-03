@@ -56,7 +56,7 @@
  * their rule mentions nowhere else, one per fact and, for each other rule, one per distinct binding of its body's variables
  * over the fixed point.  An aggregate's braces are compiled to a rule of
  * their own, the group rule, which derives once per distinct binding of the
- * group body's variables -- every aggregate's under RELIC_F_GROUP_RULES,
+ * group body's variables -- every aggregate's under RELIC_UNSTABLE_GROUP_RULES,
  * which the strategy whose derivations are counted runs under, since by
  * default a body of one atom of distinct variables is folded in place and
  * derives nothing.  The bindings are counted in a context of their own
@@ -64,7 +64,7 @@
  * per group body.  No answer shows a derivation made twice, since a duplicate
  * changes none, so this is the only comparison that can.
  *
- * The strategies under RELIC_F_GROUP_RULES hold the group relations the
+ * The strategies under RELIC_UNSTABLE_GROUP_RULES hold the group relations the
  * others fold in place without copying, so their tuple totals are held only
  * to each other's.
  */
@@ -94,55 +94,62 @@ static const strategy_t strategies[STRATEGY_COUNT] = {
 	[STRATEGY_DEFAULT] = {
 		"default", 0, false, STRATEGY_NONE, 0, FAULT_NONE },
 	[STRATEGY_NAIVE] = {
-		"naive", RELIC_F_NAIVE, false, STRATEGY_DEFAULT, 0,
+		"naive", RELIC_UNSTABLE_NAIVE, false, STRATEGY_DEFAULT, 0,
 		FAULT_NAIVE },
 	[STRATEGY_NO_INDEX] = {
-		"no-index", RELIC_F_NO_INDEX, false, STRATEGY_DEFAULT, 0,
-		FAULT_NONE },
+		"no-index", RELIC_UNSTABLE_NO_INDEX, false, STRATEGY_DEFAULT,
+		0, FAULT_NONE },
 	[STRATEGY_NO_STREAM] = {
-		"no-stream", RELIC_F_NO_STREAM, false, STRATEGY_DEFAULT, 0,
-		FAULT_NONE },
+		"no-stream", RELIC_UNSTABLE_NO_STREAM, false, STRATEGY_DEFAULT,
+		0, FAULT_NONE },
 	[STRATEGY_NO_EXISTS] = {
-		"no-exists", RELIC_F_NO_EXISTS, false, STRATEGY_DEFAULT, 0,
-		FAULT_NONE },
+		"no-exists", RELIC_UNSTABLE_NO_EXISTS, false, STRATEGY_DEFAULT,
+		0, FAULT_NONE },
 	[STRATEGY_PARALLEL] = {
-		"parallel", RELIC_F_PARALLEL_ALWAYS, false, STRATEGY_DEFAULT,
-		PARALLEL_THREADS, FAULT_NONE },
+		"parallel", RELIC_UNSTABLE_PARALLEL_ALWAYS, false,
+		STRATEGY_DEFAULT, PARALLEL_THREADS, FAULT_NONE },
 	[STRATEGY_NO_REORDER] = {
-		"no-reorder", RELIC_F_NO_REORDER, false, STRATEGY_NONE, 0,
-		FAULT_NONE },
+		"no-reorder", RELIC_UNSTABLE_NO_REORDER, false, STRATEGY_NONE,
+		0, FAULT_NONE },
 	[STRATEGY_NO_FACTOR] = {
-		"no-factor", RELIC_F_NO_FACTOR, false, STRATEGY_NONE, 0,
-		FAULT_NONE },
+		"no-factor", RELIC_UNSTABLE_NO_FACTOR, false, STRATEGY_NONE,
+		0, FAULT_NONE },
 	[STRATEGY_NAIVE_NO_FACTOR] = {
-		"naive+no-factor", RELIC_F_NAIVE | RELIC_F_NO_FACTOR, false,
+		"naive+no-factor",
+		RELIC_UNSTABLE_NAIVE | RELIC_UNSTABLE_NO_FACTOR, false,
 		STRATEGY_NO_FACTOR, 0, FAULT_NONE },
 	[STRATEGY_NO_MAGIC] = {
-		"no-magic", RELIC_F_NO_MAGIC, false, STRATEGY_NONE, 0,
-		FAULT_NONE },
+		"no-magic", RELIC_UNSTABLE_NO_MAGIC, false, STRATEGY_NONE,
+		0, FAULT_NONE },
 	[STRATEGY_NAIVE_NO_MAGIC] = {
-		"naive+no-magic", RELIC_F_NAIVE | RELIC_F_NO_MAGIC, false,
+		"naive+no-magic",
+		RELIC_UNSTABLE_NAIVE | RELIC_UNSTABLE_NO_MAGIC, false,
 		STRATEGY_NO_MAGIC, 0, FAULT_NONE },
 	[STRATEGY_NO_INDEX_NO_MAGIC] = {
-		"no-index+no-magic", RELIC_F_NO_INDEX | RELIC_F_NO_MAGIC, false,
+		"no-index+no-magic",
+		RELIC_UNSTABLE_NO_INDEX | RELIC_UNSTABLE_NO_MAGIC, false,
 		STRATEGY_NO_MAGIC, 0, FAULT_NONE },
 	[STRATEGY_NO_REORDER_NO_MAGIC] = {
-		"no-reorder+no-magic", RELIC_F_NO_REORDER | RELIC_F_NO_MAGIC,
+		"no-reorder+no-magic",
+		RELIC_UNSTABLE_NO_REORDER | RELIC_UNSTABLE_NO_MAGIC,
 		false, STRATEGY_NO_MAGIC, 0, FAULT_NONE },
 	[STRATEGY_NO_EXISTS_NO_MAGIC] = {
-		"no-exists+no-magic", RELIC_F_NO_EXISTS | RELIC_F_NO_MAGIC,
+		"no-exists+no-magic",
+		RELIC_UNSTABLE_NO_EXISTS | RELIC_UNSTABLE_NO_MAGIC,
 		false, STRATEGY_NO_MAGIC, 0, FAULT_NONE },
 	[STRATEGY_PARALLEL_NO_MAGIC] = {
-		"parallel+no-magic", RELIC_F_PARALLEL_ALWAYS | RELIC_F_NO_MAGIC,
+		"parallel+no-magic",
+		RELIC_UNSTABLE_PARALLEL_ALWAYS | RELIC_UNSTABLE_NO_MAGIC,
 		false, STRATEGY_NO_MAGIC, PARALLEL_THREADS, FAULT_NONE },
 	[STRATEGY_GROUP_RULES] = {
-		"group-rules", RELIC_F_GROUP_RULES, false, STRATEGY_NONE, 0,
-		FAULT_NONE },
+		"group-rules", RELIC_UNSTABLE_GROUP_RULES, false, STRATEGY_NONE,
+		0, FAULT_NONE },
 	[STRATEGY_GROUP_RULES_NO_MAGIC] = {
-		"group-rules+no-magic", RELIC_F_GROUP_RULES | RELIC_F_NO_MAGIC,
+		"group-rules+no-magic",
+		RELIC_UNSTABLE_GROUP_RULES | RELIC_UNSTABLE_NO_MAGIC,
 		false, STRATEGY_NONE, 0, FAULT_NONE },
 	[STRATEGY_MATERIALIZED] = {
-		"materialized", RELIC_F_GROUP_RULES, true,
+		"materialized", RELIC_UNSTABLE_GROUP_RULES, true,
 		STRATEGY_GROUP_RULES_NO_MAGIC, 0, FAULT_NONE },
 };
 
@@ -523,7 +530,7 @@ count_derivations(const random_program_t *program, FILE *report,
 	size_t query = 0;
 
 	bzero(&config, sizeof(config));
-	config.flags = RELIC_F_NAIVE | RELIC_F_NO_MAGIC;
+	config.flags = RELIC_UNSTABLE_NAIVE | RELIC_UNSTABLE_NO_MAGIC;
 	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL)
 		errx(1, "relic_create_config failed");

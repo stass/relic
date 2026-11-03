@@ -489,7 +489,7 @@ static void
 answering_queries_does_not_grow_the_context(void)
 {
 	growth_under(0, "through the rewrite");
-	growth_under(RELIC_F_NO_MAGIC, "from the whole fixed point");
+	growth_under(RELIC_UNSTABLE_NO_MAGIC, "from the whole fixed point");
 }
 
 /*
@@ -1144,7 +1144,7 @@ static void
 a_callback_can_stop_the_rows(void)
 {
 	stopped_under(0, "streamed");
-	stopped_under(RELIC_F_NO_STREAM, "gathered");
+	stopped_under(RELIC_UNSTABLE_NO_STREAM, "gathered");
 }
 
 /*
@@ -1193,7 +1193,7 @@ stopped_under(unsigned int flags, const char *strategy)
 	if (program != NULL && relic_load_string(ctx, "test.dl", program) == 0)
 		query = relic_query_prepare(ctx, NULL, "e(X)?");
 	free(program);
-	streams = (flags & RELIC_F_NO_STREAM) == 0;
+	streams = (flags & RELIC_UNSTABLE_NO_STREAM) == 0;
 
 	for (i = 0; i < sizeof(stops) / sizeof(stops[0]); i++) {
 		size_t batches;

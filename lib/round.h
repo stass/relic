@@ -413,7 +413,7 @@ struct relic_pool_filler {
  * counted in the storage total, for the serial run to grow into.  A round
  * is not run deferred when it reads a relation it writes, when it is too
  * small to repay sharing it among the pool's threads -- unless
- * RELIC_F_PARALLEL_ALWAYS asks for every round -- or when the pool, the
+ * RELIC_UNSTABLE_PARALLEL_ALWAYS asks for every round -- or when the pool, the
  * workers' buffers for the strings a calling round computes, or the room
  * reserved for the candidates the round is expected to gather could not be
  * had, and is abandoned when a task could not go on or its merge declined.

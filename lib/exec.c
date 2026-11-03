@@ -1652,7 +1652,7 @@ probe_index(relic_scratch_t *scratch, const relic_op_atom_t *atom,
  * A probe by scanning the view for the first tuple the terms match, `_`
  * matching anything: the whole question when the atom names no column,
  * which the first tuple of a nonempty view answers, and the question of a
- * key that names some under RELIC_F_NO_INDEX.  A test has no cursor to
+ * key that names some under RELIC_UNSTABLE_NO_INDEX.  A test has no cursor to
  * resume from, so the scan charges its reads as a fold does and finishes
  * before the call may pause.
  */

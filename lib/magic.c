@@ -3661,7 +3661,7 @@ may_factor(const relic_magic_t *magic, const relic_adornment_t *adornment)
 	const relic_component_t *component;
 	size_t position;
 
-	if ((magic->ctx->config.flags & RELIC_F_NO_FACTOR) != 0 ||
+	if ((magic->ctx->config.flags & RELIC_UNSTABLE_NO_FACTOR) != 0 ||
 	    adornment->bound == 0 ||
 	    column_count(adornment->bound) > RELIC_FACTOR_MAX_BOUND)
 		return (false);

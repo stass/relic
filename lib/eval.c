@@ -1266,16 +1266,16 @@ confirm_planned(const relic_evaluation_t *eval,
  * not hold.  Returns 0, or -1 when an insertion was refused, which the
  * relation store has reported.
  *
- * On a context with threads, or under RELIC_F_PARALLEL_ALWAYS, every round
- * is offered for deferral: its items run over a store nothing writes until
- * they have all finished, on as many threads as the pool has, and what
+ * On a context with threads, or under RELIC_UNSTABLE_PARALLEL_ALWAYS, every
+ * round is offered for deferral: its items run over a store nothing writes
+ * until they have all finished, on as many threads as the pool has, and what
  * they derived is then inserted in the order they would have inserted it
- * (lib/round.c).  A round too small to repay the threads, one that reads
- * what it writes, or one that could not go on is declined before it has
- * changed anything, and runs here, inserting as it derives.  Either way
- * the relations, the counters and what is reported come out the same.  A
- * context of one thread without the switch offers nothing, and its rounds
- * run here as they always have.
+ * (lib/round.c).  A round too small to repay the threads, one that reads what
+ * it writes, or one that could not go on is declined before it has changed
+ * anything, and runs here, inserting as it derives.  Either way the relations,
+ * the counters and what is reported come out the same.  A context of one thread
+ * without the switch offers nothing, and its rounds run here as they always
+ * have.
  *
  * A round run here whose plans call a function has the scratch's buffers
  * for the strings they compute for as long as it runs, charged to the
@@ -1364,13 +1364,13 @@ run_item(relic_evaluation_t *eval, const relic_round_t *round,
 
 /*
  * Whether a context offers its rounds for deferral: it has threads, or
- * RELIC_F_PARALLEL_ALWAYS asks for every round to be deferred.
+ * RELIC_UNSTABLE_PARALLEL_ALWAYS asks for every round to be deferred.
  */
 static bool
 rounds_may_be_deferred(const relic_t *ctx)
 {
 	return (ctx->config.threads > 1 ||
-	    (ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0);
+	    (ctx->config.flags & RELIC_UNSTABLE_PARALLEL_ALWAYS) != 0);
 }
 
 /*
@@ -2785,7 +2785,7 @@ choose_fixed_point(const relic_t *ctx, const relic_component_t *component)
 	if (!component->recursive)
 		return (RELIC_FIXED_ONE_PASS);
 
-	if ((ctx->config.flags & RELIC_F_NAIVE) != 0)
+	if ((ctx->config.flags & RELIC_UNSTABLE_NAIVE) != 0)
 		return (RELIC_FIXED_NAIVE);
 
 	return (RELIC_FIXED_SEMI_NAIVE);
@@ -3429,7 +3429,7 @@ relic_evaluate_counted(relic_t *ctx, const relic_query_t *query,
 static bool
 query_streams(const relic_t *ctx, const relic_plan_t *plan)
 {
-	if ((ctx->config.flags & RELIC_F_NO_STREAM) != 0)
+	if ((ctx->config.flags & RELIC_UNSTABLE_NO_STREAM) != 0)
 		return (false);
 
 	if (relic_limits_bound_relations(ctx))
@@ -3978,7 +3978,7 @@ compute_answer(relic_t *ctx, const relic_query_t *query,
 	ctx->query_mixed_noted = false;
 
 	group_run_init(&groups, ctx, query);
-	if ((ctx->config.flags & RELIC_F_NO_MAGIC) != 0 ||
+	if ((ctx->config.flags & RELIC_UNSTABLE_NO_MAGIC) != 0 ||
 	    relic_relations_current(ctx))
 		status = answer_from_program(ctx, query, &groups, rows);
 	else {

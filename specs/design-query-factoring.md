@@ -475,9 +475,9 @@ the fixed complete set. Rule traversal, naming, column projection and fresh
 slot construction use source and column order. Hash tables find equal
 records; their bucket order never determines generated order.
 
-The flag `RELIC_F_NO_FACTOR`, exposed as `-X no-factor`, disables this
+The flag `RELIC_UNSTABLE_NO_FACTOR`, exposed as `-X no-factor`, disables this
 transformation while retaining ordinary Magic, including its subsumption
-and supplementary rules. `RELIC_F_NO_MAGIC` bypasses both; an already
+and supplementary rules. `RELIC_UNSTABLE_NO_MAGIC` bypasses both; an already
 materialized context also uses its established direct query path.
 `-X naive -X no-magic` remains the whole-program semantic reference on
 small inputs. Other strategy flags govern the generated rules normally.

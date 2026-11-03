@@ -58,7 +58,7 @@ aggregates and partially bound roots. Their semantics require no cases in
 the collector because they never reach it.
 
 This strategy applies in query-directed execution with default resource
-limits. An already materialized program, `RELIC_F_NO_MAGIC`, or an explicitly
+limits. An already materialized program, `RELIC_UNSTABLE_NO_MAGIC`, or an explicitly
 configured tuple, memory or Magic limit keeps ordinary execution. The
 certificate is revalidated at every run of a prepared query, after program
 readiness and schedule confirmation. It retains no relation pointers across

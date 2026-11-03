@@ -55,7 +55,7 @@ typedef struct record record_t;
  */
 struct class_seen {
 	relic_t			*ctx;
-	enum relic_error_class	 seen;
+	relic_error_class_t	 seen;
 };
 
 struct record {

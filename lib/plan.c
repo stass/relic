@@ -133,9 +133,9 @@
  * kept once.  When two are kept, each has a recipe from which a round,
  * knowing the sizes of its views and the keys of its indexes, estimates
  * its work, and the cost of building the indexes it lacks, and runs the
- * cheaper (lib/cost.c).  Under RELIC_F_NO_REORDER
- * the delta literal stays where it is written and there is one order;
- * under RELIC_F_NO_INDEX alone, which would scan a deferred delta once per
+ * cheaper (lib/cost.c).  Under RELIC_UNSTABLE_NO_REORDER the delta literal
+ * stays where it is written and there is one order; under
+ * RELIC_UNSTABLE_NO_INDEX alone, which would scan a deferred delta once per
  * binding before it, the delta goes first.
  *
  * Every positive literal of a variant reads through a view (plan.h), and the
@@ -170,17 +170,17 @@
  * the draft's list of indexes and the binding of positions follow.
  *
  * Three switches select the references the default is tested against.
- * RELIC_F_NO_INDEX makes every lookup a scan matching the same columns,
- * RELIC_F_NO_REORDER places positive literals in the order they are written,
- * and RELIC_F_NO_EXISTS plans no existence check: no variable is dead, and a
- * positive literal is a member, a lookup or a scan by its bound columns
- * alone.  Each changes how an answer is found and never what it is.
+ * RELIC_UNSTABLE_NO_INDEX makes every lookup a scan matching the same columns,
+ * RELIC_UNSTABLE_NO_REORDER places positive literals in the order they are
+ * written, and RELIC_UNSTABLE_NO_EXISTS plans no existence check: no variable
+ * is dead, and a positive literal is a member, a lookup or a scan by its bound
+ * columns alone.  Each changes how an answer is found and never what it is.
  */
 
 /*
  * How a planner orders the positive literals.  GREEDY ranks every literal
  * alike, which is how an ordinary plan is ordered and, under
- * RELIC_F_NO_REORDER, where nothing is ranked, a written variant.
+ * RELIC_UNSTABLE_NO_REORDER, where nothing is ranked, a written variant.
  * DELTA_FIRST pins a variant's delta literal before every other positive
  * literal.  INPUT_FIRST ranks the delta literal below any other literal
  * binding as many of its arguments.
@@ -204,7 +204,7 @@ typedef struct relic_plan_score relic_plan_score_t;
  * order is decided, by the literals placed and the slots the caller started
  * with; while the operations are emitted, by the operations emitted.  `dead`
  * is the set of the rule's dead variables, which no literal binds, and is
- * empty under RELIC_F_NO_EXISTS.
+ * empty under RELIC_UNSTABLE_NO_EXISTS.
  * `numbers` and `texts` are the subsets of those bound to a computed
  * integer and to a computed string, the number slots and the text slots.
  * `text_base` is where the texts the next operation computes begin: one
@@ -792,9 +792,9 @@ probe_is_bound(const relic_atom_t *atom, uint16_t arity, uint64_t bound)
  * MEMBER when every column is bound; EXISTS when some column is not but
  * none is free, so that every column not bound is `_` or a dead variable;
  * otherwise a generator, LOOKUP when some columns are bound and SCAN when
- * none are.  Under RELIC_F_NO_INDEX a literal that would be looked up is
- * scanned instead, and under RELIC_F_NO_EXISTS one that would be checked is
- * a generator, binding nothing and matching anything where it is `_`.
+ * none are.  Under RELIC_UNSTABLE_NO_INDEX a literal that would be looked up is
+ * scanned instead, and under RELIC_UNSTABLE_NO_EXISTS one that would be checked
+ * is a generator, binding nothing and matching anything where it is `_`.
  */
 static enum relic_op_kind
 positive_kind(const relic_planner_t *planner,
@@ -804,11 +804,11 @@ positive_kind(const relic_planner_t *planner,
 		return (RELIC_OP_MEMBER);
 
 	if (unbound == 0 &&
-	    (planner->ctx->config.flags & RELIC_F_NO_EXISTS) == 0)
+	    (planner->ctx->config.flags & RELIC_UNSTABLE_NO_EXISTS) == 0)
 		return (RELIC_OP_EXISTS);
 
 	if (bound == 0 ||
-	    (planner->ctx->config.flags & RELIC_F_NO_INDEX) != 0)
+	    (planner->ctx->config.flags & RELIC_UNSTABLE_NO_INDEX) != 0)
 		return (RELIC_OP_SCAN);
 
 	return (RELIC_OP_LOOKUP);
@@ -887,7 +887,7 @@ arg_slots(const relic_arg_t *args, uint16_t count)
  * read when they are a nonempty proper subset, answered through the
  * secondary index on them; and none, answered by a scan of the view, when
  * it reads no column or when such a subset is planned under
- * RELIC_F_NO_INDEX, as a lookup is planned as a scan.
+ * RELIC_UNSTABLE_NO_INDEX, as a lookup is planned as a scan.
  */
 static uint32_t
 probe_key(const relic_planner_t *planner, const relic_relation_t *relation,
@@ -896,7 +896,7 @@ probe_key(const relic_planner_t *planner, const relic_relation_t *relation,
 	if (read == relic_plan_all_columns(relation->arity))
 		return (read);
 
-	if ((planner->ctx->config.flags & RELIC_F_NO_INDEX) != 0)
+	if ((planner->ctx->config.flags & RELIC_UNSTABLE_NO_INDEX) != 0)
 		return (0);
 
 	return (read);
@@ -1210,8 +1210,8 @@ place_comparison(relic_planner_t *planner, const relic_literal_t *literal)
  * How an AGGREGATE reaches its group's rows, from which of the relation's
  * columns are key columns: its tuple count for an unkeyed count, all of
  * its rows for other folds with no key, the one tuple the
- * key names when every column is one, and otherwise those an index on the
- * key columns holds, or, under RELIC_F_NO_INDEX, those a walk of the whole
+ * key names when every column is one, and otherwise those an index on the key
+ * columns holds, or, under RELIC_UNSTABLE_NO_INDEX, those a walk of the whole
  * relation matches.
  */
 static enum relic_fold_access
@@ -1226,7 +1226,7 @@ fold_access(const relic_planner_t *planner, enum relic_aggregate_fn fn,
 	if (key_mask == relic_plan_all_columns(arity))
 		return (RELIC_FOLD_PROBE);
 
-	if ((planner->ctx->config.flags & RELIC_F_NO_INDEX) != 0)
+	if ((planner->ctx->config.flags & RELIC_UNSTABLE_NO_INDEX) != 0)
 		return (RELIC_FOLD_SCAN);
 
 	return (RELIC_FOLD_LOOKUP);
@@ -1621,7 +1621,7 @@ compare_ranked(const void *a, const void *b)
  * Literals are scored in body order, and each against the bound set of its
  * pass, so a statistic that cannot be computed fails at the first literal
  * the greedy order's comparison at that bound set would have scored.  Under
- * RELIC_F_NO_REORDER nothing is scored, every score is equal, and the
+ * RELIC_UNSTABLE_NO_REORDER nothing is scored, every score is equal, and the
  * ranking is body order.
  */
 static int
@@ -1634,7 +1634,7 @@ rank_positives(relic_planner_t *planner)
 	size_t i;
 
 	rule = planner->rule;
-	reorder = (planner->ctx->config.flags & RELIC_F_NO_REORDER) == 0;
+	reorder = (planner->ctx->config.flags & RELIC_UNSTABLE_NO_REORDER) == 0;
 	planner->ranking_count = 0;
 
 	for (i = 0; i < rule->body_length; i++) {
@@ -2022,7 +2022,7 @@ planner_init(relic_planner_t *planner, relic_t *ctx, relic_arena_t *arena,
 	planner->incomplete = incomplete;
 	planner->delta_literal = delta_literal;
 	planner->policy = policy;
-	if ((ctx->config.flags & RELIC_F_NO_EXISTS) == 0)
+	if ((ctx->config.flags & RELIC_UNSTABLE_NO_EXISTS) == 0)
 		planner->dead = dead_slots(ctx, rule);
 
 	planner->placed = relic_arena_allocarray(arena, rule->body_length,
@@ -2113,12 +2113,12 @@ emit_draft(relic_planner_t *planner, relic_plan_draft_t *draft)
  * The ordering policies of a delta variant's candidate plans, into
  * `policies`, in the order its family keeps them, and how many there are.
  *
- * The written order of RELIC_F_NO_REORDER is the textbook scheme and is not
- * second-guessed: it is the only plan.  Without indexes a delta placed
+ * The written order of RELIC_UNSTABLE_NO_REORDER is the textbook scheme and
+ * is not second-guessed: it is the only plan.  Without indexes a delta placed
  * after other literals would be scanned whole once for each binding that
  * reaches it, while the delta-first plan scans it once, so under
- * RELIC_F_NO_INDEX alone the delta-first order is the only plan.  Otherwise
- * both orders are candidates.
+ * RELIC_UNSTABLE_NO_INDEX alone the delta-first order is the only plan.
+ * Otherwise both orders are candidates.
  */
 static size_t
 family_policies(const relic_t *ctx, enum relic_order_policy *policies)
@@ -2127,13 +2127,13 @@ family_policies(const relic_t *ctx, enum relic_order_policy *policies)
 
 	flags = ctx->config.flags;
 
-	if ((flags & RELIC_F_NO_REORDER) != 0) {
+	if ((flags & RELIC_UNSTABLE_NO_REORDER) != 0) {
 		policies[0] = RELIC_POLICY_GREEDY;
 		return (1);
 	}
 
 	policies[RELIC_FAMILY_DELTA_FIRST] = RELIC_POLICY_DELTA_FIRST;
-	if ((flags & RELIC_F_NO_INDEX) != 0)
+	if ((flags & RELIC_UNSTABLE_NO_INDEX) != 0)
 		return (1);
 
 	policies[RELIC_FAMILY_INPUT_FIRST] = RELIC_POLICY_INPUT_FIRST;

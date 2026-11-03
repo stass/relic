@@ -12,7 +12,7 @@
  * over generated graphs, for programs that recurse on the left, on the right
  * and on both sides, that recurse mutually, that negate, and that mix facts
  * with rules, and for every way a query can bind a binary predicate's
- * columns.  A context configured with RELIC_F_NO_MAGIC is the reference.
+ * columns.  A context configured with RELIC_UNSTABLE_NO_MAGIC is the reference.
  *
  * The rest examine the rewrite through what -e shows of it: the names of the
  * adornments and seeds, that adornments are memoized so a program calling
@@ -606,8 +606,8 @@ the_rewrite_answers_as_the_fixed_point_does(void)
 
 				magic = context_with(program, 0, 0,
 				    &magic_log);
-				whole = context_with(program, RELIC_F_NO_MAGIC,
-				    0, &whole_log);
+				whole = context_with(program,
+				    RELIC_UNSTABLE_NO_MAGIC, 0, &whole_log);
 				if (magic == NULL || whole == NULL) {
 					relic_destroy(magic);
 					relic_destroy(whole);
@@ -924,10 +924,10 @@ the_limit_holds_at_its_value(void)
 		size_t		 admitted;
 		const char	*adorning;
 	} cases[] = {
-		{ path_program, "path(a, X)?", RELIC_F_NO_FACTOR, 12,
+		{ path_program, "path(a, X)?", RELIC_UNSTABLE_NO_FACTOR, 12,
 		    "path/2" },
 		{ path_program, "path(a, X)?", 0, 10, "path/2" },
-		{ observing_program, "p(a, X)?", RELIC_F_NO_FACTOR, 14,
+		{ observing_program, "p(a, X)?", RELIC_UNSTABLE_NO_FACTOR, 14,
 		    "p/2" },
 		{ observing_program, "p(a, X)?", 0, 18, "p/2" },
 		{ replaying_program, "p(a, X), r(b, Y), r(Z, W)?", 0, 36,
@@ -1770,7 +1770,7 @@ a_rejected_certificate_fits_the_default_limit(void)
 	    "p(X1, X2, X3, X4, X5, X6, X7) :- s(X1, X2, X3, X4, X5, X6, X7),"
 	    " pad(X1), pad(X2), pad(X3), pad(X4), pad(X5), pad(X6),"
 	    " pad(X7), X1 != zz.\n";
-	static const unsigned int flags[] = { 0, RELIC_F_NO_FACTOR };
+	static const unsigned int flags[] = { 0, RELIC_UNSTABLE_NO_FACTOR };
 	text_t query_text;
 	text_t explained;
 	diag_log_t log;
@@ -1786,7 +1786,7 @@ a_rejected_certificate_fits_the_default_limit(void)
 		return;
 	}
 
-	ctx = context_with(program, RELIC_F_NO_MAGIC, 0, &log);
+	ctx = context_with(program, RELIC_UNSTABLE_NO_MAGIC, 0, &log);
 	expected = ctx != NULL ? answer(ctx, query_text.bytes) : NULL;
 	relic_destroy(ctx);
 
@@ -2043,14 +2043,14 @@ what_the_rewrite_derives_does_not_leak(void)
  * 8N + 64.  The ordinary rewrite derives path$bf for every node the demand
  * reaches, every suffix of the chain, N(N + 1)/2 tuples, over sixty times
  * that bound.  Explain shows the adornment factored, so the bound is met
- * by this transformation rather than by another, and RELIC_F_NO_FACTOR,
+ * by this transformation rather than by another, and RELIC_UNSTABLE_NO_FACTOR,
  * which answers the same, exceeds the bound, so the count tells the two
  * apart.
  */
 static void
 a_bound_chain_derives_linearly(void)
 {
-	static const unsigned int flags[] = { 0, RELIC_F_NO_FACTOR };
+	static const unsigned int flags[] = { 0, RELIC_UNSTABLE_NO_FACTOR };
 	char line[64];
 	relic_stats_t stats;
 	text_t explained;
@@ -2081,7 +2081,7 @@ a_bound_chain_derives_linearly(void)
 
 	bound = 8 * (uint64_t)CHAIN_EDGES + 64;
 	for (f = 0; f < sizeof(flags) / sizeof(flags[0]); f++) {
-		factors = (flags[f] & RELIC_F_NO_FACTOR) == 0;
+		factors = (flags[f] & RELIC_UNSTABLE_NO_FACTOR) == 0;
 		ctx = context_with(program.bytes, flags[f], 0, &log);
 		if (ctx == NULL)
 			break;
@@ -2311,10 +2311,11 @@ factoring_answers_as_its_references_do(void)
 
 				factored = context_with(program, 0, 0, &log);
 				unfactored = context_with(program,
-				    RELIC_F_NO_FACTOR, 0, &unfactored_log);
+				    RELIC_UNSTABLE_NO_FACTOR, 0,
+				    &unfactored_log);
 				whole = context_with(program,
-				    RELIC_F_NO_MAGIC | RELIC_F_NAIVE, 0,
-				    &whole_log);
+				    RELIC_UNSTABLE_NO_MAGIC |
+				    RELIC_UNSTABLE_NAIVE, 0, &whole_log);
 				if (factored == NULL || unfactored == NULL ||
 				    whole == NULL) {
 					relic_destroy(factored);
@@ -2495,7 +2496,7 @@ check_factoring_fits(const char *what, const char *program,
 	char *actual;
 
 	factored = context_with(program, 0, 0, &log);
-	unfactored = context_with(program, RELIC_F_NO_FACTOR, 0,
+	unfactored = context_with(program, RELIC_UNSTABLE_NO_FACTOR, 0,
 	    &unfactored_log);
 	if (factored == NULL || unfactored == NULL) {
 		relic_destroy(factored);
@@ -2660,7 +2661,7 @@ a_factored_rewrite_is_deterministic(void)
 			bzero(&config, sizeof(config));
 			config.threads = threads[t];
 			if (threads[t] > 0)
-				config.flags = RELIC_F_PARALLEL_ALWAYS;
+				config.flags = RELIC_UNSTABLE_PARALLEL_ALWAYS;
 			ctx = context_configured(program, &config, &log);
 			if (ctx == NULL)
 				break;
@@ -2727,7 +2728,7 @@ static void
 a_walk_is_charged_its_name(void)
 {
 	static const size_t lengths[] = { 1, NAMED_LONG };
-	static const unsigned int flags[] = { 0, RELIC_F_NO_FACTOR };
+	static const unsigned int flags[] = { 0, RELIC_UNSTABLE_NO_FACTOR };
 	size_t least[2][2];
 	char *program;
 	char *query;

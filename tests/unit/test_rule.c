@@ -1229,7 +1229,7 @@ group_predicates(const relic_t *ctx)
  * body that has no head.  A wildcard, a constant, a repeated variable, a
  * second literal, a comparison or a negation makes the body another
  * relation, and it gets a group rule; so does every body under
- * RELIC_F_GROUP_RULES.
+ * RELIC_UNSTABLE_GROUP_RULES.
  */
 static void
 a_body_that_is_a_relation_is_folded_in_place(void)
@@ -1259,8 +1259,8 @@ a_body_that_is_a_relation_is_folded_in_place(void)
 	bool in_place;
 
 	bzero(&config, sizeof(config));
-	for (flags = 0; flags <= RELIC_F_GROUP_RULES;
-	    flags += RELIC_F_GROUP_RULES) {
+	for (flags = 0; flags <= RELIC_UNSTABLE_GROUP_RULES;
+	    flags += RELIC_UNSTABLE_GROUP_RULES) {
 		for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 			in_place = cases[i].in_place && flags == 0;
 			config.flags = flags;

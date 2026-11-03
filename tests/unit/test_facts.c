@@ -916,7 +916,7 @@ an_added_fact_can_falsify_a_negation(void)
 {
 	falsified_through(0, false, "the rewrite");
 	falsified_through(0, true, "materialization");
-	falsified_through(RELIC_F_NO_MAGIC, false, "the whole program");
+	falsified_through(RELIC_UNSTABLE_NO_MAGIC, false, "the whole program");
 }
 
 /*
@@ -1915,7 +1915,7 @@ grown_alike(const relic_builder_t *builder, const relic_relation_t *relation)
  * reservation for the new tuples projects, which the storage total
  * counts.  The pool shares the parts of an append of
  * RELIC_COMMIT_PARALLEL_TUPLES tuples and not of one fewer, unless
- * RELIC_F_PARALLEL_ALWAYS asks, and a commit makes no pool.  The growth
+ * RELIC_UNSTABLE_PARALLEL_ALWAYS asks, and a commit makes no pool.  The growth
  * defers only when the parts share and the limit admits the peak, exactly
  * at it included, and otherwise completes at once; a limit a byte short of
  * the final size refuses the commit.
@@ -1927,24 +1927,24 @@ a_commit_appends_alike_however_it_runs(void)
 		{ "on the calling thread", APPEND_ADDED, 1, 0, false,
 		    APPEND_UNLIMITED },
 		{ "with threads and no pool", APPEND_ADDED, 4,
-		    RELIC_F_PARALLEL_ALWAYS, false, APPEND_UNLIMITED },
+		    RELIC_UNSTABLE_PARALLEL_ALWAYS, false, APPEND_UNLIMITED },
 		{ "forced onto the pool", APPEND_ADDED, 4,
-		    RELIC_F_PARALLEL_ALWAYS, true, APPEND_UNLIMITED },
+		    RELIC_UNSTABLE_PARALLEL_ALWAYS, true, APPEND_UNLIMITED },
 		{ "one short of the sharing count",
 		    RELIC_COMMIT_PARALLEL_TUPLES - 1, 4, 0, true,
 		    APPEND_UNLIMITED },
 		{ "at the sharing count", RELIC_COMMIT_PARALLEL_TUPLES, 4, 0,
 		    true, APPEND_UNLIMITED },
 		{ "at its peak on the pool", APPEND_ADDED, 4,
-		    RELIC_F_PARALLEL_ALWAYS, true, APPEND_AT_PEAK },
+		    RELIC_UNSTABLE_PARALLEL_ALWAYS, true, APPEND_AT_PEAK },
 		{ "a byte below its peak on the pool", APPEND_ADDED, 4,
-		    RELIC_F_PARALLEL_ALWAYS, true, APPEND_BELOW_PEAK },
+		    RELIC_UNSTABLE_PARALLEL_ALWAYS, true, APPEND_BELOW_PEAK },
 		{ "at its final size on the calling thread", APPEND_ADDED, 1,
 		    0, false, APPEND_AT_FINAL },
 		{ "at its final size on the pool", APPEND_ADDED, 4,
-		    RELIC_F_PARALLEL_ALWAYS, true, APPEND_AT_FINAL },
+		    RELIC_UNSTABLE_PARALLEL_ALWAYS, true, APPEND_AT_FINAL },
 		{ "a byte short of its final size", APPEND_ADDED, 4,
-		    RELIC_F_PARALLEL_ALWAYS, true, APPEND_SHORT },
+		    RELIC_UNSTABLE_PARALLEL_ALWAYS, true, APPEND_SHORT },
 	};
 	size_t i;
 
@@ -2029,7 +2029,7 @@ commit_append(const append_case_t *append)
 	    APPEND_HELD + append->added, allowed);
 	refused = append->limit == APPEND_SHORT;
 	shares = append->pooled && relic_pool_workers(ctx->pool) > 1 &&
-	    ((append->flags & RELIC_F_PARALLEL_ALWAYS) != 0 ||
+	    ((append->flags & RELIC_UNSTABLE_PARALLEL_ALWAYS) != 0 ||
 	    append->added >= RELIC_COMMIT_PARALLEL_TUPLES) && !refused;
 	defers = shares && (append->limit == APPEND_UNLIMITED ||
 	    append->limit == APPEND_AT_PEAK);
@@ -2099,7 +2099,7 @@ a_mixed_commit_places_each_store_on_the_pool(void)
 
 	bzero(&config, sizeof(config));
 	config.threads = 4;
-	config.flags = RELIC_F_PARALLEL_ALWAYS;
+	config.flags = RELIC_UNSTABLE_PARALLEL_ALWAYS;
 	ctx = context_with(&config, NULL, &log);
 	if (ctx == NULL)
 		return;

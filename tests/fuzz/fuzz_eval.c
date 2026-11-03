@@ -90,10 +90,11 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 	optimized = open_context(data, size, 0, true, &optimized_errors,
 	    &optimized_accepted);
-	deferred = open_context(data, size, RELIC_F_PARALLEL_ALWAYS, false,
-	    &deferred_errors, &deferred_accepted);
-	reference = open_context(data, size, RELIC_F_NAIVE | RELIC_F_NO_MAGIC,
-	    false, &reference_errors, &reference_accepted);
+	deferred = open_context(data, size, RELIC_UNSTABLE_PARALLEL_ALWAYS,
+	    false, &deferred_errors, &deferred_accepted);
+	reference = open_context(data, size,
+	    RELIC_UNSTABLE_NAIVE | RELIC_UNSTABLE_NO_MAGIC, false,
+	    &reference_errors, &reference_accepted);
 
 	if (optimized_accepted != deferred_accepted ||
 	    optimized_accepted != reference_accepted) {
@@ -232,7 +233,7 @@ static bool
 collect_unless_stopped(relic_t *ctx, error_capture_t *errors, size_t index,
     answer_t *answer, const char *strategy)
 {
-	enum relic_error_class error_class;
+	relic_error_class_t error_class;
 	relic_query_t *query;
 	bool collected = false;
 

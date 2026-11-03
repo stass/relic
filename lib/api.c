@@ -138,6 +138,24 @@ draw_hash_seed(uint64_t *seedp)
 	return (-1);
 }
 
+/*
+ * The stable switches hold the low 16 bits of the configuration's flags and
+ * the unstable ones the high 16, so that a stable switch never takes a bit
+ * an unstable one held (include/relic.h).
+ */
+#define	CONFIG_STABLE_BITS	0x0000ffffu
+#define	CONFIG_UNSTABLE_SWITCHES					\
+	(RELIC_UNSTABLE_NAIVE | RELIC_UNSTABLE_NO_INDEX |		\
+	RELIC_UNSTABLE_NO_REORDER | RELIC_UNSTABLE_NO_MAGIC |		\
+	RELIC_UNSTABLE_NO_STREAM | RELIC_UNSTABLE_PARALLEL_ALWAYS |	\
+	RELIC_UNSTABLE_GROUP_RULES | RELIC_UNSTABLE_NO_EXISTS |		\
+	RELIC_UNSTABLE_NO_FACTOR | RELIC_UNSTABLE_NO_BATCH_IMPORT)
+
+_Static_assert((RELIC_F_NOTE_MIXED & ~CONFIG_STABLE_BITS) == 0,
+    "a stable switch is a bit of the low 16");
+_Static_assert((CONFIG_UNSTABLE_SWITCHES & CONFIG_STABLE_BITS) == 0,
+    "an unstable switch is a bit of the high 16");
+
 relic_t *
 relic_create_config(const relic_config_t *config, size_t size)
 {

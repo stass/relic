@@ -67,7 +67,7 @@ relic library
 .Fc
 .Ft const char *
 .Fn relic_error "relic_t *ctx"
-.Ft enum relic_error_class
+.Ft relic_error_class_t
 .Fn relic_error_class "relic_t *ctx"
 .Ft int
 .Fn relic_load_string "relic_t *ctx" "const char *source_name" "const char *text"
@@ -381,8 +381,7 @@ enough for every rewrite that specializes the program rather than
 multiplies it; any other value replaces the default, and none removes the
 limit.
 A rewrite outgrowing it, set or not, is abandoned with a warning and the
-query answered from the whole program, as it would be with
-.Dv RELIC_F_NO_MAGIC ,
+query answered from the whole program,
 which never answers differently but may meet an undefined arithmetic
 result, a string too long or an invalid pattern the rewrite would not have;
 .Fa max_tuples
@@ -455,40 +454,9 @@ A library built without threads accepts the field and runs everything on
 the calling thread.
 .Pp
 .Fa flags
-holds switches, zero by default.
-.Dv RELIC_F_NAIVE ,
-.Dv RELIC_F_NO_INDEX ,
-.Dv RELIC_F_NO_REORDER ,
-.Dv RELIC_F_NO_MAGIC ,
-.Dv RELIC_F_NO_FACTOR ,
-.Dv RELIC_F_NO_STREAM ,
-.Dv RELIC_F_NO_EXISTS ,
-.Dv RELIC_F_PARALLEL_ALWAYS ,
-.Dv RELIC_F_GROUP_RULES
-and
-.Dv RELIC_F_NO_BATCH_IMPORT
-select alternative strategies for testing, and
+holds switches, zero by default, and a bit no switch defines is ignored.
 .Dv RELIC_F_NOTE_MIXED
-asks for a diagnostic:
-.Bl -tag -width RELIC_F_PARALLEL_ALWAYS
-.It Dv RELIC_F_NAIVE
-evaluate every recursive component by the naive fixed point rather than the
-semi-naive one;
-.It Dv RELIC_F_NO_INDEX
-build no secondary index, scanning instead;
-.It Dv RELIC_F_NO_REORDER
-join positive literals in the order they are written, but for the one
-reading what the previous round derived, which goes first;
-.It Dv RELIC_F_NO_MAGIC
-answer every query from the whole program rather than through its Magic
-Sets rewrite;
-.It Dv RELIC_F_NO_FACTOR
-rewrite every bound recursive predicate by the ordinary Magic Sets
-construction, deriving the answers of every state its demand reaches,
-rather than by walking the states reachable from each requested binding
-and answering for that binding alone;
-.It Dv RELIC_F_NOTE_MIXED
-report, as a note pointing at it, the first comparison or aggregate in each
+reports, as a note pointing at it, the first comparison or aggregate in each
 rule that had no value: a comparison that ordered values of different types,
 applied an arithmetic operator to a symbol or a string, or called a string
 function with an argument of a type it does not take, which is false, or
@@ -496,52 +464,23 @@ an aggregate whose rows were not all integers for a sum, or not all of
 one type for a minimum or a maximum; a
 rule of the program is reported at most once for the life of the context,
 the rules a Magic Sets rewrite generates from it counting as that rule, and
-a query at most once each time it is answered;
-.It Dv RELIC_F_NO_STREAM
-gather every query's answer whole before delivering its first row, even a
-query whose plan derives each row once and could deliver its rows as it
-derives them; the rows and their order are the same;
-.It Dv RELIC_F_NO_EXISTS
-plan a positive literal that binds nothing the rest of its rule reads, its
-other arguments
-.Ql _
-or variables the rule mentions nowhere else, as a scan or a lookup that
-continues the join once per tuple it matches, rather than as a test of
-whether some tuple agrees with its bound arguments, which continues it at
-most once;
-.It Dv RELIC_F_PARALLEL_ALWAYS
-defer the insertions of every round of evaluation that reads none of the
-relations it derives except as they stood when it began, which is every
-round but a pass of the naive fixed point, to the round's end, cutting the
-scan or lookup each rule starts from, after any tests of constants, into
-pieces as finely as the threads allow, as a round run on several threads
-is run, and read every table an import reads from a regular file a window
-of records at a time, as a large table read on several threads is read,
-whatever its size and the number of threads; the relations, the values and
-every count of work are the same;
-.It Dv RELIC_F_GROUP_RULES
-compile the body of every aggregate into a rule of its own whose relation
-the aggregate folds, even a body of one atom whose arguments are distinct
-variables, which otherwise is folded over the atom's relation where it
-stands; the answers are the same, but the copies are tuples held and
-counted, so a limit may refuse one way and not the other;
-.It Dv RELIC_F_NO_BATCH_IMPORT
-import every table a field at a time, typing and interning each field and
-staging each record as it is read, whatever the number of threads and even
-with
-.Dv RELIC_F_PARALLEL_ALWAYS ,
-as a small table, one read on fewer than eight threads or one read from
-anything but a regular file always is, rather
-than a window of records at a time, each window's fields decoded and its
-values and records checked before any is interned or staged; the facts,
-the values, the identifiers they are given and a refused import's message
-are the same, but a refused import may have read less of its stream.
-.El
+a query at most once each time it is answered.
 .Pp
+The header also defines switches named
+.Dv RELIC_UNSTABLE_ ,
+which select alternative evaluation strategies so that relic's own tests
+and the
+.Fl X
+option of
+.Xr relic 1
+can compare them with the default.
+They are not part of the interface: any release may change what one
+does, make it do nothing or remove it, and a program must not depend on
+them.
+The header describes each.
 No switch changes an answer, though two strategies may hold different
 amounts while they compute one, and so one may meet a limit the other does
 not.
-A bit no switch defines is ignored.
 .Pp
 Each context keys its hash tables with a seed drawn from
 .Xr getentropy 2
@@ -797,6 +736,8 @@ is set when a fact, a rule, an import or a query has named
 in a load or an import that failed too.
 A name nothing has named sets no bit, and a predicate the library
 generates, for a query's rewrite or an aggregate, is never reported.
+Every arity has a bit, since the language gives a predicate at most 32
+arguments.
 It checks the program first, as every operation that uses it does, and
 fails as the check does; a
 .Dv NULL
@@ -1048,7 +989,7 @@ returns what kind of failure that error was, so that a program can tell
 without reading the text, which is for a person and may be worded
 differently from one release to the next:
 .Bd -literal -offset indent
-enum relic_error_class {
+typedef enum {
 	RELIC_ERROR_NONE,
 	RELIC_ERROR_REJECTED,
 	RELIC_ERROR_EVALUATION,
@@ -1058,7 +999,7 @@ enum relic_error_class {
 	RELIC_ERROR_INTERRUPTED,
 	RELIC_ERROR_ARGUMENT,
 	RELIC_ERROR_INTERNAL
-};
+} relic_error_class_t;
 .Ed
 .Bl -tag -width RELIC_ERROR_INTERRUPTED
 .It Dv RELIC_ERROR_NONE

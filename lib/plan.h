@@ -370,7 +370,7 @@ struct relic_op_assign {
  * every column is a key column, by probing for the one tuple the key names.
  * A count with no key reads the complete view's tuple count. Other folds
  * with no key walk the whole relation, which is then the group, as do
- * keyed folds under RELIC_F_NO_INDEX.
+ * keyed folds under RELIC_UNSTABLE_NO_INDEX.
  */
 enum relic_fold_access {
 	RELIC_FOLD_SCAN,
@@ -612,7 +612,7 @@ relic_plan_all_columns(uint16_t arity)
  *		the key's chain in the secondary index at `index_position`
  *	SCAN	no key: scan the view for the first tuple the terms match, `_`
  *		matching anything, which is how a probe naming no column is
- *		asked, and one naming some under RELIC_F_NO_INDEX
+ *		asked, and one naming some under RELIC_UNSTABLE_NO_INDEX
  *
  * A relation of arity zero has no column, so its every-column key is the
  * empty one, and it is a MEMBER.  An EXISTS always leaves a column out, so

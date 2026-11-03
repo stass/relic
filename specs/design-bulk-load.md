@@ -65,7 +65,7 @@ serial parser: it can mix rules, queries and facts, has statement recovery,
 and interns names and constants at its own semantic boundaries. A period
 or newline is not a general program-text partition boundary.
 
-`RELIC_F_NO_BATCH_IMPORT`, exposed as `-X no-batch-import`, selects the
+`RELIC_UNSTABLE_NO_BATCH_IMPORT`, exposed as `-X no-batch-import`, selects the
 scalar field-event importer at every worker count while retaining the same
 builders and commit. This provides an independent reference for decoding,
 interning and refusal order. Existing public function signatures and
@@ -86,7 +86,7 @@ horizon neither reaches its end nor fails. The count is of workers running, not
 threads configured: a forked child's pool runs one, and a pool whose
 threads did not all start runs fewer. A pool that cannot be made leaves
 the table to the scalar importer, as it leaves a round to the serial
-evaluator. `RELIC_F_PARALLEL_ALWAYS`, `-X parallel`, batches every table
+evaluator. `RELIC_UNSTABLE_PARALLEL_ALWAYS`, `-X parallel`, batches every table
 read from a regular file at any worker count, so that tests and
 benchmarks exercise the pipeline whatever production scheduling selects.
 Both paths stage the same facts and intern the same values under the same
@@ -106,7 +106,7 @@ can name a FIFO; a stream the caller opened on a regular file is, standard
 input redirected from one among them. Every other input takes the scalar
 consumer before the first window is read, keeping its 64 KiB transport
 and so reporting an error once the transport chunk holding it has
-arrived, with the same builders and commit, and `RELIC_F_PARALLEL_ALWAYS`
+arrived, with the same builders and commit, and `RELIC_UNSTABLE_PARALLEL_ALWAYS`
 does not override this. The scalar transport's own reads may block until
 a chunk has arrived, so this keeps the scalar importer's responsiveness
 rather than promising a report after a few malformed bytes. The manual
@@ -285,7 +285,7 @@ The parts run on the context's existing pool, adopted into the current
 process, when it has more than one worker and the commit's appends hold
 at least `RELIC_COMMIT_PARALLEL_TUPLES` tuples, a measured count below
 which waking the pool costs more than it saves, or whatever their count
-under `RELIC_F_PARALLEL_ALWAYS`, so that small loads exercise the shared
+under `RELIC_UNSTABLE_PARALLEL_ALWAYS`, so that small loads exercise the shared
 path; otherwise they run on the calling thread, and no growth defers.
 The parts are the same either way. A commit never makes a pool. Job
 storage is prepared before the no-failure phase; apply runs to completion
@@ -826,7 +826,7 @@ jobs. Their barriers separate frozen reads from mutation. The calling
 thread owns stream operations, all context reservations, numbering,
 diagnostics, totals and final publication. Disabled-thread builds have one
 worker, and so import through the scalar path unless
-`RELIC_F_PARALLEL_ALWAYS` asks for batches, whose jobs they then execute
+`RELIC_UNSTABLE_PARALLEL_ALWAYS` asks for batches, whose jobs they then execute
 on the caller.
 
 Worker-facing interfaces expose the pure table decoder, const value/store

@@ -1370,8 +1370,8 @@ intern_body_predicates(relic_compiler_t *compiler,
  * makes the body a selection of the atom, `_` a projection, and a repeated
  * variable a selection too, each a relation the atom's is not; and an
  * aggregated variable the atom does not name is a mistake the group rule's
- * check reports.  RELIC_F_GROUP_RULES compiles every body to a group rule,
- * so that the two forms can be compared.
+ * check reports.  RELIC_UNSTABLE_GROUP_RULES compiles every body to a group
+ * rule, so that the two forms can be compared.
  *
  * compile_aggregate() asks this once and records the answer in the kind
  * of predicate the literal folds, which aggregate_is_grouped() reads back.
@@ -1386,7 +1386,7 @@ body_is_relation(const relic_compiler_t *compiler,
 	uint16_t i;
 	uint16_t j;
 
-	if ((compiler->ctx->config.flags & RELIC_F_GROUP_RULES) != 0)
+	if ((compiler->ctx->config.flags & RELIC_UNSTABLE_GROUP_RULES) != 0)
 		return (false);
 
 	if (aggregate->body_length != 1 ||

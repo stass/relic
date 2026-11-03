@@ -229,7 +229,7 @@ a_deferred_round_stops_as_serially(size_t threads)
 	int deferred_status;
 
 	serial = computing_context(0, 0);
-	deferred = computing_context(RELIC_F_PARALLEL_ALWAYS, threads);
+	deferred = computing_context(RELIC_UNSTABLE_PARALLEL_ALWAYS, threads);
 	if (serial != NULL && deferred != NULL) {
 		serial_status = relic_materialize(serial);
 		deferred_status = relic_materialize(deferred);
@@ -615,7 +615,7 @@ counted_result_batches_share_the_failure_prefix(void)
 	for (threads = 1; threads <= 4; threads *= 4) {
 		bzero(&config, sizeof(config));
 		config.threads = threads;
-		config.flags = RELIC_F_PARALLEL_ALWAYS;
+		config.flags = RELIC_UNSTABLE_PARALLEL_ALWAYS;
 		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, "counted result ceiling", "the context creates");

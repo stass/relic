@@ -306,7 +306,7 @@ constant's column, or an extreme over a projection, is possible; each is a
 second way to build a key, for shapes the degree counts, totals and extremes
 that motivate folding in place do not take.
 
-**`RELIC_F_GROUP_RULES`** (`-X group-rules`) compiles every body to a group
+**`RELIC_UNSTABLE_GROUP_RULES`** (`-X group-rules`) compiles every body to a group
 rule. It is a strategy in the testing sense (see
 [design-testing.md](design-testing.md)): its answers must equal the
 default's, and the generated programs produce single-atom bodies often
@@ -360,7 +360,7 @@ written into the operation so the executor has no branch on the strategy:
 * **some key columns**: walk the chain of the index keyed on exactly those
   columns, built when the first plan that needs it is made and kept with
   the relation's other indexes
-  (under `RELIC_F_NO_INDEX`, walk the whole relation and match the key
+  (under `RELIC_UNSTABLE_NO_INDEX`, walk the whole relation and match the key
   columns of each tuple, as a generator with bound columns is scanned
   there, so the reference strategy has no index the optimized one lacks);
 * **every column a key column**: one probe of the full-tuple index, since
@@ -593,7 +593,7 @@ built from positions and a predicate name the program wrote.
 * Which variables are local, and the group rule's columns, name and position
   in the rule table, are functions of the statement's text and the load
   order. Whether a body is folded in place is a function of its text and of
-  `RELIC_F_GROUP_RULES`, never of what the relations hold.
+  `RELIC_UNSTABLE_GROUP_RULES`, never of what the relations hold.
 * A group relation's tuples are inserted in the order the strategy derives
   them, and every function's value, and whether a sum fails, is independent
   of that order. So answers and failures are the same under every strategy

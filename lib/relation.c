@@ -3245,8 +3245,8 @@ relic_bases_apply(relic_t *ctx, relic_base_action_t *actions, size_t count,
  * Whether a commit's appends, holding `appended` tuples, are placed on the
  * context's pool: when there is something to place, the pool has more
  * than one worker, and the appends are large enough to repay waking it,
- * or RELIC_F_PARALLEL_ALWAYS asks however small they are.  A commit makes
- * no pool.
+ * or RELIC_UNSTABLE_PARALLEL_ALWAYS asks however small they are.  A commit
+ * makes no pool.
  */
 static bool
 commit_shares(relic_t *ctx, size_t appended)
@@ -3255,7 +3255,7 @@ commit_shares(relic_t *ctx, size_t appended)
 	    relic_pool_workers(ctx->pool) < 2)
 		return (false);
 
-	return ((ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0 ||
+	return ((ctx->config.flags & RELIC_UNSTABLE_PARALLEL_ALWAYS) != 0 ||
 	    appended >= RELIC_COMMIT_PARALLEL_TUPLES);
 }
 

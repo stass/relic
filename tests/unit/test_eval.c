@@ -189,18 +189,18 @@ struct serial_cache_observation {
 };
 
 /*
- * The RELIC_F_ flags every context a scenario creates is given, which is how
- * main() runs the scenarios under each evaluation strategy in turn.
+ * The configuration flags every context a scenario creates is given, which
+ * is how main() runs the scenarios under each evaluation strategy in turn.
  */
 static unsigned int strategy_flags;
 
 /*
- * RELIC_F_PARALLEL_ALWAYS while main() runs every scenario again with each
- * round's insertions deferred to its end, and zero the first time, and the
- * threads the deferred rounds are shared among.  Every context is given
- * both, whatever else it is given: a deferred round inserts what the serial
- * one does, in the order it does, on any number of threads, so no answer
- * and no counter written below may change.
+ * RELIC_UNSTABLE_PARALLEL_ALWAYS while main() runs every scenario again with
+ * each round's insertions deferred to its end, and zero the first time, and the
+ * threads the deferred rounds are shared among.  Every context is given both,
+ * whatever else it is given: a deferred round inserts what the serial one does,
+ * in the order it does, on any number of threads, so no answer and no counter
+ * written below may change.
  */
 static unsigned int deferral_flags;
 static size_t deferral_threads;
@@ -1037,7 +1037,7 @@ the_counters_record_the_work_done(void)
 	    "path(X, Y) :- edge(X, Y).\n"
 	    "path(X, Z) :- path(X, Y), edge(Y, Z).\n";
 	static const unsigned int textual =
-	    RELIC_F_NO_INDEX | RELIC_F_NO_REORDER;
+	    RELIC_UNSTABLE_NO_INDEX | RELIC_UNSTABLE_NO_REORDER;
 	relic_stats_t stats;
 	relic_t *ctx;
 
@@ -1063,14 +1063,14 @@ the_counters_record_the_work_done(void)
 	}
 	relic_destroy(ctx);
 
-	materialized_counters_are(SCENARIO_STATS, program, RELIC_F_NAIVE,
+	materialized_counters_are(SCENARIO_STATS, program, RELIC_UNSTABLE_NAIVE,
 	    "naive", (counters_t){ .iterations = 3, .derivations = 17,
 	    .inserted = 6, .scanned = 18, .looked_up = 8 });
 	materialized_counters_are(SCENARIO_STATS, program, textual,
 	    "textual semi-naive", (counters_t){ .iterations = 4,
 	    .derivations = 6, .inserted = 6, .scanned = 27, .looked_up = 0 });
 	materialized_counters_are(SCENARIO_STATS, program,
-	    textual | RELIC_F_NAIVE, "textual naive",
+	    textual | RELIC_UNSTABLE_NAIVE, "textual naive",
 	    (counters_t){ .iterations = 3, .derivations = 17, .inserted = 6,
 	    .scanned = 65, .looked_up = 0 });
 }
@@ -1113,8 +1113,9 @@ a_naive_pass_walks_a_chain_one_edge_further(void)
 	    "r(X, Y) :- seed(X, Y).\n"
 	    "r(X, Y) :- s(X), r(X, Z), e(Z, Y).\n";
 
-	materialized_counters_are(SCENARIO_SNAPSHOT, program, RELIC_F_NAIVE,
-	    "naive", (counters_t){ .iterations = 4, .derivations = 17,
+	materialized_counters_are(SCENARIO_SNAPSHOT, program,
+	    RELIC_UNSTABLE_NAIVE, "naive",
+	    (counters_t){ .iterations = 4, .derivations = 17,
 	    .inserted = 5, .scanned = 12, .looked_up = 23 });
 }
 
@@ -1154,7 +1155,8 @@ a_naive_pass_walks_a_chain_one_edge_further(void)
 static void
 a_plan_reads_none_of_its_own_batches(void)
 {
-	static const unsigned int flags = RELIC_F_NAIVE | RELIC_F_NO_REORDER;
+	static const unsigned int flags =
+	    RELIC_UNSTABLE_NAIVE | RELIC_UNSTABLE_NO_REORDER;
 
 	fan_counters_are("a membership test", false, flags,
 	    (counters_t){ .iterations = 3, .derivations = 6 * FAN_OUT,
@@ -1164,7 +1166,7 @@ a_plan_reads_none_of_its_own_batches(void)
 	    (counters_t){ .iterations = 3, .derivations = 6 * FAN_OUT,
 	    .inserted = 3 * FAN_OUT, .scanned = 6 * FAN_OUT,
 	    .looked_up = 5 * FAN_OUT });
-	fan_counters_are("a scan", true, flags | RELIC_F_NO_INDEX,
+	fan_counters_are("a scan", true, flags | RELIC_UNSTABLE_NO_INDEX,
 	    (counters_t){ .iterations = 3, .derivations = 6 * FAN_OUT,
 	    .inserted = 3 * FAN_OUT,
 	    .scanned = 6 * FAN_OUT + 12 * FAN_OUT * FAN_OUT,
@@ -1497,11 +1499,13 @@ static void
 run_everything(void)
 {
 	run_scenarios("the semi-naive fixed point", 0);
-	run_scenarios("the naive fixed point", RELIC_F_NAIVE);
-	run_scenarios("the planner without indexes", RELIC_F_NO_INDEX);
-	run_scenarios("the planner in written order", RELIC_F_NO_REORDER);
+	run_scenarios("the naive fixed point", RELIC_UNSTABLE_NAIVE);
+	run_scenarios("the planner without indexes", RELIC_UNSTABLE_NO_INDEX);
+	run_scenarios("the planner in written order",
+	    RELIC_UNSTABLE_NO_REORDER);
 	run_scenarios("the naive fixed point and the textual planner",
-	    RELIC_F_NAIVE | RELIC_F_NO_INDEX | RELIC_F_NO_REORDER);
+	    RELIC_UNSTABLE_NAIVE | RELIC_UNSTABLE_NO_INDEX |
+	    RELIC_UNSTABLE_NO_REORDER);
 
 	the_counters_record_the_work_done();
 	a_naive_pass_walks_a_chain_one_edge_further();
@@ -1586,8 +1590,8 @@ layered_program(void)
  * work to repay them, and parallel_rounds counts exactly the rounds that
  * were.
  *
- * Under RELIC_F_PARALLEL_ALWAYS every round that may be deferred is, and it
- * is shared only when the context has more than one thread: a program of
+ * Under RELIC_UNSTABLE_PARALLEL_ALWAYS every round that may be deferred is, and
+ * it is shared only when the context has more than one thread: a program of
  * four rounds counts none at one thread and some at two.
  *
  * Without the switch, the chain's rounds are a few tuples each and none is
@@ -1616,7 +1620,7 @@ rounds_are_shared_when_they_repay_it(void)
 	threads_available = false;
 #endif
 
-	ctx = context_threaded(chain, RELIC_F_PARALLEL_ALWAYS, 1);
+	ctx = context_threaded(chain, RELIC_UNSTABLE_PARALLEL_ALWAYS, 1);
 	if (ctx != NULL && relic_materialize(ctx) == 0) {
 		relic_stats(ctx, &stats, sizeof(stats));
 		checkf(stats.parallel_rounds == 0, SCENARIO_SHARED,
@@ -1627,7 +1631,7 @@ rounds_are_shared_when_they_repay_it(void)
 	}
 	relic_destroy(ctx);
 
-	ctx = context_threaded(chain, RELIC_F_PARALLEL_ALWAYS, 2);
+	ctx = context_threaded(chain, RELIC_UNSTABLE_PARALLEL_ALWAYS, 2);
 	if (ctx != NULL && relic_materialize(ctx) == 0) {
 		relic_stats(ctx, &stats, sizeof(stats));
 		checkf((stats.parallel_rounds > 0) == threads_available,
@@ -1829,7 +1833,7 @@ main(void)
 	run_everything();
 
 	fprintf(stderr, "test_eval: every round deferred\n");
-	deferral_flags = RELIC_F_PARALLEL_ALWAYS;
+	deferral_flags = RELIC_UNSTABLE_PARALLEL_ALWAYS;
 	run_everything();
 
 	fprintf(stderr, "test_eval: every round deferred, on %d threads\n",

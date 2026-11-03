@@ -1327,14 +1327,14 @@ read_table(importer_t *importer)
 
 /*
  * Whether the context may stage a table a window at a time (internal.h):
- * never under RELIC_F_NO_BATCH_IMPORT, always under
- * RELIC_F_PARALLEL_ALWAYS, and otherwise when it has
+ * never under RELIC_UNSTABLE_NO_BATCH_IMPORT, always under
+ * RELIC_UNSTABLE_PARALLEL_ALWAYS, and otherwise when it has
  * RELIC_IMPORT_BATCH_WORKERS threads or more.
  */
 static bool
 may_batch(const relic_t *ctx)
 {
-	if ((ctx->config.flags & RELIC_F_NO_BATCH_IMPORT) != 0)
+	if ((ctx->config.flags & RELIC_UNSTABLE_NO_BATCH_IMPORT) != 0)
 		return (false);
 	if (batching_forced(ctx))
 		return (true);
@@ -1377,12 +1377,12 @@ reads_a_regular_file(FILE *stream)
 /*
  * Whether the context stages every table a window at a time, whatever its
  * size and however few workers its pool runs, unless
- * RELIC_F_NO_BATCH_IMPORT forbids it.
+ * RELIC_UNSTABLE_NO_BATCH_IMPORT forbids it.
  */
 static bool
 batching_forced(const relic_t *ctx)
 {
-	return ((ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0);
+	return ((ctx->config.flags & RELIC_UNSTABLE_PARALLEL_ALWAYS) != 0);
 }
 
 /*

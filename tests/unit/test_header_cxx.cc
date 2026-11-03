@@ -11,8 +11,13 @@
  * extern "C" and its macros expand to something C++ accepts.  Neither is
  * visible in a C build, so this translation unit exists to compile: it
  * includes <relic.h> before anything else, with only the include directory on
- * its search path, and calls the entry point so that the linkage the wrapper
+ * its search path, and calls entry points so that the linkage the wrapper
  * promises is exercised rather than merely declared.
+ *
+ * It also declares a variable of the error class's type.  The function and
+ * the type have names of their own, so the variable needs no elaborated
+ * `enum` specifier, which a type sharing the function's name would need in
+ * C++.
  */
 
 #include <relic.h>
@@ -21,6 +26,19 @@ int
 main()
 {
 	const char *linked_version = relic_version();
+	relic_error_class_t error_class;
+	relic_t *ctx;
 
-	return (linked_version == nullptr ? 1 : 0);
+	if (linked_version == nullptr)
+		return (1);
+
+	ctx = relic_create();
+	if (ctx == nullptr)
+		return (1);
+
+	error_class = relic_error_class(ctx);
+	if (relic_destroy(ctx) != 0)
+		return (1);
+
+	return (error_class == RELIC_ERROR_NONE ? 0 : 1);
 }

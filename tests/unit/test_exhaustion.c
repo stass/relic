@@ -1380,7 +1380,7 @@ sweep_mixed_commit(const char *later, size_t facts, bool pooled)
 	bzero(&config, sizeof(config));
 	if (pooled) {
 		config.threads = 2;
-		config.flags = RELIC_F_PARALLEL_ALWAYS;
+		config.flags = RELIC_UNSTABLE_PARALLEL_ALWAYS;
 	}
 	refused = 0;
 	completed = 0;
@@ -1705,7 +1705,7 @@ an_import_refused_once_reads_on_or_fails(void)
 	import.format = RELIC_FORMAT_CSV;
 
 	bzero(&config, sizeof(config));
-	config.flags = RELIC_F_PARALLEL_ALWAYS;
+	config.flags = RELIC_UNSTABLE_PARALLEL_ALWAYS;
 
 	symbols = 0;
 	read_on = 0;
@@ -1798,7 +1798,7 @@ an_import_on_threads_refused_once_reads_on_or_fails(void)
 	import.column_count = 2;
 	import.format = RELIC_FORMAT_TSV;
 	bzero(&config, sizeof(config));
-	config.flags = RELIC_F_PARALLEL_ALWAYS;
+	config.flags = RELIC_UNSTABLE_PARALLEL_ALWAYS;
 	config.threads = POOLED_IMPORT_THREADS;
 
 	stream = pooled_import_table();
@@ -1944,7 +1944,7 @@ a_window_declined_for_memory_is_read_and_windows_go_on(void)
 	import.column_count = 1;
 	import.format = RELIC_FORMAT_TSV;
 	bzero(&config, sizeof(config));
-	config.flags = RELIC_F_PARALLEL_ALWAYS;
+	config.flags = RELIC_UNSTABLE_PARALLEL_ALWAYS;
 	config.threads = 1;
 
 	reached = false;
@@ -3333,38 +3333,43 @@ a_query_that_ran_out_of_memory_can_be_retried(void)
 {
 	static const eval_sweep_t sweeps[] = {
 		{ "from the whole fixed point", "path(n0, X)?", "path", "sink",
-		    RELIC_F_NO_MAGIC, 0, EVAL_CHAIN, EVAL_CLOSURE },
+		    RELIC_UNSTABLE_NO_MAGIC, 0, EVAL_CHAIN, EVAL_CLOSURE },
 		{ "through the Magic rewrite", "path(n0, X), not sink(X)?",
 		    "path$bf", "sink", 0, 0, EVAL_CHAIN - 1, EVAL_CHAIN },
 		{ "through the unfactored Magic rewrite",
 		    "path(n0, X), not sink(X)?", "path$bf", "sink",
-		    RELIC_F_NO_FACTOR, 0, EVAL_CHAIN - 1, EVAL_CLOSURE },
+		    RELIC_UNSTABLE_NO_FACTOR, 0, EVAL_CHAIN - 1, EVAL_CLOSURE },
 		{ "reading what it reaches completely",
 		    "path(X, Y), not sink(Y)?", "path", "sink", 0, 0,
 		    EVAL_CLOSURE - EVAL_CHAIN, EVAL_CLOSURE },
 		{ "through a second search", "path(n0, X), sink(X), sink(Y)?",
 		    "path$bf", "sink$f", 0, 0, 1, EVAL_CHAIN },
 		{ "naming a predicate nothing states", "path(n0, X), ghost(X)?",
-		    "path", "sink", RELIC_F_NO_MAGIC, 0, 0, EVAL_CLOSURE },
+		    "path", "sink", RELIC_UNSTABLE_NO_MAGIC, 0, 0,
+		    EVAL_CLOSURE },
 		{ "negating a predicate nothing states",
 		    "path(n0, X), not ghost(X)?", "path", "sink",
-		    RELIC_F_NO_MAGIC, 0, EVAL_CHAIN, EVAL_CLOSURE },
+		    RELIC_UNSTABLE_NO_MAGIC, 0, EVAL_CHAIN, EVAL_CLOSURE },
 		{ "naming a predicate nothing states, in body order",
 		    "path(n0, X), ghost(X)?", "path", "sink",
-		    RELIC_F_NO_MAGIC | RELIC_F_NO_REORDER, 0, 0, EVAL_CLOSURE },
+		    RELIC_UNSTABLE_NO_MAGIC | RELIC_UNSTABLE_NO_REORDER, 0, 0,
+		    EVAL_CLOSURE },
 		{ "from the whole fixed point, deferred", "path(n0, X)?",
-		    "path", "sink", RELIC_F_NO_MAGIC | RELIC_F_PARALLEL_ALWAYS,
+		    "path", "sink",
+		    RELIC_UNSTABLE_NO_MAGIC | RELIC_UNSTABLE_PARALLEL_ALWAYS,
 		    0, EVAL_CHAIN, EVAL_CLOSURE },
 		{ "through the Magic rewrite, deferred",
 		    "path(n0, X), not sink(X)?", "path$bf", "sink",
-		    RELIC_F_PARALLEL_ALWAYS, 0, EVAL_CHAIN - 1, EVAL_CHAIN },
+		    RELIC_UNSTABLE_PARALLEL_ALWAYS, 0, EVAL_CHAIN - 1,
+		    EVAL_CHAIN },
 		{ "from the whole fixed point, on four threads",
 		    "path(n0, X)?", "path", "sink",
-		    RELIC_F_NO_MAGIC | RELIC_F_PARALLEL_ALWAYS, 4,
+		    RELIC_UNSTABLE_NO_MAGIC | RELIC_UNSTABLE_PARALLEL_ALWAYS, 4,
 		    EVAL_CHAIN, EVAL_CLOSURE },
 		{ "through the Magic rewrite, on four threads",
 		    "path(n0, X), not sink(X)?", "path$bf", "sink",
-		    RELIC_F_PARALLEL_ALWAYS, 4, EVAL_CHAIN - 1, EVAL_CHAIN }
+		    RELIC_UNSTABLE_PARALLEL_ALWAYS, 4, EVAL_CHAIN - 1,
+		    EVAL_CHAIN }
 	};
 	char *program;
 	size_t i;
@@ -3809,7 +3814,7 @@ sweep_compute_retry(const char *program, size_t threads,
 	bool undisturbed;
 
 	bzero(&config, sizeof(config));
-	config.flags = RELIC_F_PARALLEL_ALWAYS;
+	config.flags = RELIC_UNSTABLE_PARALLEL_ALWAYS;
 	config.threads = threads;
 	workers_refused = relic_atomic_size_load(&worker_refusals);
 
@@ -3912,7 +3917,7 @@ static void
 a_late_index_out_of_memory_can_be_retried(void)
 {
 	sweep_late_index_retry(0, 1);
-	sweep_late_index_retry(RELIC_F_PARALLEL_ALWAYS, 4);
+	sweep_late_index_retry(RELIC_UNSTABLE_PARALLEL_ALWAYS, 4);
 }
 
 /*
@@ -4496,7 +4501,8 @@ an_aggregate_out_of_memory_can_be_retried(void)
 {
 	sweep_aggregate_check();
 	sweep_aggregate_query(0, 0, "serially");
-	sweep_aggregate_query(RELIC_F_PARALLEL_ALWAYS, 4, "on four threads");
+	sweep_aggregate_query(RELIC_UNSTABLE_PARALLEL_ALWAYS, 4,
+	    "on four threads");
 }
 
 static void
@@ -4685,7 +4691,7 @@ an_arena_refusal_anywhere_is_reported_once(void)
 {
 	refusing = REFUSE_ARENA;
 	sweep_arena(0, "through the Magic rewrite");
-	sweep_arena(RELIC_F_NO_MAGIC, "from the whole fixed point");
+	sweep_arena(RELIC_UNSTABLE_NO_MAGIC, "from the whole fixed point");
 	refusing = REFUSE_ALLOCATOR;
 }
 
@@ -5074,7 +5080,7 @@ counted_queries_survive_private_refusals(void)
 			for (budget = 0; budget < AGGREGATE_SWEEP && !undisturbed; budget++) {
 				bzero(&config, sizeof(config));
 				config.threads = threads;
-				config.flags = RELIC_F_PARALLEL_ALWAYS;
+				config.flags = RELIC_UNSTABLE_PARALLEL_ALWAYS;
 				ctx = relic_create_config(&config,
 				    sizeof(config));
 				if (ctx == NULL)

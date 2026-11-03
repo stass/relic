@@ -130,7 +130,7 @@ struct relic_diag {
 	void		*callback_ctx;
 	size_t		 error_count;
 	char		 last_error[512];
-	enum relic_error_class last_class;
+	relic_error_class_t last_class;
 	relic_activity_t activity;
 	enum relic_call_error caller_code_error;
 	bool		 has_error;
@@ -642,7 +642,7 @@ void	 relic_diag_note(relic_t *ctx, const relic_location_t *where,
 void	 relic_diag_warning(relic_t *ctx, const relic_location_t *where,
 	    const char *format, ...)
 	    RELIC_PRINTFLIKE(3, 4);
-void	 relic_diag_error(relic_t *ctx, enum relic_error_class error_class,
+void	 relic_diag_error(relic_t *ctx, relic_error_class_t error_class,
 	    const relic_location_t *where, const char *format, ...)
 	    RELIC_PRINTFLIKE(4, 5);
 
@@ -652,7 +652,7 @@ void	 relic_diag_error(relic_t *ctx, enum relic_error_class error_class,
  * diagnostic is reported at all, and that decision has to sit in front of
  * the call rather than inside it.
  */
-void	 relic_diag_verror(relic_t *ctx, enum relic_error_class error_class,
+void	 relic_diag_verror(relic_t *ctx, relic_error_class_t error_class,
 	    const relic_location_t *where, const char *format,
 	    va_list arguments)
 	    RELIC_PRINTFLIKE(4, 0);
@@ -1641,8 +1641,8 @@ int	 relic_staging_commit(relic_staging_t *staging);
  * repays it only shared among threads: a table is staged a window at a
  * time when the context's pool runs at least RELIC_IMPORT_BATCH_WORKERS
  * workers and reading the table's first window does not reach its end,
- * and otherwise a field at a time, as RELIC_F_NO_BATCH_IMPORT asks.
- * RELIC_F_PARALLEL_ALWAYS asks for windows whatever the table and the
+ * and otherwise a field at a time, as RELIC_UNSTABLE_NO_BATCH_IMPORT asks.
+ * RELIC_UNSTABLE_PARALLEL_ALWAYS asks for windows whatever the table and the
  * threads.
  *
  * The table reader is lib/table.h's.
@@ -1860,7 +1860,7 @@ void	 relic_index_link_append(relic_index_t *index,
  * relic_bases_apply() then gives each its tuples, which cannot fail.  The
  * appends are placed a canonical stripe to a part, on the context's pool
  * when it exists with more than one worker and the appends hold at least
- * RELIC_COMMIT_PARALLEL_TUPLES tuples, or RELIC_F_PARALLEL_ALWAYS asks,
+ * RELIC_COMMIT_PARALLEL_TUPLES tuples, or RELIC_UNSTABLE_PARALLEL_ALWAYS asks,
  * and on the calling thread otherwise; a commit makes no pool.  The
  * reservation decides which, and the apply is given its decision.
  * relic_bases_refuse() reports a limit refusing a load, naming the first

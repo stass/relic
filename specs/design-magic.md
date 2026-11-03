@@ -38,7 +38,7 @@ the context's relations already hold the program's fixed point --
 `relic_materialize()` ran, or `-a` was given, and the program has gained no
 rule and no fact since -- because everything the query could read is then
 complete and running its plan directly is cheaper than any rewrite. Nor is
-it rewritten under `-X no-magic` (`RELIC_F_NO_MAGIC`), which materializes the
+it rewritten under `-X no-magic` (`RELIC_UNSTABLE_NO_MAGIC`), which materializes the
 program and runs the plan directly: that is the reference the rewrite is
 tested against.
 
@@ -754,7 +754,7 @@ This limit differs from the others in what exceeding it does. A tuple or
 memory limit fails the operation, since what it refuses cannot be had
 another way; this limit refuses one way of answering a query that has
 another, equivalent one, so it falls back. A caller who wants no rewrite at
-all has `RELIC_F_NO_MAGIC`; one who must bound what answering from the whole
+all has `RELIC_UNSTABLE_NO_MAGIC`; one who must bound what answering from the whole
 program costs has `max_tuples` and `max_memory`, which bound the fallback as
 they bound the rewrite. Raising the limit is for a rewrite worth more than
 the default admits -- a few short rules over a wide predicate and millions

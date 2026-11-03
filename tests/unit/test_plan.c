@@ -69,7 +69,8 @@
 #define	SCENARIO_TEXTS		"each operation builds its strings above a base"
 
 /* The switches that make the default planner the textual one. */
-#define	TEXTUAL_FLAGS		(RELIC_F_NO_INDEX | RELIC_F_NO_REORDER)
+#define	TEXTUAL_FLAGS		\
+	(RELIC_UNSTABLE_NO_INDEX | RELIC_UNSTABLE_NO_REORDER)
 
 /* How many tuples half/2 holds in the divided-assumption scenario. */
 #define	HALF_TUPLES		500
@@ -587,7 +588,7 @@ a_literal_binding_nothing_read_is_a_check(void)
 	size_t r;
 
 	for (r = 0; r < 2; r++) {
-		if (!fixture_load(&fixture, program, RELIC_F_NO_REORDER, true) ||
+		if (!fixture_load(&fixture, program, RELIC_UNSTABLE_NO_REORDER, true) ||
 		    !fixture_plan_rule(&fixture, r, NULL) ||
 		    !kinds_are(&fixture.plan, kinds, 3)) {
 			checkf(false, SCENARIO_EXISTS, "rule %zu is a scan, a "
@@ -663,7 +664,7 @@ a_variable_mentioned_twice_is_not_dead(void)
 	    "s(X, N) :- q(X), e2(X, Y), N = count { f(Y) }.\n";
 	fixture_t fixture;
 
-	if (fixture_load(&fixture, program, RELIC_F_NO_REORDER, true) &&
+	if (fixture_load(&fixture, program, RELIC_UNSTABLE_NO_REORDER, true) &&
 	    fixture_plan_rule(&fixture, 0, NULL)) {
 		check(kinds_are(&fixture.plan, repeated_kinds, 3) &&
 		    fixture.plan.ops[1].u.atom.key_mask == 0 &&
@@ -673,7 +674,7 @@ a_variable_mentioned_twice_is_not_dead(void)
 		check(false, SCENARIO_LIVE, "the repeated rule is planned");
 	fixture_release(&fixture);
 
-	if (fixture_load(&fixture, program, RELIC_F_NO_REORDER, true) &&
+	if (fixture_load(&fixture, program, RELIC_UNSTABLE_NO_REORDER, true) &&
 	    fixture_plan_rule(&fixture, 1, NULL)) {
 		check(kinds_are(&fixture.plan, assigned_kinds, 3) &&
 		    fixture.plan.ops[1].u.atom.key_mask == UINT32_C(2) &&
@@ -683,7 +684,7 @@ a_variable_mentioned_twice_is_not_dead(void)
 		check(false, SCENARIO_LIVE, "the assigned rule is planned");
 	fixture_release(&fixture);
 
-	if (fixture_load(&fixture, program, RELIC_F_NO_REORDER, true) &&
+	if (fixture_load(&fixture, program, RELIC_UNSTABLE_NO_REORDER, true) &&
 	    fixture_plan_rule(&fixture, fixture.ctx->program.rules.count - 1,
 	    NULL)) {
 		check(kinds_are(&fixture.plan, shared_kinds, 4) &&
@@ -807,8 +808,8 @@ a_delta_literal_may_be_a_check_in_one_plan(void)
 }
 
 /*
- * Under RELIC_F_NO_EXISTS no variable is dead and no literal is a check: a
- * literal binding nothing the rule reads is a lookup, `_` matching anything
+ * Under RELIC_UNSTABLE_NO_EXISTS no variable is dead and no literal is a check:
+ * a literal binding nothing the rule reads is a lookup, `_` matching anything
  * and a named variable binding its slot, which nothing reads.
  */
 static void
@@ -831,7 +832,8 @@ without_checks_every_literal_is_planned_as_before(void)
 
 	for (r = 0; r < 2; r++) {
 		if (fixture_load(&fixture, program,
-		    RELIC_F_NO_EXISTS | RELIC_F_NO_REORDER, true) &&
+		    RELIC_UNSTABLE_NO_EXISTS | RELIC_UNSTABLE_NO_REORDER,
+		    true) &&
 		    fixture_plan_rule(&fixture, r, NULL)) {
 			checkf(kinds_are(&fixture.plan, kinds, 3) &&
 			    fixture.plan.ops[1].u.atom.key_mask ==
@@ -1136,8 +1138,8 @@ a_textual_variant_keeps_its_written_order(void)
  *
  * Without indexes a delta placed after other literals would be scanned
  * whole once for each binding that reaches it, where the delta-first plan
- * scans it once, so under RELIC_F_NO_INDEX the variant has the delta-first
- * plan alone, and no recipe.
+ * scans it once, so under RELIC_UNSTABLE_NO_INDEX the variant has the
+ * delta-first plan alone, and no recipe.
  *
  * A fully bound delta literal outranks every other literal under both
  * policies, so both place it first as a MEMBER of the delta, and the one
@@ -1214,7 +1216,7 @@ a_variant_keeps_both_orders(void)
 	}
 	fixture_release(&fixture);
 
-	if (fixture_load(&fixture, program, RELIC_F_NO_INDEX, true) &&
+	if (fixture_load(&fixture, program, RELIC_UNSTABLE_NO_INDEX, true) &&
 	    relic_pred_count(fixture.ctx) <= 8) {
 		check(fixture_plan_variants(&fixture, 1, 2, incomplete,
 		    &family) && family.count == 1 &&
@@ -1480,7 +1482,7 @@ a_delta_literal_must_be_positive(void)
 	static const char *const program = "e(a, b).\n"
 	    "r(X) :- e(X, Y), X != Y.\n";
 	static const unsigned int flag_sets[] = {
-		TEXTUAL_FLAGS, RELIC_F_NO_INDEX, 0
+		TEXTUAL_FLAGS, RELIC_UNSTABLE_NO_INDEX, 0
 	};
 	relic_plan_family_t family;
 	fixture_t fixture;
@@ -1693,9 +1695,10 @@ a_negated_literal_probes_by_its_named_columns(void)
 		{ "not t(_, X, _)", 0, 5, 2, RELIC_PROBE_INDEX },
 		{ "not t(a, _, X)", 0, 2, 5, RELIC_PROBE_INDEX },
 		{ "not t(_, _, _)", 0, 7, 0, RELIC_PROBE_SCAN },
-		{ "not t(X, b, c)", RELIC_F_NO_INDEX, 0, 7,
+		{ "not t(X, b, c)", RELIC_UNSTABLE_NO_INDEX, 0, 7,
 		    RELIC_PROBE_MEMBER },
-		{ "not t(_, X, _)", RELIC_F_NO_INDEX, 5, 0, RELIC_PROBE_SCAN },
+		{ "not t(_, X, _)", RELIC_UNSTABLE_NO_INDEX, 5, 0,
+		    RELIC_PROBE_SCAN },
 		{ "not z", 0, 0, 0, RELIC_PROBE_MEMBER },
 	};
 	enum relic_probe_shape shape;
@@ -2169,7 +2172,7 @@ the_references_change_only_their_choice(void)
 	static const char *const written[] = { "big", "k", "k", "r" };
 	fixture_t fixture;
 
-	if (fixture_load(&fixture, program, RELIC_F_NO_INDEX, true) &&
+	if (fixture_load(&fixture, program, RELIC_UNSTABLE_NO_INDEX, true) &&
 	    fixture_plan_rule(&fixture, 0, NULL)) {
 		check(kinds_are(&fixture.plan, no_index, 4) &&
 		    reads_in_order(&fixture, reordered, 4) &&
@@ -2183,7 +2186,7 @@ the_references_change_only_their_choice(void)
 	}
 	fixture_release(&fixture);
 
-	if (fixture_load(&fixture, program, RELIC_F_NO_REORDER, true) &&
+	if (fixture_load(&fixture, program, RELIC_UNSTABLE_NO_REORDER, true) &&
 	    fixture_plan_rule(&fixture, 0, NULL)) {
 		check(kinds_are(&fixture.plan, no_reorder, 4) &&
 		    reads_in_order(&fixture, written, 4), SCENARIO_REFERENCES,
@@ -2671,8 +2674,8 @@ reference_place_tests(relic_t *ctx, const relic_rule_t *rule,
  * The greedy order computed one step at a time: at every step each positive
  * literal not yet placed is scored against the slots bound so far, in body
  * order, and the first of the best is placed, followed by every test it
- * made ready.  Under RELIC_F_NO_REORDER the first positive literal not yet
- * placed is chosen instead.  This is the definition the planner's passes
+ * made ready.  Under RELIC_UNSTABLE_NO_REORDER the first positive literal not
+ * yet placed is chosen instead.  This is the definition the planner's passes
  * must reproduce, written without them.
  */
 static bool
@@ -2692,7 +2695,7 @@ reference_order(relic_t *ctx, const relic_rule_t *rule, uint64_t bound,
 	if (rule->body_length > sizeof(placed) / sizeof(placed[0]))
 		return (false);
 
-	reorder = (ctx->config.flags & RELIC_F_NO_REORDER) == 0;
+	reorder = (ctx->config.flags & RELIC_UNSTABLE_NO_REORDER) == 0;
 	bzero(placed, sizeof(placed));
 	count = reference_place_tests(ctx, rule, &bound, placed, order, 0);
 
@@ -2853,7 +2856,7 @@ the_ranking_is_the_step_by_step_order(void)
 	state = 20260923;
 	for (i = 0; i < RANKED_PROGRAMS; i++) {
 		check_ranked_program(&state, 0);
-		check_ranked_program(&state, RELIC_F_NO_REORDER);
+		check_ranked_program(&state, RELIC_UNSTABLE_NO_REORDER);
 	}
 }
 
@@ -2890,7 +2893,8 @@ a_plan_keeping_every_binding_derives_distinct_rows(void)
 		{ "p(X) :- f(X), e(X, Y).\n", true },
 	};
 	static const unsigned int flag_sets[] = {
-		0, RELIC_F_NO_INDEX, RELIC_F_NO_REORDER, TEXTUAL_FLAGS,
+		0, RELIC_UNSTABLE_NO_INDEX, RELIC_UNSTABLE_NO_REORDER,
+		TEXTUAL_FLAGS,
 	};
 
 	fixture_t fixture;
@@ -3019,7 +3023,7 @@ a_fold_goes_where_its_key_is_bound(void)
  * The access path of a fold: cardinality for an unkeyed count; the index
  * keyed on the key columns when there are local columns too; a probe when
  * every column is a key column; and a walk whatever the key under
- * RELIC_F_NO_INDEX, as a generator is scanned under it.
+ * RELIC_UNSTABLE_NO_INDEX, as a generator is scanned under it.
  */
 static void
 a_fold_reads_its_group_by_its_key(void)
@@ -3055,7 +3059,7 @@ a_fold_reads_its_group_by_its_key(void)
 		    "a fold keyed on every column probes");
 	fixture_release(&fixture);
 
-	fold = fold_planned(&fixture, keyed, RELIC_F_NO_INDEX, 1);
+	fold = fold_planned(&fixture, keyed, RELIC_UNSTABLE_NO_INDEX, 1);
 	if (fold != NULL)
 		check(fold->access == RELIC_FOLD_SCAN && fold->key_count == 1,
 		    SCENARIO_FOLD_ACCESS, "a keyed fold walks the relation "
@@ -3068,7 +3072,7 @@ a_fold_reads_its_group_by_its_key(void)
  * in, which need not be a prefix, and reaches its group as a positive
  * literal bound in those columns would: through the index keyed on exactly
  * them, which a second fold on the same columns finds built; by a walk
- * matching them under RELIC_F_NO_INDEX; and by a probe when every column
+ * matching them under RELIC_UNSTABLE_NO_INDEX; and by a probe when every column
  * is a key column.  The relation it walks is the atom's own.
  */
 static void
@@ -3105,7 +3109,7 @@ a_fold_in_place_reads_its_key_columns(void)
 	}
 	fixture_release(&fixture);
 
-	fold = fold_planned(&fixture, program, RELIC_F_NO_INDEX, 1);
+	fold = fold_planned(&fixture, program, RELIC_UNSTABLE_NO_INDEX, 1);
 	if (fold != NULL)
 		check(fold->access == RELIC_FOLD_SCAN && fold->key_mask == 0x2,
 		    SCENARIO_FOLD_ACCESS, "without indexes a fold in place "
@@ -3397,7 +3401,8 @@ a_draft_names_its_indexes_and_builds_none(void)
 	size_t i;
 
 	bzero(incomplete, sizeof(incomplete));
-	if (!fixture_load(&fixture, program, RELIC_F_NO_REORDER, false) ||
+	if (!fixture_load(&fixture, program, RELIC_UNSTABLE_NO_REORDER,
+	    false) ||
 	    relic_pred_count(fixture.ctx) > 16) {
 		check(false, SCENARIO_DRAFT, "the program is loaded");
 		fixture_release(&fixture);

@@ -272,7 +272,7 @@ across threads, and the rerun costs a round that was failing anyway.
 
 A component is seeded, planned and brought to its fixed point: in one pass
 when it is not recursive, otherwise by the semi-naive fixed point, or by the
-naive one under `-X naive` (`RELIC_F_NAIVE`).
+naive one under `-X naive` (`RELIC_UNSTABLE_NAIVE`).
 
 **Seeding.** A member's whole base store is inserted into its derived
 relation, in identifier order and in batches, as an `EMIT` inserts. Each fact
@@ -657,7 +657,7 @@ A distinct plan streams only when, in addition:
   limit bounds the relations is answered beside the code that enforces the
   limits, by the test each check applies first, so the two cannot disagree,
   and `-X no-stream` never changes whether a query succeeds under `-l`;
-* **`-X no-stream` (`RELIC_F_NO_STREAM`) is clear.**
+* **`-X no-stream` (`RELIC_UNSTABLE_NO_STREAM`) is clear.**
 
 **A streaming run allocates nothing.** Its plan and state are allocated
 before it runs, every index it looks up was built when it was planned, its

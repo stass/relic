@@ -34,14 +34,14 @@
 
 static const char	*level_name(enum relic_diag_level level);
 static const char	*call_error_text(enum relic_call_error error);
-static enum relic_error_class
-			 class_or_internal(enum relic_error_class error_class);
+static relic_error_class_t
+			 class_or_internal(relic_error_class_t error_class);
 static void		 format_message(char *message, size_t size,
 			    const char *prefix, const char *format,
 			    va_list arguments)
 			    RELIC_PRINTFLIKE(4, 0);
 static void		 record_error(relic_t *ctx,
-			    enum relic_error_class error_class,
+			    relic_error_class_t error_class,
 			    const char *message);
 static void		 deliver(relic_t *ctx, enum relic_diag_level level,
 			    const relic_location_t *where, const char *message);
@@ -73,8 +73,8 @@ level_name(enum relic_diag_level level)
  * recorded error's class and text consistent in any build: NONE means there
  * is no error, and an INTERNAL error's text begins with its prefix.
  */
-static enum relic_error_class
-class_or_internal(enum relic_error_class error_class)
+static relic_error_class_t
+class_or_internal(relic_error_class_t error_class)
 {
 	switch (error_class) {
 	case RELIC_ERROR_REJECTED:
@@ -125,7 +125,7 @@ format_message(char *message, size_t size, const char *prefix,
  * `error_class` its class, which relic_error_class() returns.
  */
 static void
-record_error(relic_t *ctx, enum relic_error_class error_class,
+record_error(relic_t *ctx, relic_error_class_t error_class,
     const char *message)
 {
 	strlcpy(ctx->diag.last_error, message, sizeof(ctx->diag.last_error));
@@ -167,7 +167,7 @@ relic_error(relic_t *ctx)
 	return (ctx->diag.last_error);
 }
 
-enum relic_error_class
+relic_error_class_t
 relic_error_class(relic_t *ctx)
 {
 	if (ctx->diag.caller_code_error != RELIC_CALL_OK)
@@ -218,7 +218,7 @@ relic_diag_warning(relic_t *ctx, const relic_location_t *where,
 }
 
 void
-relic_diag_error(relic_t *ctx, enum relic_error_class error_class,
+relic_diag_error(relic_t *ctx, relic_error_class_t error_class,
     const relic_location_t *where, const char *format, ...)
 {
 	va_list arguments;
@@ -236,7 +236,7 @@ relic_diag_error(relic_t *ctx, enum relic_error_class error_class,
  * handed.
  */
 void
-relic_diag_verror(relic_t *ctx, enum relic_error_class error_class,
+relic_diag_verror(relic_t *ctx, relic_error_class_t error_class,
     const relic_location_t *where, const char *format, va_list arguments)
 {
 	char message[sizeof(ctx->diag.last_error)];

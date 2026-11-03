@@ -238,6 +238,11 @@ import the header as a fact. Why the import enumerators start at one is
 the program knows, for a caller that names a relation without its arity, as
 the tool's export does. Predicates the library generates -- the Magic
 rewrite's and the group predicates of aggregates -- are never reported.
+The answer is a 64-bit set, bit *n* for arity *n*, which holds every arity
+because the language gives a predicate at most 32 arguments: a structural
+limit, since an index names a predicate's columns by a 32-bit mask, not a
+setting. A set is simpler for the caller than an array and a count, and a
+callback would add a re-entry case to a lookup that needs none.
 
 ## Queries and their answers
 
@@ -354,14 +359,16 @@ exactly one place.
   recursion over values it already holds, runs until something stops it.
   There is no step or time limit; a caller that wants a deadline
   interrupts the evaluation from a timer or another thread.
-* **Switches** either select an alternative evaluation strategy, for the
-  differential tests, or ask for a diagnostic; `include/relic.h` lists
-  them. No switch changes an answer, though two strategies may hold
-  different amounts while they compute one -- every strategy switch is
-  such a case -- and so one may meet a limit the other does not. A new
-  diagnostic is a switch bit rather than a field because a library that
-  predates the bit ignores it, where a field it predates and the caller set
-  refuses the context.
+* **Switches** are of two kinds: the stable `RELIC_F_` switches ask for a
+  diagnostic, and the unstable `RELIC_UNSTABLE_` switches select an
+  alternative evaluation strategy for the differential tests
+  ([below](#unstable-strategy-switches)); `include/relic.h` lists them. No
+  switch changes an answer, though two strategies may hold different
+  amounts while they compute one -- every strategy switch is such a case --
+  and so one may meet a limit the other does not. A new diagnostic is a
+  switch bit rather than a field because a library that predates the bit
+  ignores it, where a field it predates and the caller set refuses the
+  context.
 * **Threads** is the size of the worker pool the context owns, the calling
   thread included. Zero and one both mean the calling thread alone; a count
   past the header's maximum refuses the context rather than being lowered,
@@ -389,6 +396,35 @@ used from distinct threads freely.
   so any number of threads may read one result at once, with each other and
   with any call on the context it came from. Destroying it must not overlap
   a read of it.
+
+### Unstable strategy switches
+
+**The strategy switches are declared in the public header and promised to
+no one.** Each exists so that relic's tests, and `relic -X`, can answer a
+program two ways and compare: the naive fixed point against the semi-naive
+one, scans against indexes, the whole program against the Magic rewrite.
+Which strategies are worth comparing changes with the evaluator, so a
+switch must be free to change what it does, become a no-op or disappear in
+any release. The `RELIC_UNSTABLE_` prefix says so at every use, and the
+header and `relic(3)` say that a program must not depend on them.
+
+They stay in `<relic.h>` because the tool reaches the engine only through
+the public header ([library interface](architecture.md#library-interface),
+[design-cli.md](design-cli.md)), and the
+differential suites deliberately test what an embedder gets
+([testing](design-testing.md)). Taking them out would mean either an
+internal header for the tool, which breaks that rule, or a private
+string-keyed entry point, which adds an interface to keep in step with the
+switches. Leaving them as `RELIC_F_` switches would make every one a
+source-compatibility promise, kept for as long as the macro exists. The
+prefix costs nothing to keep: no promise, one rename per switch.
+
+The unstable switches take the high 16 bits of `flags` and the stable
+`RELIC_F_` switches the low 16, so a stable switch is never given a bit an
+unstable one held, and a program built against an older header cannot turn
+one on by setting a bit whose switch has gone. A retired unstable bit may be
+given to another unstable switch, which is within what the prefix promises.
+Unknown bits are ignored either way.
 
 ## Interruption
 
@@ -442,6 +478,11 @@ untrusted program tells "the program is wrong" from "too big for my limits"
 from "out of memory", and a second implementation of the language must
 agree on why a program fails -- so every error also has a **class**, read
 with `relic_error_class()`.
+
+**The class's type is `relic_error_class_t`, an enumeration with no tag.**
+A tag would take the function's name, which C++ lets the function hide, so
+that every variable of the type would need an elaborated `enum` specifier;
+a tag of another name would be a second name for one type.
 
 **A class is what the caller can do about the failure.** The text says
 what happened.
@@ -589,6 +630,22 @@ the literal that spells it, as explain writes it, and a name or string too
 long for the message is cut with a visible `...` rather than silently
 shortened. A caller installing its own callback receives the message
 unescaped and escapes it before writing it to a terminal.
+
+## Type names
+
+A structure the header declares has a `_t` typedef named after its tag, as
+the [style guide](style.md#names-types-and-declarations) asks of every
+structure, and callers use the typedef. An enumeration is named by its tag,
+`enum relic_type`, as the library's internal enumerations are. The error
+class alone is an untagged enumeration with a `_t` typedef, because the
+name its tag would take belongs to its function ([Errors](#errors)), and
+leaving the tag out keeps a later tag possible, where removing one would
+break callers. A typedef for the other enumerations could likewise be added
+in any release without breaking one. A callback type is a function-pointer
+typedef named for its role and ending in `_cb`: `relic_diag_cb`,
+`relic_row_cb`, `relic_explain_cb`. The suffix marks a pointer the library
+calls back through, as `_fn` marks the library's internal function-pointer
+types; the style guide's `_t` rule covers structures, not them.
 
 ## Exported symbols
 

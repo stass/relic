@@ -28,8 +28,9 @@ Fuzzing and the sanitizer builds look for crashes, hangs, leaks and
 undefined behaviour rather than wrong answers.
 
 Every equivalence is reachable through the ordinary interface: the
-`RELIC_F_` configuration flags in `include/relic.h` and their `-X` spellings
-in `relic(1)`. The suites need no private entry point into the library and
+`RELIC_UNSTABLE_` configuration switches in `include/relic.h` and their `-X`
+spellings in `relic(1)`, which the public header declares but does not promise
+([unstable switches](design-api.md#unstable-strategy-switches)). The suites need no private entry point into the library and
 test what an embedder gets; that is why `-X` exists at all (see
 [principles](architecture.md#principles) and
 [command line](architecture.md#command-line)).
@@ -50,7 +51,7 @@ test what an embedder gets; that is why `-X` exists at all (see
 ## The oracle
 
 The naive fixed point lives in the library, in `lib/eval.c`, selected by
-`RELIC_F_NAIVE` (`-X naive`). It runs every rule of a component over
+`RELIC_UNSTABLE_NAIVE` (`-X naive`). It runs every rule of a component over
 everything until a full pass inserts nothing new: a short loop over the same
 per-component pass the semi-naive evaluator uses. It stops only when every
 rule, run over everything, adds nothing, which is the definition of the least
@@ -68,7 +69,7 @@ sanitizer requirements as everything else and stays for the life of the
 project.
 
 The strongest reference is the naive fixed point over the whole program,
-`RELIC_F_NAIVE | RELIC_F_NO_MAGIC`: no deltas, no rewrite, every relation
+`RELIC_UNSTABLE_NAIVE | RELIC_UNSTABLE_NO_MAGIC`: no deltas, no rewrite, every relation
 complete. The eval fuzz target and the derivation-count oracle both use it.
 
 ## Equivalences under test
@@ -519,8 +520,8 @@ Each is a libFuzzer entry point, `LLVMFuzzerTestOneInput()`, in
   covers the lexer, parser, program model, safety and stratification: the
   components most exposed to input nobody chose.
 * **eval** goes on to answer every query three times: as a caller would by
-  default, with every round deferred (`RELIC_F_PARALLEL_ALWAYS`), and with
-  the oracle, `RELIC_F_NAIVE | RELIC_F_NO_MAGIC`. Where two answer a query,
+  default, with every round deferred (`RELIC_UNSTABLE_PARALLEL_ALWAYS`), and with
+  the oracle, `RELIC_UNSTABLE_NAIVE | RELIC_UNSTABLE_NO_MAGIC`. Where two answer a query,
   the answers must be the same set; a difference aborts. The three contexts
   must also accept or refuse the program alike. The default context installs
   an explain callback that discards every line, so the plan renderer runs

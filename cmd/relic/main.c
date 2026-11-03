@@ -747,52 +747,52 @@ static int
 parse_debug(const char *name, options_t *options)
 {
 	if (strcmp(name, "naive") == 0) {
-		options->config.flags |= RELIC_F_NAIVE;
+		options->config.flags |= RELIC_UNSTABLE_NAIVE;
 		return (0);
 	}
 
 	if (strcmp(name, "no-index") == 0) {
-		options->config.flags |= RELIC_F_NO_INDEX;
+		options->config.flags |= RELIC_UNSTABLE_NO_INDEX;
 		return (0);
 	}
 
 	if (strcmp(name, "no-reorder") == 0) {
-		options->config.flags |= RELIC_F_NO_REORDER;
+		options->config.flags |= RELIC_UNSTABLE_NO_REORDER;
 		return (0);
 	}
 
 	if (strcmp(name, "no-magic") == 0) {
-		options->config.flags |= RELIC_F_NO_MAGIC;
+		options->config.flags |= RELIC_UNSTABLE_NO_MAGIC;
 		return (0);
 	}
 
 	if (strcmp(name, "no-stream") == 0) {
-		options->config.flags |= RELIC_F_NO_STREAM;
+		options->config.flags |= RELIC_UNSTABLE_NO_STREAM;
 		return (0);
 	}
 
 	if (strcmp(name, "no-exists") == 0) {
-		options->config.flags |= RELIC_F_NO_EXISTS;
+		options->config.flags |= RELIC_UNSTABLE_NO_EXISTS;
 		return (0);
 	}
 
 	if (strcmp(name, "no-factor") == 0) {
-		options->config.flags |= RELIC_F_NO_FACTOR;
+		options->config.flags |= RELIC_UNSTABLE_NO_FACTOR;
 		return (0);
 	}
 
 	if (strcmp(name, "no-batch-import") == 0) {
-		options->config.flags |= RELIC_F_NO_BATCH_IMPORT;
+		options->config.flags |= RELIC_UNSTABLE_NO_BATCH_IMPORT;
 		return (0);
 	}
 
 	if (strcmp(name, "parallel") == 0) {
-		options->config.flags |= RELIC_F_PARALLEL_ALWAYS;
+		options->config.flags |= RELIC_UNSTABLE_PARALLEL_ALWAYS;
 		return (0);
 	}
 
 	if (strcmp(name, "group-rules") == 0) {
-		options->config.flags |= RELIC_F_GROUP_RULES;
+		options->config.flags |= RELIC_UNSTABLE_GROUP_RULES;
 		return (0);
 	}
 

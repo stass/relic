@@ -201,7 +201,7 @@ fixture_open(fixture_t *fixture, const char *program, const char *scenario)
 	relic_arena_init(&fixture->arena, RELIC_ARENA_ANY_OBJECT);
 
 	bzero(&config, sizeof(config));
-	config.flags = RELIC_F_NO_REORDER;
+	config.flags = RELIC_UNSTABLE_NO_REORDER;
 	fixture->ctx = relic_create_config(&config, sizeof(config));
 	if (fixture->ctx == NULL ||
 	    relic_load_string(fixture->ctx, "text.dl", program) != 0 ||

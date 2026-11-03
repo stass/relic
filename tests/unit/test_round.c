@@ -10,7 +10,7 @@
  * where and as the serial round fails.
  *
  * Every scenario evaluates one program in two contexts: one as the serial
- * evaluator runs it, and one with RELIC_F_PARALLEL_ALWAYS, which defers
+ * evaluator runs it, and one with RELIC_UNSTABLE_PARALLEL_ALWAYS, which defers
  * every round that can be.  The contexts load the same text, so they
  * intern the same values under the same identifiers and number the same
  * predicates alike, and their relations are compared word for word: the
@@ -442,8 +442,9 @@ strings_rounds_merge(size_t threads)
 	byte_string_rules(&failing);
 	snprintf(what, sizeof(what), "strings on %zu thread(s)", threads);
 	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
-	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
-	    0, 0, &deferred_diagnostics);
+	deferred = context_for(failing.bytes,
+	    RELIC_UNSTABLE_PARALLEL_ALWAYS, threads, 0, 0,
+	    &deferred_diagnostics);
 
 	if (serial != NULL && deferred != NULL) {
 		relic_stats(deferred, &loaded, sizeof(loaded));
@@ -500,8 +501,8 @@ rounds_reserve_what_deferred_rounds_inserted(size_t threads)
 	    "reach(Y) :- reach(X), succ(X, Y).\n");
 
 	snprintf(what, sizeof(what), "a chain on %zu thread(s)", threads);
-	deferred = context_for(program.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
-	    0, 0, &diagnostics);
+	deferred = context_for(program.bytes,
+	    RELIC_UNSTABLE_PARALLEL_ALWAYS, threads, 0, 0, &diagnostics);
 	if (deferred != NULL) {
 		checkf(relic_materialize(deferred) == 0, SCENARIO_HISTORY,
 		    "%s: it materializes", what);
@@ -523,15 +524,15 @@ rounds_reserve_what_deferred_rounds_inserted(size_t threads)
  * A round run serially records what it inserted as a deferred round does.
  * A broom -- a handle of BROOM_HANDLE links whose end fans out to
  * BROOM_LEAVES leaves -- is walked on a context with threads and without
- * RELIC_F_PARALLEL_ALWAYS: the walk's rounds along the handle are too small
- * to share and run serially, the round that reaches the fan inserts every
+ * RELIC_UNSTABLE_PARALLEL_ALWAYS: the walk's rounds along the handle are too
+ * small to share and run serially, the round that reaches the fan inserts every
  * leaf serially, being predicted as small as the rounds before it, and the
- * round after it, which reads the leaves, is shared, and expects the
- * leaves its item inserted serially.  The rule copying the leaves into the
- * broom, whose first view is every leaf, is shared too, and having no
- * history expects nothing; so the rounds' expectations sum to the leaves
- * only if the round reading them took its expectation from the serial
- * round before it.  A build without threads shares no round.
+ * round after it, which reads the leaves, is shared, and expects the leaves its
+ * item inserted serially.  The rule copying the leaves into the broom, whose
+ * first view is every leaf, is shared too, and having no history expects
+ * nothing; so the rounds' expectations sum to the leaves only if the round
+ * reading them took its expectation from the serial round before it.  A build
+ * without threads shares no round.
  */
 static void
 rounds_reserve_what_serial_rounds_inserted(void)
@@ -656,7 +657,7 @@ a_lookup_plan_keeps_its_indexed_access(size_t threads)
 /*
  * The rounds of a recursion whose plans are driven by a lookup of a delta,
  * and rounds whose plans test a fact before a lookup, are deferred under
- * RELIC_F_PARALLEL_ALWAYS and derive what the serial evaluator does:
+ * RELIC_UNSTABLE_PARALLEL_ALWAYS and derive what the serial evaluator does:
  *
  *	s(7, Y) :- flag(1), s(7, X), next(X, Y).
  *	s(8, Y) :- flag(1), s(8, X), next(X, Y).
@@ -706,7 +707,7 @@ whole_delta_lookup_plans_agree_with_serial(size_t threads)
 	snprintf(what, sizeof(what), "delta lookups on %zu thread(s)",
 	    threads);
 	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
-	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS,
+	deferred = context_for(failing.bytes, RELIC_UNSTABLE_PARALLEL_ALWAYS,
 	    threads, 0, 0, &deferred_diagnostics);
 	if (serial != NULL && deferred != NULL) {
 		checkf(relic_materialize(serial) == 0 &&
@@ -761,8 +762,9 @@ patterns_fail_as_serially(size_t threads)
 
 	snprintf(what, sizeof(what), "patterns on %zu thread(s)", threads);
 	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
-	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
-	    0, 0, &deferred_diagnostics);
+	deferred = context_for(failing.bytes,
+	    RELIC_UNSTABLE_PARALLEL_ALWAYS, threads, 0, 0,
+	    &deferred_diagnostics);
 
 	if (serial != NULL && deferred != NULL) {
 		serial_status = relic_materialize(serial);
@@ -1038,7 +1040,7 @@ a_reservation_refuses_before_a_round_runs(size_t threads)
 	relic_t *ctx;
 	uint64_t reservations, merged, abandoned;
 
-	ctx = context_for("held(7).", RELIC_F_PARALLEL_ALWAYS, threads,
+	ctx = context_for("held(7).", RELIC_UNSTABLE_PARALLEL_ALWAYS, threads,
 	    0, 0, &diagnostics);
 	if (ctx == NULL)
 		return;
@@ -1255,8 +1257,8 @@ a_deferred_round_inserts_in_serial_order(size_t threads)
 	} strategies[] = {
 		{ "the default planner", 0 },
 		{ "the textual planner",
-		    RELIC_F_NO_INDEX | RELIC_F_NO_REORDER },
-		{ "the naive fixed point", RELIC_F_NAIVE },
+		    RELIC_UNSTABLE_NO_INDEX | RELIC_UNSTABLE_NO_REORDER },
+		{ "the naive fixed point", RELIC_UNSTABLE_NAIVE },
 	};
 	diagnostics_t serial_diagnostics;
 	diagnostics_t deferred_diagnostics;
@@ -1275,7 +1277,7 @@ a_deferred_round_inserts_in_serial_order(size_t threads)
 		serial = context_for(graph.bytes, strategies[i].flags, 0, 0, 0,
 		    &serial_diagnostics);
 		deferred = context_for(graph.bytes, strategies[i].flags |
-		    RELIC_F_PARALLEL_ALWAYS, threads, 0, 0,
+		    RELIC_UNSTABLE_PARALLEL_ALWAYS, threads, 0, 0,
 		    &deferred_diagnostics);
 
 		if (serial != NULL && deferred != NULL) {
@@ -1335,8 +1337,9 @@ a_querys_rewrite_runs_deferred_rounds(size_t threads)
 		    threads);
 		serial = context_for(graph.bytes, 0, 0, 0, 0,
 		    &serial_diagnostics);
-		deferred = context_for(graph.bytes, RELIC_F_PARALLEL_ALWAYS,
-		    threads, 0, 0, &deferred_diagnostics);
+		deferred = context_for(graph.bytes,
+		    RELIC_UNSTABLE_PARALLEL_ALWAYS, threads, 0, 0,
+		    &deferred_diagnostics);
 
 		if (serial != NULL && deferred != NULL) {
 			serial_status = run_query(serial, queries[i],
@@ -1461,7 +1464,7 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	for (limit = first; limit <= last; limit += step) {
 		serial = context_for(program, 0, 0, memory ? 0 : limit,
 		    memory ? limit : 0, &serial_diagnostics);
-		deferred = context_for(program, RELIC_F_PARALLEL_ALWAYS,
+		deferred = context_for(program, RELIC_UNSTABLE_PARALLEL_ALWAYS,
 		    threads, memory ? 0 : limit, memory ? limit : 0,
 		    &deferred_diagnostics);
 		if (serial == NULL || deferred == NULL) {
@@ -1549,7 +1552,7 @@ materializes_under(const char *program, bool merging, size_t limit)
 	relic_t *ctx;
 	bool succeeded;
 
-	ctx = context_for(program, merging ? RELIC_F_PARALLEL_ALWAYS : 0,
+	ctx = context_for(program, merging ? RELIC_UNSTABLE_PARALLEL_ALWAYS : 0,
 	    merging ? 1 : 0, 0, limit, &diagnostics);
 	if (ctx == NULL)
 		return (false);
@@ -1589,7 +1592,8 @@ notes_come_as_serially(size_t threads)
 	serial = context_for(program, RELIC_F_NOTE_MIXED, 0, 0, 0,
 	    &serial_diagnostics);
 	deferred = context_for(program, RELIC_F_NOTE_MIXED |
-	    RELIC_F_PARALLEL_ALWAYS, threads, 0, 0, &deferred_diagnostics);
+	    RELIC_UNSTABLE_PARALLEL_ALWAYS, threads, 0, 0,
+	    &deferred_diagnostics);
 
 	if (serial != NULL && deferred != NULL) {
 		serial_status = relic_materialize(serial);
@@ -1651,8 +1655,9 @@ computing_rounds_merge(size_t threads)
 
 	snprintf(what, sizeof(what), "computing on %zu thread(s)", threads);
 	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
-	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
-	    0, 0, &deferred_diagnostics);
+	deferred = context_for(failing.bytes,
+	    RELIC_UNSTABLE_PARALLEL_ALWAYS, threads, 0, 0,
+	    &deferred_diagnostics);
 
 	if (serial != NULL && deferred != NULL) {
 		relic_stats(deferred, &loaded, sizeof(loaded));
@@ -1782,8 +1787,9 @@ compacted_rounds_agree(size_t threads, size_t max_memory)
 	snprintf(what, sizeof(what), "few values in many columns on %zu "
 	    "thread(s), under %zu bytes", threads, max_memory);
 	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
-	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
-	    0, max_memory, &deferred_diagnostics);
+	deferred = context_for(failing.bytes,
+	    RELIC_UNSTABLE_PARALLEL_ALWAYS, threads, 0, max_memory,
+	    &deferred_diagnostics);
 	if (serial != NULL && deferred != NULL) {
 		loaded_values = compact_values_held(deferred);
 		serial_status = relic_materialize(serial);
@@ -1914,10 +1920,10 @@ errors_fail_as_serially(size_t threads)
 
 		snprintf(what, sizeof(what), "%s on %zu thread(s)",
 		    messages[k], threads);
-		serial = context_for(program->bytes, RELIC_F_NOTE_MIXED, 0, 0, 0,
-		    &serial_diagnostics);
+		serial = context_for(program->bytes, RELIC_F_NOTE_MIXED, 0, 0,
+		    0, &serial_diagnostics);
 		deferred = context_for(program->bytes, RELIC_F_NOTE_MIXED |
-		    RELIC_F_PARALLEL_ALWAYS, threads, 0, 0,
+		    RELIC_UNSTABLE_PARALLEL_ALWAYS, threads, 0, 0,
 		    &deferred_diagnostics);
 
 		if (serial != NULL && deferred != NULL) {
@@ -2003,8 +2009,9 @@ sums_overflow_as_serially(size_t threads)
 
 	snprintf(what, sizeof(what), "%s on %zu thread(s)", message, threads);
 	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
-	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
-	    0, 0, &deferred_diagnostics);
+	deferred = context_for(failing.bytes,
+	    RELIC_UNSTABLE_PARALLEL_ALWAYS, threads, 0, 0,
+	    &deferred_diagnostics);
 
 	if (serial != NULL && deferred != NULL) {
 		serial_status = relic_materialize(serial);
@@ -2064,8 +2071,9 @@ dense_rounds_keep_expression_scratch(size_t threads)
 	    "S = str(X), length(S) > 0.\n");
 	snprintf(what, sizeof(what), "dense on %zu thread(s)", threads);
 	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
-	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
-	    0, 0, &deferred_diagnostics);
+	deferred = context_for(failing.bytes,
+	    RELIC_UNSTABLE_PARALLEL_ALWAYS, threads, 0, 0,
+	    &deferred_diagnostics);
 	if (serial != NULL && deferred != NULL) {
 		serial_status = relic_materialize(serial);
 		deferred_status = relic_materialize(deferred);

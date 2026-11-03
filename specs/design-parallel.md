@@ -328,7 +328,7 @@ history, performs no cursor walks, and keeps the decision's cost bounded
 by the round's number of items. Data skew and merge cost can still make
 the estimate optimistic.
 
-**`-X parallel`** (`RELIC_F_PARALLEL_ALWAYS`) defers every eligible round
+**`-X parallel`** (`RELIC_UNSTABLE_PARALLEL_ALWAYS`) defers every eligible round
 however small and whatever the pool's size, and cuts every item as finely as
 the clamps allow. On one thread it is the deferred path with the merge run
 by the calling thread, which is how a build without threads tests the merge

@@ -62,7 +62,7 @@
  * the chain whose closure they derive, which has CHAIN_LENGTH *
  * (CHAIN_LENGTH + 1) / 2 paths.  A round of the closure is far below the
  * work a round must hold to be shared, so only a context with
- * RELIC_F_PARALLEL_ALWAYS shares one.
+ * RELIC_UNSTABLE_PARALLEL_ALWAYS shares one.
  */
 #define	POOL_THREADS	4
 #define	CHAIN_LENGTH	30
@@ -71,7 +71,7 @@
 /*
  * A graph of LAYERS layers of LAYER_WIDTH nodes, every node of a layer
  * joined to every node of the next, whose middle rounds of paths hold
- * enough work to be shared without RELIC_F_PARALLEL_ALWAYS.
+ * enough work to be shared without RELIC_UNSTABLE_PARALLEL_ALWAYS.
  */
 #define	LAYERS		6
 #define	LAYER_WIDTH	32
@@ -433,7 +433,7 @@ threads_start_and_stop_with_the_pool(void)
 
 	started_blocked = true;
 	started_faults_open = true;
-	ctx = chain_context(RELIC_F_PARALLEL_ALWAYS, POOL_THREADS);
+	ctx = chain_context(RELIC_UNSTABLE_PARALLEL_ALWAYS, POOL_THREADS);
 	if (ctx != NULL) {
 		check(threads_started == 0, SCENARIO_LAZY,
 		    "creating, loading and checking start no thread");
@@ -464,7 +464,7 @@ threads_start_and_stop_with_the_pool(void)
 /*
  * A pool whose threads could not all be started evaluates with those that
  * could, and reports nothing: with none started it is the calling thread
- * alone, and shares no round, though under RELIC_F_PARALLEL_ALWAYS it
+ * alone, and shares no round, though under RELIC_UNSTABLE_PARALLEL_ALWAYS it
  * still defers them.  Without the switch it declines the rounds of the
  * layered graph that a pool with threads shares, and they run serially.
  * Destroying the context joins exactly the threads that started.
@@ -482,7 +482,8 @@ a_refused_start_is_not_an_error(void)
 		threads_joined = 0;
 		diagnostics_reported = 0;
 
-		ctx = chain_context(RELIC_F_PARALLEL_ALWAYS, POOL_THREADS);
+		ctx = chain_context(RELIC_UNSTABLE_PARALLEL_ALWAYS,
+		    POOL_THREADS);
 		if (ctx == NULL)
 			continue;
 
@@ -558,7 +559,7 @@ a_pool_carried_into_a_child_of_fork(void)
 	threads_started = 0;
 	threads_joined = 0;
 
-	ctx = chain_context(RELIC_F_PARALLEL_ALWAYS, POOL_THREADS);
+	ctx = chain_context(RELIC_UNSTABLE_PARALLEL_ALWAYS, POOL_THREADS);
 	if (ctx == NULL)
 		return;
 	if (relic_materialize(ctx) != 0 ||
@@ -854,7 +855,7 @@ a_job_run_alone_runs_no_filler(void)
 /*
  * Without threads a context configured with several evaluates on the
  * calling thread alone: its rounds are not offered to a pool, however
- * large, and under RELIC_F_PARALLEL_ALWAYS they are deferred and merged
+ * large, and under RELIC_UNSTABLE_PARALLEL_ALWAYS they are deferred and merged
  * and none is counted as shared.  With threads the same contexts share
  * their rounds, which the scenarios above check.
  */
@@ -873,7 +874,7 @@ without_threads_rounds_run_alone(void)
 		    "without a pool");
 	relic_destroy(ctx);
 
-	ctx = chain_context(RELIC_F_PARALLEL_ALWAYS, POOL_THREADS);
+	ctx = chain_context(RELIC_UNSTABLE_PARALLEL_ALWAYS, POOL_THREADS);
 	if (ctx != NULL)
 		check(relic_materialize(ctx) == 0 && closure_is_complete(ctx) &&
 		    ctx->pool != NULL && ctx->pool->merged_rounds > 0 &&

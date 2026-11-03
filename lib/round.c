@@ -146,7 +146,7 @@ static size_t	 worker_share(uint64_t expected, size_t workers,
 		    size_t admissible);
 
 /*
- * Under RELIC_F_PARALLEL_ALWAYS every round that may wait is run on the
+ * Under RELIC_UNSTABLE_PARALLEL_ALWAYS every round that may wait is run on the
  * pool, however little it holds and however few workers the pool has, and
  * cut as finely as the pool allows, so that small programs exercise what
  * large ones do.  Otherwise a round is shared only when the context has
@@ -177,7 +177,7 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 	int status;
 
 	bzero(&dense, sizeof(dense));
-	always = (ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0;
+	always = (ctx->config.flags & RELIC_UNSTABLE_PARALLEL_ALWAYS) != 0;
 	if (!always && !round_is_worth_sharing(ctx, round))
 		return (RELIC_ROUND_DECLINED);
 	if (!round_reads_no_target(round))

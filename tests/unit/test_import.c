@@ -87,7 +87,7 @@
  * The context flag that stages a table a window at a time however small
  * it is and however few threads read it.
  */
-#define	BATCHED		RELIC_F_PARALLEL_ALWAYS
+#define	BATCHED		RELIC_UNSTABLE_PARALLEL_ALWAYS
 
 /* The longest transcript and message a test compares. */
 #define	TRANSCRIPT_MAX	1024
@@ -1441,7 +1441,7 @@ every_refusal_reads_nothing(void)
 	}
 
 	for (i = 0;; i++) {
-		enum relic_error_class expected_class;
+		relic_error_class_t expected_class;
 		const char *expected;
 
 		import = good;
@@ -1637,7 +1637,7 @@ a_refused_import_stops_reading(void)
 	refused_import_stops_reading(BATCHED,
 	    2 * RELIC_IMPORT_WINDOW_BYTES + RELIC_IMPORT_READ_CHUNK,
 	    "two windows and a chunk");
-	refused_import_stops_reading(RELIC_F_NO_BATCH_IMPORT,
+	refused_import_stops_reading(RELIC_UNSTABLE_NO_BATCH_IMPORT,
 	    RELIC_IMPORT_READ_CHUNK, "a chunk");
 }
 
@@ -1658,7 +1658,8 @@ a_long_field_stops_reading(void)
 		size_t		 ahead;
 		const char	*unit;
 	} ways[] = {
-		{ RELIC_F_NO_BATCH_IMPORT, RELIC_IMPORT_READ_CHUNK, "a chunk" },
+		{ RELIC_UNSTABLE_NO_BATCH_IMPORT, RELIC_IMPORT_READ_CHUNK,
+		    "a chunk" },
 		{ BATCHED, 2 * RELIC_IMPORT_WINDOW_BYTES +
 		    RELIC_IMPORT_READ_CHUNK, "two windows and a chunk" }
 	};
@@ -1910,8 +1911,8 @@ pairs_table(size_t rows, size_t values, size_t *lengthp)
 /*
  * A table is staged a window at a time only where that repays: on
  * RELIC_IMPORT_BATCH_WORKERS threads or more, and when it is larger than
- * the window its first read fills.  RELIC_F_PARALLEL_ALWAYS batches any
- * table on any number of threads, and RELIC_F_NO_BATCH_IMPORT none.
+ * the window its first read fills.  RELIC_UNSTABLE_PARALLEL_ALWAYS batches any
+ * table on any number of threads, and RELIC_UNSTABLE_NO_BATCH_IMPORT none.
  * Whether an import was batched shows in the windows it staged; the facts
  * are the same either way.
  */
@@ -1938,10 +1939,11 @@ batching_follows_the_threads_and_the_table(void)
 	    false, "a small table on enough threads");
 	check_batching(large, length, 0, RELIC_IMPORT_BATCH_WORKERS, true,
 	    "a large table on enough threads");
-	check_batching(small, sizeof(small) - 1, RELIC_F_PARALLEL_ALWAYS, 1,
-	    true, "a small table on one thread, batching forced");
+	check_batching(small, sizeof(small) - 1,
+	    RELIC_UNSTABLE_PARALLEL_ALWAYS, 1, true,
+	    "a small table on one thread, batching forced");
 	check_batching(large, length,
-	    RELIC_F_PARALLEL_ALWAYS | RELIC_F_NO_BATCH_IMPORT,
+	    RELIC_UNSTABLE_PARALLEL_ALWAYS | RELIC_UNSTABLE_NO_BATCH_IMPORT,
 	    RELIC_IMPORT_BATCH_WORKERS, false,
 	    "a large table on enough threads, batching off");
 
@@ -1975,7 +1977,7 @@ check_batching(const char *table, size_t length, unsigned int flags,
 		return;
 	}
 	if (ctx->config.threads < threads &&
-	    (flags & RELIC_F_PARALLEL_ALWAYS) == 0)
+	    (flags & RELIC_UNSTABLE_PARALLEL_ALWAYS) == 0)
 		batched = false;
 
 	status = import_table(ctx, "table", RELIC_FORMAT_TSV, 0, "e",
@@ -2878,7 +2880,7 @@ compare_memory_limits(window_tally_t *tally)
 		return;
 	}
 	bzero(&config, sizeof(config));
-	config.flags = RELIC_F_NO_BATCH_IMPORT;
+	config.flags = RELIC_UNSTABLE_NO_BATCH_IMPORT;
 	ctx = context_with_capture(&config, &capture);
 	before = 0;
 	after = 0;
@@ -3070,8 +3072,9 @@ compare_batched_import(const batch_case_t *batch, const char *table,
 	import_outcome_t scalar;
 
 	bzero(&batched, sizeof(batched));
-	if (import_first(batch, table, length, RELIC_F_NO_BATCH_IMPORT, 1,
-	    &scalar) != 0 || import_first(batch, table, length, way->flags,
+	if (import_first(batch, table, length,
+	    RELIC_UNSTABLE_NO_BATCH_IMPORT, 1, &scalar) != 0 ||
+	    import_first(batch, table, length, way->flags,
 	    way->threads, &batched) != 0) {
 		check(false, SCENARIO_BATCH, "a context is made and loaded");
 		relic_destroy(scalar.ctx);
@@ -3356,7 +3359,7 @@ check_capped_import(const char *label, const char *table, size_t length)
 	for (w = 0; w < sizeof(batch_ways) / sizeof(batch_ways[0]); w++) {
 		way = &batch_ways[w];
 		if (import_first(&batch, table, length,
-		    RELIC_F_NO_BATCH_IMPORT, 1, &scalar) != 0) {
+		    RELIC_UNSTABLE_NO_BATCH_IMPORT, 1, &scalar) != 0) {
 			check(false, SCENARIO_RECORD_CAP,
 			    "a context is made and loaded");
 			relic_destroy(scalar.ctx);
@@ -3438,7 +3441,7 @@ windows_go_on_after_a_declined_window(void)
 		    w++) {
 			way = &batch_ways[w];
 			if (import_first(&batch, table, length,
-			    RELIC_F_NO_BATCH_IMPORT, 1, &scalar) != 0) {
+			    RELIC_UNSTABLE_NO_BATCH_IMPORT, 1, &scalar) != 0) {
 				check(false, SCENARIO_RESUME,
 				    "a context is made and loaded");
 				relic_destroy(scalar.ctx);
@@ -3527,7 +3530,7 @@ compare_failed_reads(const char *label, const char *table, size_t fail_at)
 	size_t w;
 	int made;
 
-	made = import_failing(table, fail_at, RELIC_F_NO_BATCH_IMPORT, 1,
+	made = import_failing(table, fail_at, RELIC_UNSTABLE_NO_BATCH_IMPORT, 1,
 	    &scalar);
 	if (made > 0) {
 		printf("skip: %s: no stream with a read function of the "
@@ -3779,7 +3782,7 @@ import_chunk_from_file(const char *chunk, const char *name,
 
 	bzero(outcome, sizeof(*outcome));
 	bzero(&config, sizeof(config));
-	config.flags = RELIC_F_NO_BATCH_IMPORT;
+	config.flags = RELIC_UNSTABLE_NO_BATCH_IMPORT;
 	config.threads = 1;
 	outcome->ctx = context_with_capture(&config, &outcome->capture);
 	if (outcome->ctx == NULL)

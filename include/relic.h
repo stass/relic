@@ -152,7 +152,8 @@ RELIC_EXPORT const char *relic_version(void);
  * relic_error_class(), and may call relic_interrupt(), which a signal
  * handler or another thread may call too.  Any other call on the same
  * context is refused: it fails with -1 or NULL and changes nothing,
- * relic_destroy() and the callback installations included, and relic_error() and relic_error_class() describe the refusal
+ * relic_destroy() and the callback installations included, and
+ * relic_error() and relic_error_class() describe the refusal
  * until the next error or until the operation the caller code runs inside
  * returns; the diagnostic callback is not called for it.  A comparison of a
  * value the context does not hold, or statistics asked for in too small a
@@ -229,11 +230,11 @@ typedef struct relic_config relic_config_t;
  * large enough for every rewrite that specializes the program rather than
  * multiplies it; any other value replaces the default, and none removes
  * the limit.  A rewrite outgrowing it, set or not, is abandoned with a
- * warning and the query answered from the whole program, as it would be
- * with RELIC_F_NO_MAGIC: the rewrite is an optimization, and must not
- * decide whether a query is answered.  The whole program never answers
- * differently, but it may meet an undefined arithmetic result, a string too
- * long or an invalid pattern the rewrite would not have evaluated, and fail;
+ * warning and the query answered from the whole program: the rewrite is an
+ * optimization, and must not decide whether a query is answered.  The whole
+ * program never answers differently, but it may meet an undefined arithmetic
+ * result, a string too long or an invalid pattern the rewrite would not have
+ * evaluated, and fail;
  * `max_tuples` and `max_memory` bound it as they bound the rewrite.  The
  * limit bounds the rewrite, not what its rules derive.
  *
@@ -277,15 +278,12 @@ typedef struct relic_config relic_config_t;
  * uses those that could be.  A library built without threads accepts the
  * field and runs everything on the calling thread.
  *
- * `flags` holds RELIC_F_ switches.  Most select an alternative evaluation
- * strategy that must give the same answers as the default; they exist so
- * that strategies can be compared against one another, and are not meant
- * for ordinary use.  RELIC_F_NOTE_MIXED instead asks for a diagnostic the
- * library does not otherwise give.  No switch changes an answer, though two
- * strategies may hold different amounts while they compute one, and so one
- * may meet a limit the other does not.  Bits no switch defines are ignored,
- * so a library that predates a switch runs a caller that sets it as if it
- * were not set.
+ * `flags` holds switches: the RELIC_F_ switches, which are part of the
+ * interface, and the RELIC_UNSTABLE_ switches below, which are not.  No
+ * switch changes an answer, though two strategies may hold different amounts
+ * while they compute one, and so one may meet a limit the other does not.
+ * Bits no switch defines are ignored, so a library that predates a switch
+ * runs a caller that sets it as if it were not set.
  *
  * relic_create_config() reads the structure by the rule for structures
  * passed with their size, so a release may add a limit at its end.
@@ -305,44 +303,16 @@ struct relic_config {
 #define	RELIC_THREADS_MAX	256
 
 /*
- * Evaluate recursion with the naive fixed point, which reruns every rule of
- * a recursive component against whole relations until nothing new is
- * derived, instead of the semi-naive one, which after the first round
- * reruns only the rule variants reading what the previous round derived.
- * The naive evaluator is kept as the reference the default is tested
- * against.
- */
-#define	RELIC_F_NAIVE	0x0001u
-
-/*
- * Plan every literal with bound arguments, short of all of them, as a scan
- * matching those arguments rather than a lookup through an index on them.
- * No secondary index is built.
- */
-#define	RELIC_F_NO_INDEX	0x0002u
-
-/*
- * Plan each rule's positive literals in the order they are written, after
- * the one reading a semi-naive delta, rather than choosing at each step the
- * one expected to produce the fewest tuples.
- */
-#define	RELIC_F_NO_REORDER	0x0004u
-
-/*
- * Answer every query from the fixed point of the whole program instead of
- * through its Magic Sets rewrite, which derives only what the query's
- * bindings can reach.
- */
-#define	RELIC_F_NO_MAGIC	0x0008u
-
-/*
  * Report, as a RELIC_NOTE pointing at the comparison, the first comparison
  * in each rule that ordered values of different types, that applied an
  * arithmetic operator to a symbol or a string, or that called a string
- * function with an argument of a type it does not take.  Such a comparison
- * is false and filters its binding out, which is the language's rule
- * rather than a mistake, so it is reported only when asked for; the note
- * is how a column holding types nobody meant to mix is discovered.
+ * function with an argument of a type it does not take, and the first
+ * aggregate whose rows were not all integers for a sum, or not all of one
+ * type for a minimum or a maximum.  Such a comparison is false and filters
+ * its binding out, and such an aggregate has no value, which is the
+ * language's rule rather than a mistake, so it is reported only when asked
+ * for; the note is how a column holding types nobody meant to mix is
+ * discovered.
  *
  * A rule of the program is reported at most once for the life of the
  * context, and the rules a Magic Sets rewrite generates from it count as
@@ -352,13 +322,54 @@ struct relic_config {
 #define	RELIC_F_NOTE_MIXED	0x0010u
 
 /*
+ * The RELIC_UNSTABLE_ switches select an alternative evaluation strategy that
+ * gives the same answers as the default, so that relic's tests and the
+ * tool's -X option can compare the strategies with one another.  They are
+ * not part of the interface: any release may change what one does, make it
+ * do nothing or remove it, and a program must not depend on them.  They take
+ * the high 16 bits of `flags` and the RELIC_F_ switches the low 16, so a
+ * stable switch never takes a bit an unstable one held.
+ */
+
+/*
+ * Evaluate recursion with the naive fixed point, which reruns every rule of
+ * a recursive component against whole relations until nothing new is
+ * derived, instead of the semi-naive one, which after the first round
+ * reruns only the rule variants reading what the previous round derived.
+ * The naive evaluator is kept as the reference the default is tested
+ * against.
+ */
+#define	RELIC_UNSTABLE_NAIVE	0x00010000u
+
+/*
+ * Plan every literal with bound arguments, short of all of them, as a scan
+ * matching those arguments rather than a lookup through an index on them.
+ * No secondary index is built.
+ */
+#define	RELIC_UNSTABLE_NO_INDEX	0x00020000u
+
+/*
+ * Plan each rule's positive literals in the order they are written, the one
+ * reading a semi-naive delta included, rather than choosing at each step the
+ * one expected to produce the fewest tuples.
+ */
+#define	RELIC_UNSTABLE_NO_REORDER	0x00040000u
+
+/*
+ * Answer every query from the fixed point of the whole program instead of
+ * through its Magic Sets rewrite, which derives only what the query's
+ * bindings can reach.
+ */
+#define	RELIC_UNSTABLE_NO_MAGIC	0x00080000u
+
+/*
  * Gather every query's answer in its answer relation before delivering a
  * row, as a query whose derivations may repeat must be answered, even one
  * whose plan derives each row once and could deliver its rows as it derives
  * them.  The rows are the same and come in the same order, which tests show
  * by answering both ways.
  */
-#define	RELIC_F_NO_STREAM	0x0020u
+#define	RELIC_UNSTABLE_NO_STREAM	0x00100000u
 
 /*
  * Defer every round of evaluation whose rules read none of the relations it
@@ -374,7 +385,7 @@ struct relic_config {
  * table's size and number of threads.  The relations, the values and every
  * count of work come out as they do without it.
  */
-#define	RELIC_F_PARALLEL_ALWAYS	0x0040u
+#define	RELIC_UNSTABLE_PARALLEL_ALWAYS	0x00200000u
 
 /*
  * Compile the body of every aggregate into a rule of its own, whose relation
@@ -384,7 +395,7 @@ struct relic_config {
  * the copies are tuples held and counted, so a limit may refuse one of the
  * two ways and not the other.
  */
-#define	RELIC_F_GROUP_RULES	0x0080u
+#define	RELIC_UNSTABLE_GROUP_RULES	0x00400000u
 
 /*
  * Plan a positive literal that binds nothing the rest of its rule reads --
@@ -394,7 +405,7 @@ struct relic_config {
  * once.  The answers and the relations are the same; the rule derives each
  * of its tuples as many more times as the literal matches.
  */
-#define	RELIC_F_NO_EXISTS	0x0100u
+#define	RELIC_UNSTABLE_NO_EXISTS	0x00800000u
 
 /*
  * Rewrite every predicate a query reads on demand by the ordinary Magic
@@ -406,19 +417,20 @@ struct relic_config {
  * answers are the same; the ordinary rewrite derives every answer of every
  * state its demand reaches.
  */
-#define	RELIC_F_NO_FACTOR	0x0200u
+#define	RELIC_UNSTABLE_NO_FACTOR	0x01000000u
 
 /*
  * Import every table a field at a time, typing and interning each field
  * and staging each record as it is read, whatever the number of threads
- * and even with RELIC_F_PARALLEL_ALWAYS, as a small table or one read on
- * fewer than eight threads normally is.  An eligible regular-file table is
+ * and even with RELIC_UNSTABLE_PARALLEL_ALWAYS, as a small table or one read
+ * on fewer than eight threads normally is.  An eligible regular-file table is
  * otherwise read a window of records at a time, with each window decoded
  * and its values and records checked before any is interned or staged.
  * The facts, the values and the identifiers they are given are the same,
- * and so is a failed import's message and what it leaves interned.
+ * and so is a failed import's message and what it leaves interned, but a
+ * refused import may have read less of its stream.
  */
-#define	RELIC_F_NO_BATCH_IMPORT	0x0400u
+#define	RELIC_UNSTABLE_NO_BATCH_IMPORT	0x02000000u
 
 /*
  * Create a context.  relic_create_config() reads `config`, which is `size`
@@ -757,6 +769,10 @@ RELIC_EXPORT int relic_import_path(relic_t *ctx, const char *path,
  * one it means, or that the name has several.  Predicates the library
  * generates are never reported.
  *
+ * The set fits in 64 bits because the language gives a predicate at most 32
+ * arguments, a structural limit and not a setting: the library's indexes
+ * name a predicate's columns by a 32-bit mask.
+ *
  * The program is checked first, as by every operation that uses it, so that
  * every rule loaded has named its predicates.  Returns 0, or -1 with the
  * reason reported and *arities untouched: the check failed, `name` or
@@ -798,7 +814,7 @@ RELIC_EXPORT int relic_check(relic_t *ctx);
  * derive.  Returns 0, or -1 with the reason already reported.
  *
  * Recursion is evaluated semi-naively unless the context was created with
- * RELIC_F_NAIVE; the two give the same relations.
+ * RELIC_UNSTABLE_NAIVE; the two give the same relations.
  *
  * The program is checked first and must pass.  Evaluation fails when a
  * configured limit refuses a tuple, when memory runs out, when an
@@ -815,8 +831,8 @@ RELIC_EXPORT int relic_check(relic_t *ctx);
  * negation is not monotone, and a fact loaded later can make false a tuple
  * derived before it.  A query is answered from the materialized program
  * when it is current, and otherwise through its Magic rewrite, or under
- * RELIC_F_NO_MAGIC by materializing the program first, so a caller that
- * only queries need not call this.
+ * RELIC_UNSTABLE_NO_MAGIC by materializing the program first, so a caller
+ * that only queries need not call this.
  */
 RELIC_EXPORT int relic_materialize(relic_t *ctx);
 
@@ -1180,10 +1196,11 @@ RELIC_EXPORT const char *relic_error(relic_t *ctx);
  *
  * A value is never renumbered or removed.  A class added later takes the
  * next value, and a caller meeting one it does not know treats it as a
- * failure it cannot classify.  In C++ the function's name hides the tag, so
- * a variable of the type is declared as `enum relic_error_class`.
+ * failure it cannot classify.  The enumeration has no tag, so that its one
+ * name is the typedef in C and C++ alike: relic_error_class() owns the name
+ * a tag would take, and in C++ a function hides a tag of its own name.
  */
-enum relic_error_class {
+typedef enum {
 	RELIC_ERROR_NONE,
 	RELIC_ERROR_REJECTED,
 	RELIC_ERROR_EVALUATION,
@@ -1193,7 +1210,7 @@ enum relic_error_class {
 	RELIC_ERROR_INTERRUPTED,
 	RELIC_ERROR_ARGUMENT,
 	RELIC_ERROR_INTERNAL
-};
+} relic_error_class_t;
 
 /*
  * The class of the error relic_error() returns the text of, and
@@ -1204,7 +1221,7 @@ enum relic_error_class {
  * context was busy is RELIC_ERROR_ARGUMENT.  Like relic_error(), it may be
  * called from a callback.
  */
-RELIC_EXPORT enum relic_error_class relic_error_class(relic_t *ctx);
+RELIC_EXPORT relic_error_class_t relic_error_class(relic_t *ctx);
 
 #ifdef __cplusplus
 }

@@ -570,7 +570,9 @@ See [design-parallel.md](design-parallel.md) and
 ### Library interface
 
 `<relic.h>` is the whole interface, and the tool reaches the engine only
-through it. A caller creates a context, loads text or imports tables, adds
+through it. The header also declares the `RELIC_UNSTABLE_` strategy
+switches, which it does not promise
+([unstable switches](design-api.md#unstable-strategy-switches)). A caller creates a context, loads text or imports tables, adds
 facts, prepares queries and runs them into a row callback or collects them
 into a result, and reads diagnostics through a callback or the last error
 and its class. A collected result owns the bytes of its symbols and
@@ -654,7 +656,7 @@ and runs the query over it. It is used:
 * when the caller asks for it, with `-a` or
   `relic_materialize()`;
 * when the rewrite is turned off, with `-X no-magic` or
-  `RELIC_F_NO_MAGIC`;
+  `RELIC_UNSTABLE_NO_MAGIC`;
 * when the relations already hold the program's fixed point, so the query
   reads them directly without a rewrite;
 * when the rewrite outgrows its limit: it is abandoned with a warning and

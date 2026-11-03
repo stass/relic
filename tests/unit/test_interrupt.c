@@ -502,7 +502,7 @@ a_streamed_answer_stops_after_its_rows(void)
 /*
  * A gathered answer, interrupted from its row callback, is looked at
  * before each row, so the delivery stops after the row that interrupted
- * it.  RELIC_F_NO_STREAM gathers every answer.
+ * it.  RELIC_UNSTABLE_NO_STREAM gathers every answer.
  */
 static void
 a_gathered_answer_stops_between_rows(unsigned int flags, size_t threads)
@@ -511,7 +511,8 @@ a_gathered_answer_stops_between_rows(unsigned int flags, size_t threads)
 	relic_query_t *query;
 	relic_t *ctx;
 
-	ctx = chain_context(flags | RELIC_F_NO_STREAM, threads, &interrupter);
+	ctx = chain_context(flags | RELIC_UNSTABLE_NO_STREAM, threads,
+	    &interrupter);
 	if (ctx == NULL)
 		return;
 
@@ -598,7 +599,7 @@ a_callback_that_stops_the_rows_succeeds(unsigned int flags)
 	checkf(relic_query_run(ctx, query, interrupt_and_stop,
 	    &interrupter) == 0 && interrupter.rows == 1, SCENARIO_STOPPED,
 	    "%s, the run should succeed after one row, not after %zu with "
-	    "\"%s\"", (flags & RELIC_F_NO_STREAM) != 0 ? "gathered" :
+	    "\"%s\"", (flags & RELIC_UNSTABLE_NO_STREAM) != 0 ? "gathered" :
 	    "streamed", interrupter.rows, interrupter.last_error);
 
 	relic_query_destroy(query);
@@ -738,7 +739,7 @@ main(void)
 	for (i = 0; i < sizeof(noting) / sizeof(noting[0]); i++) {
 		an_interrupt_from_a_note_fails(noting[i], 0, 0);
 		an_interrupt_from_a_note_fails(noting[i],
-		    RELIC_F_PARALLEL_ALWAYS, 4);
+		    RELIC_UNSTABLE_PARALLEL_ALWAYS, 4);
 	}
 
 	/*
@@ -746,14 +747,14 @@ main(void)
 	 * the interrupt and abandons the round, and the calling thread
 	 * reports it from the round's serial run, as it would at one thread.
 	 */
-	an_interrupted_materialization_fails(RELIC_F_PARALLEL_ALWAYS, 4);
-	an_interrupted_query_fails(RELIC_F_PARALLEL_ALWAYS, 4);
-	a_gathered_answer_stops_between_rows(RELIC_F_PARALLEL_ALWAYS, 4);
+	an_interrupted_materialization_fails(RELIC_UNSTABLE_PARALLEL_ALWAYS, 4);
+	an_interrupted_query_fails(RELIC_UNSTABLE_PARALLEL_ALWAYS, 4);
+	a_gathered_answer_stops_between_rows(RELIC_UNSTABLE_PARALLEL_ALWAYS, 4);
 
 	an_interrupt_between_operations_is_forgotten();
 	a_streamed_answer_stops_after_its_rows();
 	a_callback_that_stops_the_rows_succeeds(0);
-	a_callback_that_stops_the_rows_succeeds(RELIC_F_NO_STREAM);
+	a_callback_that_stops_the_rows_succeeds(RELIC_UNSTABLE_NO_STREAM);
 	an_interrupted_collection_returns_no_result();
 	interrupting_no_context_does_nothing();
 	another_thread_stops_an_evaluation();

@@ -306,7 +306,7 @@ compare(const char *scenario, const char *program, const char *query,
 	relic_stats_t serial, parallel;
 	size_t workers;
 
-	if (!open_context(&reference, program, RELIC_F_NO_MAGIC, 1)) {
+	if (!open_context(&reference, program, RELIC_UNSTABLE_NO_MAGIC, 1)) {
 		check(false, scenario, "the reference loads");
 		return;
 	}
@@ -314,7 +314,7 @@ compare(const char *scenario, const char *program, const char *query,
 	    "the ordinary query succeeds");
 	bzero(&serial, sizeof(serial));
 	for (workers = 1; workers <= 8; workers *= 2) {
-		if (!open_context(&actual, program, RELIC_F_PARALLEL_ALWAYS, workers)) {
+		if (!open_context(&actual, program, RELIC_UNSTABLE_PARALLEL_ALWAYS, workers)) {
 			check(false, scenario, "the counted context loads");
 			break;
 		}
@@ -505,7 +505,7 @@ prepared_queries_keep_definitions(void)
 
 	program = numbered_program(513, rules);
 	check(open_context(&actual, program, 0, 4) &&
-	    open_context(&reference, program, RELIC_F_NO_MAGIC, 1),
+	    open_context(&reference, program, RELIC_UNSTABLE_NO_MAGIC, 1),
 	    "prepared counted queries", "both contexts load");
 	check(answer_query(&reference, "q(K,N)?") == 0,
 	    "prepared counted queries", "both contexts publish the same initial values");
@@ -555,7 +555,7 @@ configuration_guards(void)
 		if (i == 2)
 			observed.ctx->config.max_magic = SIZE_MAX;
 		if (i == 3)
-			observed.ctx->config.flags |= RELIC_F_NO_MAGIC;
+			observed.ctx->config.flags |= RELIC_UNSTABLE_NO_MAGIC;
 		if (i == 4)
 			check(relic_materialize(observed.ctx) == 0,
 			    "configuration guards", "the program materializes");
@@ -591,14 +591,15 @@ ordinary_publication_preserves_diagnostics(void)
 	for (test = 0; test < 2; test++) {
 		program = numbered_program(4001, definitions[test]);
 		check(open_context(&reference, program,
-		    RELIC_F_NO_MAGIC | RELIC_F_NOTE_MIXED, 1),
+		    RELIC_UNSTABLE_NO_MAGIC | RELIC_F_NOTE_MIXED, 1),
 		    "ordinary diagnostic publication", "the ordinary context loads");
 		expected = answer_query(&reference, "q(K,N)?");
 		check(expected == (test == 0 ? 0 : -1) && (reference.notes != 0) == (test == 0),
 		    "ordinary diagnostic publication", "the fixture produces a note or a late error");
 		for (workers = 1; workers <= 4; workers *= 4) {
 			check(open_context(&actual, program,
-			    RELIC_F_NOTE_MIXED | RELIC_F_PARALLEL_ALWAYS, workers),
+			    RELIC_F_NOTE_MIXED |
+			    RELIC_UNSTABLE_PARALLEL_ALWAYS, workers),
 			    "ordinary diagnostic publication", "the counted context loads");
 			check(answer_query(&actual, "q(K,N)?") == expected &&
 			    same_answer(&actual, &reference) &&
@@ -646,8 +647,9 @@ high_cardinality_stays_counted(void)
 	program = numbered_program(160000,
 	    "p(X,K) :- s(X), K = X + 100000.\n"
 	    "g(X,K) :- p(X,K). q(X,K,N) :- g(X,K), N = count { p(X,K) }.\n");
-	check(open_context(&actual, program, RELIC_F_PARALLEL_ALWAYS, 8) &&
-	    open_context(&reference, program, RELIC_F_NO_MAGIC, 1),
+	check(open_context(&actual, program,
+	    RELIC_UNSTABLE_PARALLEL_ALWAYS, 8) &&
+	    open_context(&reference, program, RELIC_UNSTABLE_NO_MAGIC, 1),
 	    "high-cardinality keys", "both contexts load");
 	check(answer_query(&actual, "q(X,K,N)?") == 0 &&
 	    answer_query(&reference, "q(X,K,N)?") == 0 && same_answer(&actual, &reference),
@@ -669,10 +671,10 @@ shared_refusal_retries_the_same_consumer(void)
 	program = numbered_program(12000,
 	    "p(X,K) :- s(X), K = cat(\"key\", str(X mod 17)).\n"
 	    "g(K) :- p(_,K). q(K,N) :- g(K), N = count { p(X,K) }.\n");
-	check(open_context(&reference, program, RELIC_F_NO_MAGIC, 1) &&
+	check(open_context(&reference, program, RELIC_UNSTABLE_NO_MAGIC, 1) &&
 	    answer_query(&reference, "q(K,N)?") == 0,
 	    "shared refusal", "the ordinary reference answers");
-	check(open_context(&actual, program, RELIC_F_PARALLEL_ALWAYS, 4),
+	check(open_context(&actual, program, RELIC_UNSTABLE_PARALLEL_ALWAYS, 4),
 	    "shared refusal", "the counted context loads");
 	force_shared_decline = true;
 	forced_declines = 0;
@@ -695,7 +697,7 @@ shared_storage_and_actual_work(void)
 	char *program;
 
 	program = numbered_program(12000, rules);
-	check(open_context(&actual, program, RELIC_F_PARALLEL_ALWAYS, 4),
+	check(open_context(&actual, program, RELIC_UNSTABLE_PARALLEL_ALWAYS, 4),
 	    "shared counted work", "the context loads");
 	require_other_worker = true;
 	inspect_retained_keys = true;
@@ -716,7 +718,7 @@ shared_storage_and_actual_work(void)
 
 	program = numbered_program(12000,
 	    "p(I) :- s(I). g() :- p(_). q(N) :- g(), N = count { p(I) }.\n");
-	check(open_context(&actual, program, RELIC_F_PARALLEL_ALWAYS, 4),
+	check(open_context(&actual, program, RELIC_UNSTABLE_PARALLEL_ALWAYS, 4),
 	    "nullary counted work", "the context loads");
 	require_other_worker = inspect_retained_keys = true;
 	check(answer_query(&actual, "q(N)?") == 0,
@@ -945,7 +947,7 @@ early_stop_keeps_all_count_values(void)
 	    "p(I,K) :- s(I,K). g(K) :- p(_,K).\n"
 	    "q(K,N) :- g(K), N = count { p(I,K) }.\n", sizeof(program) - used);
 	for (workers = 1; workers <= 4; workers *= 4) {
-		check(open_context(&observed, program, RELIC_F_PARALLEL_ALWAYS, workers),
+		check(open_context(&observed, program, RELIC_UNSTABLE_PARALLEL_ALWAYS, workers),
 		    "completed counted delivery", "the symbol-only context loads");
 		query = relic_query_prepare(observed.ctx, NULL, "q(K,N)?");
 		check(query != NULL && observed.ctx->values.integer_count == 0,
@@ -983,7 +985,7 @@ reported_expression_errors_remain_final(void)
 	    "p(I,K) :- s(I), K = 100000 / (130 - I).\n"
 	    "g(K) :- p(_,K). q(K,N) :- g(K), N = count { p(I,K) }.\n");
 	for (workers = 1; workers <= 4; workers *= 4) {
-		check(open_context(&observed, program, RELIC_F_PARALLEL_ALWAYS, workers),
+		check(open_context(&observed, program, RELIC_UNSTABLE_PARALLEL_ALWAYS, workers),
 		    "reported error callback", "the context loads");
 		observed.interrupt_error = true;
 		check(answer_query(&observed, "q(K,N)?") == -1 && observed.errors == 1 &&
@@ -1022,7 +1024,8 @@ note_callbacks_interrupt_without_replay(void)
 	    "g(K) :- p(_,K). q(K,N) :- g(K), N = count { p(I,K) }.\n");
 	for (workers = 1; workers <= 4; workers *= 4) {
 		check(open_context(&observed, program,
-		    RELIC_F_NOTE_MIXED | RELIC_F_PARALLEL_ALWAYS, workers),
+		    RELIC_F_NOTE_MIXED | RELIC_UNSTABLE_PARALLEL_ALWAYS,
+		    workers),
 		    "note callback interruption", "the context loads");
 		observed.interrupt_note = true;
 		check(answer_query(&observed, "q(K,N)?") == -1 && observed.count == 0 &&
