@@ -609,15 +609,15 @@ a_pool_carried_into_a_child_of_fork(void)
 	    threads_joined);
 }
 
-/* A job's part: count the part into the job's tally. */
+/* A job's part: count the part into the job's tally, which workers share. */
 static void
 count_part(void *argument, size_t part RELIC_UNUSED,
     size_t worker_index RELIC_UNUSED)
 {
-	size_t *tally;
+	relic_atomic_size_t *tally;
 
 	tally = argument;
-	(*tally)++;
+	relic_atomic_size_add_relaxed(tally, 1);
 }
 
 /*
@@ -630,10 +630,11 @@ static void
 a_job_dispatched_in_a_child_of_fork(void)
 {
 	relic_pool_t *pool;
-	size_t tally;
+	relic_atomic_size_t tally;
 	pid_t child;
 	int status;
 
+	relic_atomic_size_init(&tally, 0);
 	if (relic_pool_create(&pool, POOL_THREADS, 1) != 0) {
 		check(false, SCENARIO_FORK, "a pool is created");
 		return;
@@ -643,12 +644,28 @@ a_job_dispatched_in_a_child_of_fork(void)
 		relic_pool_free(pool);
 		return;
 	}
+
+	/*
+	 * Run a job before forking so that no worker is still starting.  A
+	 * sanitizer's thread start-up holds the dynamic linker's lock while
+	 * it waits for the sanitizer's allocator lock, and its fork handler
+	 * takes the allocator lock and then waits for the linker's lock: a
+	 * fork that overlaps a start-up deadlocks.  A worker counts itself
+	 * into a job only from worker_main, after the sanitizer's start-up,
+	 * and a finished job's barrier waits for every worker to do so.
+	 */
+	relic_pool_for(pool, 64, count_part, &tally);
+	checkf(relic_atomic_size_load_acquire(&tally) == 64, SCENARIO_FORK,
+	    "the parent's job runs every part, not %zu",
+	    relic_atomic_size_load_acquire(&tally));
+
 	child = fork();
 	if (child == 0) {
 		alarm(FORK_SECONDS);
-		tally = 0;
+		relic_atomic_size_init(&tally, 0);
 		relic_pool_for(pool, 64, count_part, &tally);
-		_exit(tally == 64 && pool->worker_count == 1 ? 0 : 1);
+		_exit(relic_atomic_size_load_acquire(&tally) == 64 &&
+		    pool->worker_count == 1 ? 0 : 1);
 	}
 	check(child > 0, SCENARIO_FORK, "a child is forked");
 
