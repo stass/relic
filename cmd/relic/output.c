@@ -117,7 +117,7 @@ static int	 give_buffer(output_t *out, const char *name,
 		    enum output_format format, bool sorted);
 static void	 hex_escape(const unsigned char *bytes, size_t length,
 		    char *piece, size_t size);
-static bool	 open_pending(output_t *out);
+static bool	 begin_file(output_t *out);
 static size_t	 format_decimal(int64_t integer,
 		    char text[INTEGER_TEXT_MAX]);
 static void	 merge_sort(const row_order_t *order,
@@ -210,13 +210,13 @@ output_attach(output_t *out, FILE *stream, const char *name,
 }
 
 int
-output_attach_file(output_t *out, const char *path,
+output_attach_file(output_t *out, output_file_t *file,
     enum output_format format, const char *predicate, bool sorted)
 {
-	if (give_buffer(out, path, format, sorted) != 0)
+	if (give_buffer(out, file->path, format, sorted) != 0)
 		return (-1);
 
-	out->pending_path = path;
+	out->file = file;
 	out->predicate = predicate;
 
 	return (0);
@@ -245,13 +245,13 @@ give_buffer(output_t *out, const char *name, enum output_format format,
 }
 
 /*
- * Open the file an output was attached to, created or truncated, when it is
- * not yet open, so that what reaches it can.  Returns whether the output
- * has a stream.  A file that cannot be opened is reported, and the output
- * then fails as though a write had: nothing more reaches it.
+ * Begin the file an output was attached to, truncating it, when nothing has
+ * been written to it yet, so that what reaches it can.  Returns whether the
+ * output has a stream.  A file that cannot be begun is reported, and the
+ * output then fails as though a write had: nothing more reaches it.
  */
 static bool
-open_pending(output_t *out)
+begin_file(output_t *out)
 {
 	FILE *stream;
 
@@ -260,16 +260,13 @@ open_pending(output_t *out)
 	if (out->stream != NULL)
 		return (true);
 
-	stream = fopen(out->pending_path, "w");
+	stream = output_file_begin(out->file, out->program_name);
 	if (stream == NULL) {
-		report_error(out->program_name, "cannot open %s: %s",
-		    out->pending_path, strerror(errno));
 		out->write_failed = true;
 		return (false);
 	}
 
 	use_stream(out, stream);
-	out->pending_path = NULL;
 
 	return (true);
 }
@@ -348,7 +345,7 @@ write_block(FILE *stream, const char *bytes, size_t length)
 }
 
 /*
- * Hand the bytes the buffer holds to the stream, which begin_query() opened
+ * Hand the bytes the buffer holds to the stream, which begin_query() began
  * before the first of them was gathered, and empty the buffer whether or
  * not they were written: put_byte() and put_bytes() rely on a flush leaving
  * room.
@@ -971,8 +968,8 @@ write_value(output_t *out, const relic_value_t *value)
  * Write what comes before a query's first row: a blank line after an earlier
  * query's results, or the bracket that opens a JSON document.  Called when
  * the first row is written, or when the query ends with none, so that a
- * query that fails writes nothing.  A file not yet open is opened here, so
- * that whether it is a terminal is known before any value is written.
+ * query that fails writes nothing.  A file not yet written is begun here,
+ * so that whether it is a terminal is known before any value is written.
  */
 static void
 begin_query(output_t *out)
@@ -981,7 +978,7 @@ begin_query(output_t *out)
 		return;
 	out->begun = true;
 
-	(void)open_pending(out);
+	(void)begin_file(out);
 
 	if (out->format == OUTPUT_JSON)
 		put_byte(out, '[');
@@ -1324,8 +1321,8 @@ output_prompted(output_t *out)
  * once it has been sorted, and an interrupt while it is written stops it
  * between two rows in the same way.
  *
- * An output whose file is not yet open opens it when the first row is
- * written, or once the query has succeeded without any, so a query that
+ * An output whose file is not yet written truncates it when the first row
+ * is written, or once the query has succeeded without any, so a query that
  * fails before its first row leaves the file as it was.
  */
 int
@@ -1396,24 +1393,22 @@ output_flush(output_t *out)
 int
 output_close(output_t *out, bool succeeded)
 {
-	FILE *stream;
 	bool failed;
 
 	if (out->buffer == NULL)
 		return (0);
 
 	failed = output_flush(out) != 0;
-	if (succeeded && !failed && !open_pending(out))
+	if (succeeded && !failed && !begin_file(out))
 		failed = true;
 	free(out->buffer);
 	out->buffer = NULL;
-	stream = out->stream;
 	out->stream = NULL;
 
-	if (stream == NULL || stream == stdout)
+	if (out->file == NULL)
 		return (failed ? -1 : 0);
 
-	if (fclose(stream) != 0 && !failed) {
+	if (output_file_close(out->file) != 0 && !failed) {
 		report_error(out->program_name, "cannot close %s: %s",
 		    out->name, strerror(errno));
 		failed = true;

@@ -432,15 +432,55 @@ Within the tool's [phases](design-cli.md#phases):
 
 ## Writing a file
 
-**A file is opened when its first row is written**, created or truncated as
-`-o`'s is, or once its query has succeeded with no rows, which creates an
-empty file. The library delivers no row until everything in the evaluation
-that can fail has succeeded, so an export whose evaluation fails -- at a
-limit, for memory -- leaves its file as it was, as does a run that fails
-before exporting. What can fail after the first row is the writing itself,
-reported naming the file, and an interrupt, which outside a session ends
-the process; either leaves the rows written before it. Closing a file whose
-writes succeeded can fail, and that fails the export too.
+**Every file a run writes is opened before anything is read**, the `-o`
+file and each export's, for writing, created when it does not exist and
+truncated by none of it. Opening first is what lets a run tell which file
+each output is from the file it has open (below), and reports a file that
+cannot be opened, in a missing or read-only directory, before any query
+runs. `-c` writes nothing and opens no output; `-n` opens no `-o` file.
+
+**A file is truncated when its first row is written**, or once its query
+has succeeded with no rows, which leaves it empty. The library delivers no
+row until everything in the evaluation that can fail has succeeded, so an
+export whose evaluation fails -- at a limit, for memory -- leaves an
+existing file as it was, as does a run that fails before exporting. The
+file is cut where its descriptor stands, which is its start for every file
+the run opens afresh. On macOS and the BSDs a path naming a descriptor,
+such as `/dev/stdout`, opens the descriptor's own file description, whose
+offset is past whatever was written before the run; cutting it at its start
+would destroy that and leave a hole of zero bytes up to where the rows are
+written, so it is cut at its offset, and not at all when it is open for
+appending.
+
+**A file the run did not write is closed when the run ends**, after
+everything else: one that existed is as the run found it, and one this run
+created is removed, so a failed run leaves no empty files behind. Only an
+`O_EXCL` open is taken to have created a file, since it succeeds only when
+it is what creates it. A path that exists but does not open without
+`O_CREAT` is a symbolic link to a file that does not exist; the link is
+followed by hand and the name it gives is created with `O_EXCL` in turn, so
+a file another process creates there meanwhile is opened as existing rather
+than taken for the run's. The file is removed by the name the path resolves
+to, since `unlink(2)` of a symbolic link would remove the link. That name's
+directory is opened, and the name compared and removed within it, only when
+it is still the file the run has open, so neither a file another process put
+there since nor a directory replaced by a link meanwhile sends the removal
+to a file the run did not create. A run ended by a signal before it writes
+leaves a file it created there, empty. What can fail after the first row is
+the writing itself, reported naming the file, and an interrupt, which
+outside a session ends the process; either leaves the rows written before
+it. Closing a file whose writes succeeded can fail, and that fails the run,
+reported once whichever part of the tool closes it.
+
+**Opening an output never waits.** It is opened with `O_NONBLOCK`, cleared
+once it is open, and with `O_NOCTTY`, so a terminal named as an output does
+not become the process's controlling terminal. A FIFO that no process reads
+yet does not open without blocking, which `stat(2)` tells apart from another
+file refusing the same way; it is opened when the first row is
+written to it, which waits for a reader there, as writing to it would
+anyway. A run that fails before then never waits for one. Such a FIFO has no
+identity, like any FIFO, and a regular file found at its path by then could
+be one the run reads, so it is refused.
 
 **There is no atomic rename.** Writing a temporary file and renaming it
 over the target would spare a reader the partial file, at the price of
@@ -457,35 +497,38 @@ or the session reads it. Every output truncates its file, so one that is an
 input would replace it -- `-o q.dl q.dl` would replace the program with its
 own answers -- and one that is another output would destroy what that one
 wrote. The command line is refused as a usage error, before anything is
-read or written, naming the output and the file it is.
+read or written, naming the output and the file it is; the outputs opened
+for the check are closed as a run that wrote nothing closes them.
 
 **Files are compared by identity, not by spelling**, in one check over every
 pair of an output with any file listed before it, so that each new kind of
-input or output joins one list rather than a set of pairwise rules. An
-existing regular file is its device and inode, which `x`, `./x`, a symbolic
-link and a hard link all share, read by `fstat(2)` of standard input or
-output or of the file a path opens. Opening the path, rather than only
-`stat(2)` of it, is what makes `/dev/stdin` and `/dev/fd/1` the files their
-descriptors hold: on macOS `stat(2)` of such a path gives the inode with
-the device of `/dev`. Only a path `stat(2)` says is a regular file is
-opened, without blocking or truncating, so opening it has no effect of its
-own; it is opened for writing when the run writes it, since a path naming a
-descriptor opens only in a mode the descriptor allows. A file that does not exist yet is the device and
-inode of the directory it would be created in, with its final name there,
-so `-o x` and `-O dl:p=./x` are caught before either creates it. Anything
-else has no identity and conflicts with nothing: a device or a FIFO holds no
-stored data an output could replace, so any number of outputs may write
-`/dev/null`, and a directory or a path that cannot be examined fails when it
-is opened.
+input or output joins one list rather than a set of pairwise rules. A
+regular file is its device and inode, which `x`, `./x`, a symbolic link and
+a hard link all share. An output's are read by `fstat(2)` of the descriptor
+it was opened at, and standard input's and output's of theirs, so what is
+compared is the file each one writes or reads, not a prediction of it. A
+file that did not exist before the run has its identity too, because
+opening it created it, once, whatever names lead there: `-o x` and
+`-O dl:p=./x`, a link to a directory and the directory, a symbolic link
+whose target did not exist and the target, and on a file system that
+ignores case or normalizes Unicode, two names that differ only in that,
+are one file. An input, which the run opens only later, is identified when
+the outputs have been opened: by `fstat(2)` of the file its path opens,
+once `stat(2)` says it is a regular file, opened for reading without
+blocking, so opening it has no effect of its own. Opening the path, rather
+than only `stat(2)` of it, is what makes `/dev/stdin` and `/dev/fd/0` the
+files their descriptors hold: on macOS `stat(2)` of such a path gives the
+inode with the device of `/dev`. An input that names an output's new file
+is that file, and is refused. Anything else has no identity and conflicts
+with nothing: a device or a FIFO holds no stored data an output could
+replace, so any number of outputs may write `/dev/null`; a directory fails
+as an output when it is opened, and an input that does not exist or cannot
+be examined fails when it is read.
 
 The check is a guard against mistakes on the command line, not a security
-boundary, and it falls short in three places. Two names of a file that does
-not exist yet are compared by their bytes, so on a file system that ignores
-case or normalizes Unicode, `Out.tsv` and `out.tsv` are two new files. A symbolic link to a file
-that does not exist is identified by the link's own name, so an output
-through it and an output to its target are not caught. And the files are
-identified when the command line is read, so a file another process
-creates, links or renames before the run opens it is not seen.
+boundary. Every output is the file the run has open, but an input is
+identified before it is read, so a file another process links or renames
+over an input in between is not seen.
 
 ## Failure paths and limits
 

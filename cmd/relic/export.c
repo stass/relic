@@ -6,6 +6,7 @@
 
 #include "config.h"
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,8 +42,8 @@ static relic_query_t *prepare_export(invocation_t *invocation,
 static int	 resolve_arity(invocation_t *invocation,
 		    const export_operand_t *export, unsigned int *arityp);
 static int	 write_export(invocation_t *invocation,
-		    const prepared_export_t *export, bool sorted,
-		    size_t number);
+		    const prepared_export_t *export, output_file_t *file,
+		    bool sorted, size_t number);
 
 /*
  * Every export is attempted even after one fails, so that one run reports
@@ -243,9 +244,12 @@ exports_write(invocation_t *invocation, bool sorted)
 {
 	size_t i;
 
+	/* Both are one per -O, in command-line order. */
+	assert(invocation->files->export_count == invocation->export_count);
+
 	for (i = 0; i < invocation->export_count; i++) {
-		if (write_export(invocation, &invocation->exports[i], sorted,
-		    i + 1) != 0)
+		if (write_export(invocation, &invocation->exports[i],
+		    &invocation->files->exports[i], sorted, i + 1) != 0)
 			return (-1);
 	}
 
@@ -253,18 +257,19 @@ exports_write(invocation_t *invocation, bool sorted)
 }
 
 /*
- * Write one export: the answer to its query, into its file.  The file is
- * created or truncated only when the first row is written, or once the
- * query has succeeded with none: the library delivers no row until
+ * Write one export: the answer to its query, into `file`, opened when the
+ * run began.  The file is truncated only when the first row is written, or
+ * once the query has succeeded with none: the library delivers no row until
  * everything in the evaluation that can fail has succeeded, so an export
  * whose evaluation fails -- at a limit, for memory -- leaves its file as it
- * was.  A write that fails is reported naming the file.  The invocation's
+ * was, or removes it when the run created it.  A write that fails is
+ * reported naming the file.  The invocation's
  * output is this one while the query runs, so that a diagnostic follows the
  * rows written before it, and is given back after.
  */
 static int
 write_export(invocation_t *invocation, const prepared_export_t *export,
-    bool sorted, size_t number)
+    output_file_t *file, bool sorted, size_t number)
 {
 	const export_operand_t *operand;
 	output_t *previous;
@@ -274,7 +279,7 @@ write_export(invocation_t *invocation, const prepared_export_t *export,
 
 	operand = export->operand;
 	output_init(&output, invocation->program_name, invocation->ctx);
-	if (output_attach_file(&output, operand->path, operand->format,
+	if (output_attach_file(&output, file, operand->format,
 	    operand->format == OUTPUT_DL ? operand->predicate : NULL,
 	    sorted) != 0)
 		return (-1);

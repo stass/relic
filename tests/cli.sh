@@ -54,8 +54,9 @@ if [ "$(cat "$work/out.txt")" != "$expected" ]; then
 	fail "-o wrote '$(cat "$work/out.txt")', expected '$expected'"
 fi
 
-# The output file is opened only once the program and its queries are known
-# to be valid, so a run that fails validation leaves an existing file alone.
+# The output file is opened before the program is read but truncated only
+# once results reach it, so a run that fails validation leaves an existing
+# file alone.
 echo kept > "$work/out.txt"
 status=0
 "$RELIC" -o "$work/out.txt" -q 'X > 1?' "$work/graph.dl" 2>/dev/null ||
@@ -67,12 +68,16 @@ if [ "$(cat "$work/out.txt")" != "kept" ]; then
 	fail "a run that failed validation replaced the output file"
 fi
 
-# -c evaluates nothing, so it writes nothing, and -o does not replace the
-# file it names.
+# -c evaluates nothing, so it writes nothing, and -o neither replaces the
+# file it names nor creates one.
 echo kept > "$work/out.txt"
 "$RELIC" -c -o "$work/out.txt" "$work/graph.dl"
 if [ "$(cat "$work/out.txt")" != "kept" ]; then
 	fail "-c replaced the -o file"
+fi
+"$RELIC" -c -o "$work/never.txt" "$work/graph.dl"
+if [ -e "$work/never.txt" ]; then
+	fail "-c created the -o file"
 fi
 
 # An output file that cannot be created is an error, not a usage error.
@@ -83,8 +88,8 @@ if [ "$status" -ne 1 ]; then
 	fail "an unwritable -o exited $status, expected 1"
 fi
 
-# The -o file is created or truncated only once results reach it, so a run
-# whose evaluation fails at a limit leaves an existing file as it was.
+# The -o file is truncated only once results reach it, so a run whose
+# evaluation fails at a limit leaves an existing file as it was.
 echo precious > "$work/keep.txt"
 status=0
 "$RELIC" -o "$work/keep.txt" -l tuples=2 "$work/graph.dl" 2>/dev/null ||
@@ -116,7 +121,8 @@ fi
 # however the command line spells it: as written, through ./, a symbolic or
 # a hard link, standard input or output redirected to it, and a file that
 # does not exist yet named twice.  Each is a usage error that writes
-# nothing, and every file is left as it was.
+# nothing, and every file is left as it was, or, created to be compared,
+# removed.
 cp "$work/graph.dl" "$work/q.dl"
 ln -s q.dl "$work/q-symlink.dl"
 ln "$work/q.dl" "$work/q-hardlink.dl"
@@ -209,6 +215,156 @@ esac
 # write to /dev/null.
 "$RELIC" -o /dev/null -O tsv:path=/dev/null -O dl:path=/dev/null \
     "$work/q.dl" || fail "two outputs to /dev/null were refused"
+
+# expect_one_new_file ABSENT ARGUMENTS...: a run over q.dl writing the
+# outputs ARGUMENTS name, two names of one file that does not exist yet, is
+# refused as a usage error and leaves no file at ABSENT, the one it would
+# have created.
+expect_one_new_file() {
+	absent=$1
+	shift
+	status=0
+	"$RELIC" "$@" "$work/q.dl" >/dev/null 2>&1 || status=$?
+	if [ "$status" -ne 2 ]; then
+		fail "two names of one new file exited $status, expected 2: $*"
+	fi
+	if [ -e "$absent" ]; then
+		fail "a refused run left $absent behind: $*"
+	fi
+}
+
+# Two names of one file that does not exist yet are caught however they
+# differ: through a symbolic link to the directory, through a symbolic link
+# whose target does not exist yet and that target, and, on a file system
+# that ignores case, by case alone.
+mkdir "$work/d1"
+ln -s d1 "$work/d2"
+expect_one_new_file "$work/d1/x.txt" \
+    -o "$work/d1/x.txt" -O "dl:path=$work/d2/x.txt"
+ln -s made.txt "$work/dangling"
+expect_one_new_file "$work/made.txt" \
+    -o "$work/dangling" -O "dl:path=$work/made.txt"
+if [ ! -L "$work/dangling" ]; then
+	fail "a refused run removed the symbolic link it was given"
+fi
+touch "$work/CaseProbe"
+if [ -e "$work/caseprobe" ]; then
+	expect_one_new_file "$work/Case.txt" \
+	    -o "$work/Case.txt" -O "dl:path=$work/case.txt"
+fi
+
+# An output that cannot be opened is reported before anything is evaluated:
+# no plan under -e, no row on standard output, the one error and exit 1.
+# expect_unopenable WHAT ARGUMENTS...: the run over graph.dl writing the
+# output ARGUMENTS name, which WHAT describes, fails that way.
+expect_unopenable() {
+	what=$1
+	shift
+	status=0
+	"$RELIC" -e "$@" "$work/graph.dl" >"$work/rows.txt" \
+	    2>"$work/diagnostic.txt" || status=$?
+	if [ "$status" -ne 1 ]; then
+		fail "$what exited $status, expected 1"
+	fi
+	if [ -s "$work/rows.txt" ]; then
+		fail "$what was reported after rows were written"
+	fi
+	if [ "$(wc -l < "$work/diagnostic.txt")" -ne 1 ] ||
+	    ! grep -q 'cannot open' "$work/diagnostic.txt"; then
+		fail "$what was reported as '$(cat "$work/diagnostic.txt")'"
+	fi
+}
+
+expect_unopenable "an -o in a missing directory" -o "$work/missing/out.txt"
+expect_unopenable "an export in a missing directory" \
+    -O "tsv:edge=$work/missing/edge.tsv"
+if [ "$(id -u)" -ne 0 ]; then
+	mkdir "$work/read-only"
+	chmod 555 "$work/read-only"
+	expect_unopenable "an -o in a read-only directory" \
+	    -o "$work/read-only/out.txt"
+fi
+
+# A run that fails before writing an output removes the file it created for
+# it, through a symbolic link or a chain of them included, and leaves an
+# existing file as it was: whether validation fails or evaluation does.
+echo precious > "$work/keep.tsv"
+status=0
+"$RELIC" -q 'X > 1?' -o "$work/new.txt" -O "tsv:path=$work/keep.tsv" \
+    "$work/graph.dl" 2>/dev/null || status=$?
+if [ "$status" -ne 1 ]; then
+	fail "an invalid query exited $status, expected 1"
+fi
+ln -s made-through-hops.tsv "$work/hop1"
+ln -s hop1 "$work/hop2"
+status=0
+"$RELIC" -l tuples=2 -o "$work/dangling" -O "tsv:edge=$work/new.tsv" \
+    -O "tsv:path=$work/keep.tsv" -O "tsv:path=$work/hop2" \
+    "$work/graph.dl" 2>/dev/null || status=$?
+if [ "$status" -ne 1 ]; then
+	fail "a run over the tuple limit exited $status, expected 1"
+fi
+for created in new.txt new.tsv made.txt made-through-hops.tsv; do
+	if [ -e "$work/$created" ]; then
+		fail "a failed run left the $created it created"
+	fi
+done
+if [ "$(cat "$work/keep.tsv")" != "precious" ]; then
+	fail "a failed run replaced an export's existing file"
+fi
+
+# -n writes no rows, so its -o file is neither opened nor created.
+"$RELIC" -n -o "$work/never.txt" "$work/graph.dl" ||
+    fail "-n with an -o file failed"
+if [ -e "$work/never.txt" ]; then
+	fail "-n created the -o file"
+fi
+
+# A path naming a descriptor that the system opens as the descriptor itself,
+# sharing its offset and its O_APPEND, as /dev/stdout does on macOS and the
+# BSDs, is written from where the descriptor stands: neither what was
+# written before the run nor a file appended to is cut.
+case "$(uname -s)" in
+Darwin | *BSD | DragonFly)
+	printf 'header\nb\nc\n' > "$work/after-header.expected"
+	{
+		echo header
+		"$RELIC" -o /dev/stdout "$work/graph.dl"
+	} > "$work/after-header.txt"
+	if ! cmp -s "$work/after-header.expected" "$work/after-header.txt"; then
+		fail "-o /dev/stdout after a header wrote" \
+		    "'$(od -c "$work/after-header.txt")'"
+	fi
+	echo header > "$work/appended.txt"
+	"$RELIC" -o /dev/stdout "$work/graph.dl" >> "$work/appended.txt"
+	if ! cmp -s "$work/after-header.expected" "$work/appended.txt"; then
+		fail "-o /dev/stdout appended '$(od -c "$work/appended.txt")'"
+	fi
+	;;
+esac
+
+# A FIFO that no one reads yet holds a run up only once rows are written to
+# it: a run that fails before then ends without waiting for a reader, and a
+# reader that comes later reads the results.
+mkfifo "$work/fifo"
+status=0
+"$RELIC" -o "$work/fifo" -q 'X > 1?' "$work/graph.dl" 2>/dev/null ||
+    status=$?
+if [ "$status" -ne 1 ]; then
+	fail "an invalid query writing a FIFO exited $status, expected 1"
+fi
+cat "$work/fifo" > "$work/fifo.txt" &
+reader=$!
+status=0
+"$RELIC" -o "$work/fifo" "$work/graph.dl" || status=$?
+if [ "$status" -ne 0 ]; then
+	kill "$reader" 2>/dev/null || :
+	fail "a run writing a FIFO exited $status, expected 0"
+fi
+wait "$reader"
+if [ "$(cat "$work/fifo.txt")" != "$expected" ]; then
+	fail "a FIFO read '$(cat "$work/fifo.txt")', expected '$expected'"
+fi
 
 # A write that fails must not be reported as success.  Standard output is
 # open for reading only here, so every write to it fails.  A closed descriptor
@@ -758,15 +914,26 @@ done
 
 # Exports are written in command-line order, after the materialized program
 # under -a: a head's arity chooses among a name's predicates, and a
-# predicate of no columns without its fact is an empty file.  An export that
-# cannot be opened is an error, reported once naming the file, and ends the
-# run: the export before it is written, the one after it is not.
+# predicate of no columns without its fact is an empty file.
 cat > "$work/arities.dl" <<'EOF2'
 edge(a, b).
 edge(x, y, z).
 never :- edge(z, z).
 EOF2
 printf 'x\ty\tz\n' > "$work/edge3.expected"
+"$RELIC" -a -O "tsv:edge/3=$work/edge3.tsv" -O "$work/never.tsv" \
+    "$work/arities.dl" || fail "exporting edge/3 and never failed"
+if ! cmp -s "$work/edge3.expected" "$work/edge3.tsv"; then
+	fail "edge/3 was exported as '$(cat "$work/edge3.tsv")'"
+fi
+if [ ! -f "$work/never.tsv" ] || [ -s "$work/never.tsv" ]; then
+	fail "a predicate of no columns and no fact was not an empty file"
+fi
+
+# An export that cannot be opened is an error, reported once naming the
+# file, before any export is written: the run leaves no file behind, the
+# ones before it on the command line included.
+rm -f "$work/edge3.tsv" "$work/never.tsv"
 status=0
 diagnostic=$("$RELIC" -a -O "tsv:edge/3=$work/edge3.tsv" \
     -O "$work/never.tsv" -O "tsv:edge/2=$work/missing/edge2.tsv" \
@@ -779,20 +946,16 @@ if [ "$(printf '%s\n' "$diagnostic" |
     grep -c "cannot open $work/missing/edge2.tsv")" -ne 1 ]; then
 	fail "an unwritable export was reported as '$diagnostic'"
 fi
-if ! cmp -s "$work/edge3.expected" "$work/edge3.tsv"; then
-	fail "edge/3 was exported as '$(cat "$work/edge3.tsv")'"
-fi
-if [ ! -f "$work/never.tsv" ] || [ -s "$work/never.tsv" ]; then
-	fail "a predicate of no columns and no fact was not an empty file"
-fi
-if [ -e "$work/edge2.tsv" ]; then
-	fail "an export ran after one failed"
-fi
+for export in edge3.tsv never.tsv edge2.tsv; do
+	if [ -e "$work/$export" ]; then
+		fail "a run with an unwritable export left $export behind"
+	fi
+done
 
 # An export whose evaluation fails -- here at a limit the queries before it
 # stay within -- fails the run and leaves its file as it was: the file is
-# opened only when the first row reaches it, and the library delivers none
-# until the evaluation has succeeded.
+# truncated only when the first row reaches it, and the library delivers
+# none until the evaluation has succeeded.
 echo stale > "$work/path.tsv"
 status=0
 "$RELIC" -l tuples=4 -q 'edge(X, Y)?' -O "$work/path.tsv" \

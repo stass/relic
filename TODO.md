@@ -61,24 +61,6 @@ draft from undoing, so the draft's accesses cannot be derived from its
 operations. A missed call fails loudly, preparation reporting an internal
 error, but undercharges acquisition until then.
 
-## Command-line tool
-
-**Identify each output by the descriptor it opens, not by a prediction.**
-[Medium, component: `cmd/relic/files.c`, `cmd/relic/output.c`]
-`command_files_check()` predicts what `fopen(3)` will open, so a file that
-does not exist yet is its directory and name, compared by bytes. That misses
-two names of one new file on a case-insensitive or Unicode-normalizing file
-system, a dangling symbolic link and its target, and anything that changes
-between the check and the open, which the lazy open stretches over the first
-query's evaluation. Opening every output after validation with
-`O_WRONLY | O_CREAT` and no `O_TRUNC`, identifying it by `fstat(2)` of the
-descriptor, and truncating at the first write or the run's success would
-remove the new-file identity and every one of those gaps, and would report a
-`-o` or export that cannot be opened before any query runs, which today
-waits until the first query is answered. The cost is deciding what a failed
-run does with a file it created empty (`O_EXCL` and unlinking it is one
-answer) and opening a FIFO output without blocking.
-
 ## Benchmarks
 
 **Refresh published comparisons with consistent output and host coverage.**

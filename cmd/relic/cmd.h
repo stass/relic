@@ -90,6 +90,8 @@ enum output_format {
 };
 
 typedef struct output output_t;
+typedef struct output_file output_file_t;
+typedef struct output_files output_files_t;
 typedef struct invocation invocation_t;
 typedef struct prepared_export prepared_export_t;
 typedef struct export_operand export_operand_t;
@@ -99,11 +101,11 @@ typedef struct export_operand export_operand_t;
  *
  * An output with no `buffer` discards every row, counting it, which is what
  * -n asks for.  output_attach() gives it a buffer and a stream to write to;
- * output_attach_file() gives it a buffer and `pending_path`, the file it
- * opens when the first row is written, after which `stream` is that
- * file and `pending_path` NULL.  `terminal` is whether `stream` is a
- * terminal, found once, when it is attached or opened, and always before the
- * first value is written to it.
+ * output_attach_file() gives it a buffer and `file`, an output file the run
+ * opened, which is begun when the first row is written, after which
+ * `stream` is the file's.  `terminal` is whether `stream` is a terminal,
+ * found once, when it is attached or begun, and always before the first
+ * value is written to it.
  *
  * The rows of one query are written as they are delivered, or collected and
  * sorted first when `sorted` is set.  `queries_written` is what decides
@@ -127,9 +129,9 @@ struct output {
 	relic_t			*ctx;
 	const relic_result_t	*collected;
 	FILE			*stream;
+	output_file_t		*file;
 	char			*buffer;
 	const char		*name;
-	const char		*pending_path;
 	const char		*predicate;
 	const char		*program_name;
 	size_t			 filled;
@@ -153,12 +155,15 @@ struct output {
  * is where -e sends plans, standard error, or NULL without -e.  `output` is
  * where rows go while a query or an export runs, and NULL before and after;
  * a diagnostic hands its gathered rows to the stream before it is written.
+ * `files` are the files the run writes, opened before the invocation, and
+ * borrowed.
  */
 struct invocation {
 	relic_t			 *ctx;
 	relic_query_t		**queries;
 	prepared_export_t	 *exports;
 	output_t		 *output;
+	output_files_t		 *files;
 	const char		 *program_name;
 	size_t			  query_count;
 	size_t			  export_count;
@@ -212,13 +217,13 @@ void	write_stats(relic_t *ctx, FILE *stream);
  * output_init() prepares an output that discards rows, and output_attach()
  * gives it a stream, named `name` in messages, to write them to instead,
  * returning 0, or -1 having reported that memory ran out.
- * output_attach_file() gives it the file at `path` instead, named by its
- * path, which is created or truncated only when the first row is written
- * or a query succeeds without writing any; a file that cannot be opened is
- * reported then, as a write that failed.  Its rows are facts of
- * `predicate` in OUTPUT_DL, which takes one and is written only to a file;
- * `predicate` is NULL in any other format.  The caller keeps `path` and
- * `predicate` for as long as the output.
+ * output_attach_file() gives it `file` instead, named by its path, which is
+ * truncated only when the first row is written or a query succeeds without
+ * writing any; a file that cannot be begun is reported then, as a write
+ * that failed.  Its rows are facts of `predicate` in OUTPUT_DL, which takes
+ * one and is written only to a file; `predicate` is NULL in any other
+ * format.  The caller keeps `file` and `predicate` for as long as the
+ * output.
  *
  * output_query() runs a query and writes its results, handing them to the
  * stream before it returns, and output_discard() runs one and writes nothing
@@ -232,11 +237,13 @@ void	write_stats(relic_t *ctx, FILE *stream);
  * stream, reported once.  output_write_buffered() only hands the stream
  * what the output has gathered, a write failure reported as a row's is.
  * output_close() does what output_flush() does, releases the buffer, and
- * closes the stream unless it is standard output, returning -1 when a write
- * or the close failed, reported.  When the run that wrote to the output
- * `succeeded`, the file of output_attach_file() that nothing has opened yet
- * is created or truncated first, so that it holds exactly what the run
- * wrote, which is nothing; a run that failed leaves it as it was.
+ * closes the file of output_attach_file(), never a stream output_attach()
+ * gave it, returning -1 when a write or the close failed, reported.  When
+ * the run that wrote to the output `succeeded`, the file of
+ * output_attach_file() that nothing has written yet is begun first, as
+ * output_file_begin() begins it, so that it holds exactly what the run
+ * wrote, which is nothing; a run that failed leaves it as it was, or
+ * removes it when the run created it.
  * output_is_stdout() is whether the stream is standard output, which other
  * writers to standard output share.
  *
@@ -248,7 +255,7 @@ int	output_format_named(const char *name, enum output_format *formatp);
 void	output_init(output_t *out, const char *program_name, relic_t *ctx);
 int	output_attach(output_t *out, FILE *stream, const char *name,
 	    enum output_format format, bool sorted);
-int	output_attach_file(output_t *out, const char *path,
+int	output_attach_file(output_t *out, output_file_t *file,
 	    enum output_format format, const char *predicate, bool sorted);
 int	output_query(output_t *out, relic_query_t *query, size_t *rowsp);
 int	output_discard(output_t *out, relic_query_t *query, size_t *rowsp);
@@ -379,9 +386,10 @@ void	export_operand_free(export_operand_t *parsed);
  * when every one was prepared.  The invocation borrows the operands, which
  * must outlive it.
  *
- * exports_write() writes each prepared export's relation to its file in
- * order, sorted when `sorted`, and returns 0, or -1 having reported the
- * first that failed, after which none is written.
+ * exports_write() writes each prepared export's relation to its file, the
+ * one at the same place in the invocation's `files`, in order, sorted when
+ * `sorted`, and returns 0, or -1 having reported the first that failed,
+ * after which none is written.
  */
 int	exports_prepare(invocation_t *invocation,
 	    const export_operand_t *operands, size_t count);
@@ -395,7 +403,9 @@ typedef struct command_files command_files_t;
  * standard input when `reads_stdin`, standard output when `writes_stdout`,
  * the -o file or NULL, and the exports' files.  Standard input is read when
  * the program, an import or an interactive session reads it, and standard
- * output written when the results or a session's replies go to it.
+ * output written when the results or a session's replies go to it.  Only
+ * the files the run writes are listed as outputs: -c writes none, and -n
+ * no -o file.
  */
 struct command_files {
 	const char		*output_path;
@@ -410,18 +420,76 @@ struct command_files {
 };
 
 /*
+ * How far a run has come with a file it writes.  OUTPUT_FILE_HELD is open
+ * at `descriptor`, its content as the run found it.  OUTPUT_FILE_WRITTEN
+ * has been truncated, when it is a regular file, and is written through
+ * `stream`, which owns the descriptor.  OUTPUT_FILE_AWAITED is a FIFO that
+ * had no reader when the run began, opened when the run first writes to it.
+ * OUTPUT_FILE_CLOSED is done with, or was never opened.
+ */
+enum output_file_state {
+	OUTPUT_FILE_CLOSED,
+	OUTPUT_FILE_AWAITED,
+	OUTPUT_FILE_HELD,
+	OUTPUT_FILE_WRITTEN
+};
+
+/*
+ * One file a run writes, opened before the run reads anything: its `path`,
+ * borrowed, its `state`, and whether this run `created` it, which a run
+ * that does not write it undoes.
+ */
+struct output_file {
+	FILE			*stream;
+	const char		*path;
+	int			 descriptor;
+	enum output_file_state	 state;
+	bool			 created;
+};
+
+/*
+ * Every file a run writes, `count` of them at `files`, owned: the -o file
+ * first, also at `results`, which is NULL when the run writes none, and then
+ * the `export_count` exports' files, in command-line order, at `exports`.
+ */
+struct output_files {
+	output_file_t	*files;
+	output_file_t	*results;
+	output_file_t	*exports;
+	size_t		 count;
+	size_t		 export_count;
+};
+
+/*
  * cmd/relic/files.c
  *
- * command_files_check() refuses a command line one of whose outputs -- the
- * -o file, an export, or standard output -- is the same file as anything
- * else it reads or writes, however each is spelled: the same regular file,
- * by device and inode, or the same name in the same directory for a file
- * that does not exist yet.  Returns RELIC_EXIT_OK, RELIC_EXIT_USAGE having
- * reported the first output at fault and the file it is, or
- * RELIC_EXIT_ERROR having reported that memory ran out.
+ * command_files_open() opens every file the run writes into *outputs,
+ * creating one that does not exist and truncating none, and then refuses a
+ * command line one of whose outputs -- the -o file, an export, or standard
+ * output -- is the same file as anything else it reads or writes, however
+ * each is spelled: the same regular file, by device and inode, read from
+ * the descriptor of every output.  Returns RELIC_EXIT_OK, or, having
+ * reported why and closed every output as output_files_close() does,
+ * RELIC_EXIT_USAGE for the first output at fault and the file it is, or
+ * RELIC_EXIT_ERROR for an output that cannot be opened or memory that ran
+ * out.
+ *
+ * output_file_begin() is called when the run first writes to a file: it
+ * returns the stream to write it through, having truncated a regular file
+ * where its descriptor stands, or returns NULL having reported why it
+ * cannot.  output_file_close() closes
+ * the file and returns 0, or EOF with errno set when closing a file the run
+ * wrote failed; a file the run did not write is left as it was found, or
+ * removed when this run created it.  output_files_close() closes every file
+ * still open, as output_file_close() does, and releases *outputs, returning
+ * 0, or -1 having reported a file the run wrote that failed to close.
  */
-int	command_files_check(const char *program_name,
-	    const command_files_t *files);
+int	command_files_open(const char *program_name,
+	    const command_files_t *files, output_files_t *outputs);
+FILE	*output_file_begin(output_file_t *file, const char *program_name);
+int	output_file_close(output_file_t *file);
+int	output_files_close(output_files_t *outputs,
+	    const char *program_name);
 
 typedef struct line_reader line_reader_t;
 

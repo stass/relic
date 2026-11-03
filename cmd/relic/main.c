@@ -125,8 +125,8 @@ struct options {
 	bool			  version_alone;
 };
 
-static int		 attach_output(const options_t *options,
-			    output_t *output);
+static int		 attach_output(const invocation_t *invocation,
+			    const options_t *options, output_t *output);
 static int		 claim_stdin(const char *program_name,
 			    options_t *options, int file_count);
 static void		 command_files_of(const options_t *options,
@@ -139,7 +139,8 @@ static void		 explain_to_stream(void *callback_ctx,
 			    const char *line);
 static void		 invocation_close(invocation_t *invocation);
 static int		 invocation_open(invocation_t *invocation,
-			    const char *program_name, const options_t *options);
+			    const char *program_name, const options_t *options,
+			    output_files_t *files);
 static const char	*invoked_name(const char *argv0);
 static bool		 is_decimal_digit(char byte);
 static bool		 is_printable_ascii(const char *text);
@@ -487,24 +488,26 @@ validate(invocation_t *invocation, const options_t *options, int argc,
 }
 
 /*
- * Attach the output results are written to: the -o file or standard output.
- * The -o file is created or truncated only once a query has been answered,
- * or once a run with no query succeeds, so a run that fails before then --
- * in evaluating its first query, at a limit included -- leaves an existing
- * file as it was.  Under -n nothing is attached, so the output discards
- * every row and no file is created.
+ * Attach the output results are written to: the -o file, opened when the
+ * run began, or standard output.  The -o file is truncated only once a
+ * query has been answered, or once a run with no query succeeds, so a run
+ * that fails before then -- in evaluating its first query, at a limit
+ * included -- leaves an existing file as it was and removes one it created.
+ * Under -n nothing is attached, so the output discards every row, and no
+ * -o file was opened.
  */
 static int
-attach_output(const options_t *options, output_t *output)
+attach_output(const invocation_t *invocation, const options_t *options,
+    output_t *output)
 {
 	if (options->discard_rows)
 		return (0);
 
-	if (options->output_path == NULL)
+	if (invocation->files->results == NULL)
 		return (output_attach(output, stdout, "standard output",
 		    options->format, options->sorted));
 
-	return (output_attach_file(output, options->output_path,
+	return (output_attach_file(output, invocation->files->results,
 	    options->format, NULL, options->sorted));
 }
 
@@ -552,7 +555,7 @@ evaluate(invocation_t *invocation, const options_t *options)
 	}
 
 	output_init(&output, invocation->program_name, invocation->ctx);
-	if (attach_output(options, &output) != 0)
+	if (attach_output(invocation, options, &output) != 0)
 		return (-1);
 	invocation->output = &output;
 
@@ -597,13 +600,14 @@ explain_into(relic_t *ctx, FILE *stream)
 
 static int
 invocation_open(invocation_t *invocation, const char *program_name,
-    const options_t *options)
+    const options_t *options, output_files_t *files)
 {
 	invocation->queries = NULL;
 	invocation->query_count = 0;
 	invocation->exports = NULL;
 	invocation->export_count = 0;
 	invocation->output = NULL;
+	invocation->files = files;
 	invocation->program_name = program_name;
 	invocation->verbosity = options->verbosity;
 	invocation->explain_stream = options->explain ? stderr : NULL;
@@ -705,10 +709,20 @@ refuse_terminal_input(const char *program_name, const options_t *options)
 	return (false);
 }
 
+/*
+ * Run the command line: open every file it writes and refuse it when one of
+ * them is a file it reads or another it writes, then validate and evaluate.
+ * The files are opened before anything is read, so that one that cannot be
+ * opened is reported before any query runs, and closed after everything
+ * else, so that each one the run did not write is left as it was or, when
+ * the run created it, removed.
+ */
 static int
 run(const char *program_name, const options_t *options, int argc,
     char *argv[])
 {
+	command_files_t files;
+	output_files_t outputs;
 	invocation_t invocation;
 	int status;
 
@@ -716,8 +730,19 @@ run(const char *program_name, const options_t *options, int argc,
 	    refuse_terminal_input(program_name, options))
 		return (RELIC_EXIT_USAGE);
 
-	if (invocation_open(&invocation, program_name, options) != 0)
+	command_files_of(options, argv, argc, &files);
+	status = command_files_open(program_name, &files, &outputs);
+	if (status != RELIC_EXIT_OK) {
+		if (status == RELIC_EXIT_USAGE)
+			usage(program_name);
+		return (status);
+	}
+
+	if (invocation_open(&invocation, program_name, options,
+	    &outputs) != 0) {
+		(void)output_files_close(&outputs, program_name);
 		return (RELIC_EXIT_ERROR);
+	}
 
 	status = validate(&invocation, options, argc, argv);
 	if (status == 0 && !options->check_only)
@@ -732,6 +757,8 @@ run(const char *program_name, const options_t *options, int argc,
 		write_stats(invocation.ctx, stderr);
 
 	invocation_close(&invocation);
+	if (output_files_close(&outputs, program_name) != 0)
+		status = -1;
 
 	return (status == 0 ? RELIC_EXIT_OK : RELIC_EXIT_ERROR);
 }
@@ -979,7 +1006,8 @@ report_two_readers(const char *program_name, const options_t *options,
  * -o file and the exports', and standard input and output when the run
  * reads or writes them.  Standard input's reader must be decided already.
  * Standard output is written when the results go to it, or the replies of
- * an interactive session; -c writes neither.
+ * an interactive session, and the -o file when the results go to it, which
+ * they do not under -n.  -c writes nothing, the exports included.
  */
 static void
 command_files_of(const options_t *options, char *const *programs,
@@ -991,9 +1019,13 @@ command_files_of(const options_t *options, char *const *programs,
 	files->imports = options->imports;
 	files->import_count = options->import_count;
 	files->reads_stdin = options->stdin_reader != STDIN_UNREAD;
-	files->writes_stdout = !options->check_only && (options->interactive ||
-	    (options->output_path == NULL && !options->discard_rows));
-	files->output_path = options->output_path;
+	if (options->check_only)
+		return;
+
+	files->writes_stdout = options->interactive ||
+	    (options->output_path == NULL && !options->discard_rows);
+	if (!options->discard_rows)
+		files->output_path = options->output_path;
 	files->exports = options->exports;
 	files->export_count = options->export_count;
 }
@@ -1011,9 +1043,7 @@ static int
 parse_options(const char *program_name, int argc, char *argv[],
     options_t *options)
 {
-	command_files_t files;
 	int ch;
-	int status;
 
 	/*
 	 * getopt(3) reports an unknown option by printing argv[0], which is
@@ -1183,20 +1213,7 @@ parse_options(const char *program_name, int argc, char *argv[],
 	if (options->print_version)
 		return (RELIC_EXIT_OK);
 
-	status = claim_stdin(program_name, options, argc - optind);
-	if (status != RELIC_EXIT_OK)
-		return (status);
-
-	/*
-	 * Which files the run reads and writes is known only once the whole
-	 * command line is, standard input's reader included.
-	 */
-	command_files_of(options, argv + optind, argc - optind, &files);
-	status = command_files_check(program_name, &files);
-	if (status == RELIC_EXIT_USAGE)
-		usage(program_name);
-
-	return (status);
+	return (claim_stdin(program_name, options, argc - optind));
 }
 
 static void

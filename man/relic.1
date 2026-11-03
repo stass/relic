@@ -413,7 +413,9 @@ Every table named with
 .Fl I
 is read and checked too, and every export of
 .Fl O
-is checked and not written.
+is checked and not written; neither its file nor the
+.Fl o
+file is opened.
 It cannot be combined with
 .Fl a
 or
@@ -512,10 +514,18 @@ is described in
 Write query results to
 .Ar file ,
 created or truncated, instead of the standard output.
-The file is created or truncated only once a query has been answered, or
-once a run with no query succeeds, so a run that fails before then, in
-evaluating its first query at a limit included, leaves an existing file
-alone.
+The file is opened before the program is read, created when it does not
+exist, so a file that cannot be opened is reported before any query runs.
+It is truncated only once a query has been answered, or once a run with no
+query succeeds, so a run that fails before then, in evaluating its first
+query at a limit included, leaves an existing file alone and removes a file
+it created.
+A run ended by a signal before then leaves a file it created there, empty.
+A path that names a descriptor, such as
+.Pa /dev/stdout ,
+is cut where the descriptor stands; on systems where opening it shares the
+descriptor's offset, as macOS and the BSDs do, what was written there
+before the run is kept, and a descriptor open for appending is appended to.
 It may not be the same file as any other the run reads or writes, as
 .Sx EXPORTS
 describes.
@@ -810,18 +820,30 @@ program, a table or an interactive session reads it, the file the standard
 output is redirected to when results or a session's replies go there, or
 another output.
 Each is a usage error, reported before anything is read or written.
-Files are compared by what they are rather than how they are spelled, so
+A file the run does not write, an export or the
+.Fl o
+file under
+.Fl c
+or the
+.Fl o
+file under
+.Fl n ,
+is not an output and is neither opened nor compared.
+Every output is opened first, and files are compared by what they are
+rather than how they are spelled, so
 .Ql out.tsv ,
 .Ql ./out.tsv ,
-a symbolic link to it and a hard link to it are one file, and a file that
-does not exist yet is the name it would be created under in its directory.
+a symbolic link to it, a hard link to it and, on a file system that ignores
+case,
+.Ql Out.tsv
+are one file, whether it existed before the run or not.
 A device such as
 .Pa /dev/null
 holds nothing an output could replace, and any number of outputs may write
 one.
-Two names of a file that does not exist yet are not caught as one when they
-differ only in case, or in Unicode normalization, on a file system that
-ignores the difference, or when one is a symbolic link to the other.
+A FIFO that no process reads when the run begins is opened when the first
+row is written to it, and the run waits there for a reader; a regular file
+found at its path by then is refused, as an output that cannot be opened.
 .Pp
 A predicate is a name and an arity together.
 An export with no
@@ -860,10 +882,14 @@ and the predicate's
 which says what the format does not.
 .Pp
 Exports are written after the queries and before an interactive session.
-Each file is created or truncated only once the relation is known, when
-its first row is written or, for an empty relation, when its query
-succeeds, so a run that fails before then, in evaluation at a limit
-included, leaves the file as it was.
+Each file is opened before the program is read, created when it does not
+exist, so an export that cannot be opened is reported before any query
+runs.
+It is truncated only once the relation is known, when its first row is
+written or, for an empty relation, when its query succeeds, so a run that
+fails before then, in evaluation at a limit included, leaves an existing
+file as it was and removes a file it created.
+A run ended by a signal before then leaves a file it created there, empty.
 A write that fails leaves the rows written before it and exits 1.
 .Sh RESOURCE LIMITS
 Each
