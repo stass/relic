@@ -25,12 +25,17 @@
 # feature these tests exist to protect, and one that appears where none was
 # expected must fail.
 #
-# The program is run from its own directory, under its bare file name, so the
-# diagnostics name the file the same way wherever the source tree is and
-# whether the build is in-tree or beside it.  Standard input is the .stdin
-# file, or else empty, so that no test reads whatever the harness was given:
-# an interactive session driven from a file is compared like any other run,
-# and one that found a terminal instead would wait for it.
+# The program is run under its bare file name, so the diagnostics name the
+# file the same way wherever the source tree is and whether the build is
+# in-tree or beside it.  Each run is made in a fresh, writable scratch
+# directory holding a copy of the test's own files, <name>.*, and nothing
+# else, so every run starts from the same files and none writes into the
+# source tree: relic opens every -o and -O file before it reads the program,
+# and the tree is read-only under make distcheck.  A test reads only its own
+# files; one naming another test's file finds it missing.  Standard input is
+# the .stdin file, or else empty, so that no test reads whatever the harness
+# was given: an interactive session driven from a file is compared like any
+# other run, and one that found a terminal instead would wait for it.
 #
 # The one value of -X stats a golden file cannot hold is the storage total:
 # the bytes a context holds depend on the width of a pointer and on the
@@ -82,10 +87,33 @@ work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT
 trap 'exit 1' HUP INT TERM
 
+# Make $run a fresh copy of the test's own files, except automake's .log and
+# .trs, which are build output being written while tests run.  The copies are
+# made writable, since under make distcheck the originals are not.  The body
+# is a subshell, so that set +f, which the pattern needs, does not reach the
+# unquoted options.
+run=$work/run
+stage() (
+	rm -rf "$run"
+	mkdir "$run"
+	set +f
+	for path in "$directory/$base".*; do
+		case $path in
+		*.log|*.trs)
+			;;
+		*)
+			cp "$path" "$run/"
+			;;
+		esac
+	done
+	chmod -R u+w "$run"
+)
+
 # The status is captured rather than allowed to end the script, because a
 # nonzero one is what several of these tests expect.
 status=0
-( cd "$directory" && $RELIC $args "$program" ) < "$input" \
+stage
+( cd "$run" && $RELIC $args "$program" ) < "$input" \
     > "$work/stdout" 2> "$work/stderr.raw" || status=$?
 sed 's/^stats: storage bytes [0-9][0-9]*$/stats: storage bytes N/' \
     "$work/stderr.raw" > "$work/stderr"
@@ -148,7 +176,8 @@ answers_promised() {
 
 if listed_in_language && answers_promised; then
 	json_status=0
-	( cd "$directory" && $RELIC -F json $args "$program" ) < "$input" \
+	stage
+	( cd "$run" && $RELIC -F json $args "$program" ) < "$input" \
 	    > "$work/json" 2> "$work/json.stderr" || json_status=$?
 	hidden_status=0
 	if [ "$json_status" = 0 ]; then
@@ -200,7 +229,8 @@ run_counted() {
 	name=$1
 	shift
 	counted_status=0
-	( cd "$directory" && $RELIC -X stats "$@" $unsorted_args "$program" ) \
+	stage
+	( cd "$run" && $RELIC -X stats "$@" $unsorted_args "$program" ) \
 	    < "$input" > "$work/$name.stdout" 2> "$work/$name.raw" ||
 	    counted_status=$?
 	grep -v '^stats: parallel rounds ' "$work/$name.raw" \
