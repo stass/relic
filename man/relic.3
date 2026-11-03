@@ -51,7 +51,7 @@ relic library
 .Ft relic_t *
 .Fn relic_create void
 .Ft relic_t *
-.Fn relic_create_config "const relic_config_t *config"
+.Fn relic_create_config "const relic_config_t *config" "size_t size"
 .Ft void
 .Fn relic_destroy "relic_t *ctx"
 .Ft const char *
@@ -88,12 +88,14 @@ relic library
 .Fa "const char *source_name"
 .Fa "FILE *stream"
 .Fa "const relic_import_t *import"
+.Fa "size_t size"
 .Fc
 .Ft int
 .Fo relic_import_path
 .Fa "relic_t *ctx"
 .Fa "const char *path"
 .Fa "const relic_import_t *import"
+.Fa "size_t size"
 .Fc
 .Ft int
 .Fo relic_predicate_arities
@@ -157,7 +159,7 @@ relic library
 .Ft void
 .Fn relic_explain_set "relic_t *ctx" "relic_explain_cb callback" "void *callback_ctx"
 .Ft void
-.Fn relic_stats "relic_t *ctx" "relic_stats_t *stats"
+.Fn relic_stats "relic_t *ctx" "relic_stats_t *stats" "size_t size"
 .Sh DESCRIPTION
 The
 .Nm librelic
@@ -222,15 +224,70 @@ and answered with
 .Fn relic_query_run
 or
 .Fn relic_query_collect .
+.Ss Structures passed with their size
+A call that reads or fills a
+.Vt relic_config_t ,
+a
+.Vt relic_import_t
+or a
+.Vt relic_stats_t
+takes the structure's
+.Fa size
+beside it, and the caller passes
+.Fn sizeof
+the structure as its own header declares it.
+A later release adds fields only at a structure's end, each with a default
+of zero, so a program built against one release runs against an older or a
+newer one without breaking binary compatibility, as long as it leaves at zero
+the fields the older one lacks.
+The library reads or writes the caller's
+.Fa size
+bytes and no others.
+.Pp
+A structure the library reads, a configuration or an import, is read for
+the bytes both know.
+A field past the caller's
+.Fa size
+takes its default.
+The bytes from the library's own
+.Fn sizeof
+up to the caller's
+.Fa size
+must all be zero; a byte that is not means the caller set a field the
+library lacks, and the call is refused before anything else is read.
+A
+.Fa size
+smaller than the structure relic 1.0 declared is refused too.
+So a caller zeroes the whole structure, with
+.Xr bzero 3
+or
+.Xr memset 3
+or by initializing it with
+.Ql "= { 0 }" ,
+before setting its fields, and a zeroed structure asks for every default.
+.Pp
+The statistics, the structure the library fills, are written for the bytes
+both know, and the caller's bytes past the library's structure are zeroed.
+A
+.Fa size
+smaller than the structure relic 1.0 declared fills nothing: the caller's
+.Fa size
+bytes are zeroed.
+Nothing is written past the caller's
+.Fa size .
 .Ss Contexts
 .Fn relic_create
 creates a context with every limit at its default, and
 .Fn relic_create_config
 one with the limits of
 .Fa config ,
-or the defaults when it is
-.Dv NULL
-or zeroed:
+which is
+.Fa size
+bytes, or the defaults when it is
+.Dv NULL ,
+whatever
+.Fa size
+is, or zeroed:
 .Bd -literal -offset indent
 struct relic_config {
 	size_t		max_memory;
@@ -667,8 +724,11 @@ or
 .Qq <input>
 when it is
 .Dv NULL .
-The description is refused, with nothing read, when it is
+The description, which is
+.Fa size
+bytes, is refused, with nothing read, when it is
 .Dv NULL ,
+is smaller than relic 1.0's or sets a field the library does not have,
 names no valid predicate, has no columns or a column that is not a
 .Vt relic_column ,
 keeps more than 32 columns, names no format, or sets a flag the library
@@ -1026,8 +1086,10 @@ fills the
 .Vt relic_stats_t
 .Fa stats
 points to, which must not be
-.Dv NULL ,
-with counters of the work done and of what the context holds:
+.Dv NULL
+and is
+.Fa size
+bytes, with counters of the work done and of what the context holds:
 .Bd -literal -offset indent
 struct relic_stats {
 	uint64_t	iterations;
@@ -1155,10 +1217,21 @@ alone describe, and that of
 .Fn relic_create
 and
 .Fn relic_create_config ,
-which have no context to report through: they fail only when
+which have no context to report through: they fail only with
+.Va errno
+set to
+.Er EINVAL
+when
+.Fa size
+is smaller than relic 1.0's configuration or
 .Fa threads
 is more than
 .Dv RELIC_THREADS_MAX ,
+with
+.Va errno
+set to
+.Er E2BIG
+when the configuration sets a field the library does not have,
 when memory is exhausted, or when
 .Xr getentropy 2
 fails.

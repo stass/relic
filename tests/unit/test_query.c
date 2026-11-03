@@ -443,7 +443,7 @@ context_size(relic_t *ctx)
 	context_size_t size;
 	relic_stats_t stats;
 
-	relic_stats(ctx, &stats);
+	relic_stats(ctx, &stats, sizeof(stats));
 
 	size.predicates = relic_pred_count(ctx);
 	size.relation_slots = ctx->store.derived.count +
@@ -508,7 +508,7 @@ growth_under(unsigned int flags, const char *strategy)
 	bzero(&config, sizeof(config));
 	config.flags = flags;
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, SCENARIO_GROWTH, "a context is created");
 		return;
@@ -603,7 +603,7 @@ refused_under(size_t max_tuples, size_t max_memory, const char *program,
 	config.max_memory = max_memory;
 	bzero(&log, sizeof(log));
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, SCENARIO_LIMIT, "a context is created");
 		return;
@@ -614,7 +614,7 @@ refused_under(size_t max_tuples, size_t max_memory, const char *program,
 	if (relic_load_string(ctx, "test.dl", program) == 0 &&
 	    relic_materialize(ctx) == 0)
 		query = relic_query_prepare(ctx, NULL, text);
-	relic_stats(ctx, &before);
+	relic_stats(ctx, &before, sizeof(before));
 
 	rows = 0;
 	checkf(query != NULL &&
@@ -626,7 +626,7 @@ refused_under(size_t max_tuples, size_t max_memory, const char *program,
 	    "the diagnostic should end \"%s\", not read \"%s\"", expected,
 	    reported == NULL ? "(none)" : reported);
 
-	relic_stats(ctx, &after);
+	relic_stats(ctx, &after, sizeof(after));
 	checkf(after.tuples == before.tuples, SCENARIO_LIMIT,
 	    "the relations should hold their %zu tuples, not %zu",
 	    before.tuples, after.tuples);
@@ -856,11 +856,11 @@ a_sessions_queries_leave_the_values_flat(void)
 		relic_query_destroy(query);
 
 		if (line == 1) {
-			relic_stats(ctx, &first);
+			relic_stats(ctx, &first, sizeof(first));
 			first_symbols = relic_symbol_count(ctx);
 		}
 	}
-	relic_stats(ctx, &later);
+	relic_stats(ctx, &later, sizeof(later));
 
 	checkf(answered, SCENARIO_SESSION,
 	    "every line should answer two rows, line %zu did not", line - 1);
@@ -1181,7 +1181,7 @@ stopped_under(unsigned int flags, const char *strategy)
 	config.flags = flags;
 	bzero(&log, sizeof(log));
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, SCENARIO_STOP, "a context is created");
 		return;
@@ -1204,11 +1204,11 @@ stopped_under(unsigned int flags, const char *strategy)
 		rows.wanted = stops[i];
 		rows.in_order = true;
 
-		relic_stats(ctx, &before);
+		relic_stats(ctx, &before, sizeof(before));
 		checkf(query != NULL &&
 		    relic_query_run(ctx, query, stop_when_wanted, &rows) == 0,
 		    SCENARIO_STOP, "the %s run succeeds", strategy);
-		relic_stats(ctx, &after);
+		relic_stats(ctx, &after, sizeof(after));
 
 		checkf(rows.delivered == rows.wanted && rows.in_order,
 		    SCENARIO_STOP, "the %s rows should be the integers below "
@@ -1265,7 +1265,7 @@ streamed_under(size_t max_tuples, size_t max_memory, const char *limits)
 	config.max_memory = max_memory;
 	bzero(&log, sizeof(log));
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, SCENARIO_STREAMED, "a context is created");
 		return;
@@ -1276,7 +1276,7 @@ streamed_under(size_t max_tuples, size_t max_memory, const char *limits)
 	if (relic_load_string(ctx, "test.dl", "e(a).\ne(b).\ne(c).\n") == 0 &&
 	    relic_materialize(ctx) == 0)
 		query = relic_query_prepare(ctx, NULL, "e(X)?");
-	relic_stats(ctx, &before);
+	relic_stats(ctx, &before, sizeof(before));
 
 	rows = 0;
 	checkf(query != NULL &&
@@ -1285,7 +1285,7 @@ streamed_under(size_t max_tuples, size_t max_memory, const char *limits)
 	checkf(rows == 3, SCENARIO_STREAMED,
 	    "three rows should be delivered under %s, %zu were", limits, rows);
 
-	relic_stats(ctx, &after);
+	relic_stats(ctx, &after, sizeof(after));
 	checkf(after.tuples == before.tuples &&
 	    after.tuples_inserted == before.tuples_inserted, SCENARIO_STREAMED,
 	    "nothing should be inserted under %s, %" PRIu64 " tuples were",
@@ -1676,7 +1676,7 @@ a_fact_costs_its_tuple_and_comes_first(void)
 	data_bytes = 0;
 	ctx = context_with(program, &log);
 	if (ctx != NULL && relic_materialize(ctx) == 0) {
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		data_bytes = stats.storage_bytes;
 	}
 	relic_destroy(ctx);

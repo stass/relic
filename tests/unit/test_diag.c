@@ -549,7 +549,7 @@ create_limited(size_t max_memory, record_t *record)
 
 	bzero(&config, sizeof(config));
 	config.max_memory = max_memory;
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx != NULL) {
 		bzero(record, sizeof(*record));
 		relic_diag_set(ctx, record_diagnostic, record);
@@ -637,7 +637,8 @@ an_operation_names_itself_in_a_refusal(void)
 	ctx = create_limited(1, &record);
 	stream = table_stream("a\n");
 	status = ctx != NULL && stream != NULL ?
-	    relic_import_file(ctx, "edge.tsv", stream, &import) : -1;
+	    relic_import_file(ctx, "edge.tsv", stream, &import,
+	    sizeof(import)) : -1;
 	check_refusal(ctx, status,
 	    "limit exceeded: memory=1 while importing edge.tsv", "an import");
 	if (stream != NULL)

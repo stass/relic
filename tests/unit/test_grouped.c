@@ -230,7 +230,7 @@ open_context(observed_t *observed, const char *program, unsigned int flags,
 	bzero(&config, sizeof(config));
 	config.flags = flags;
 	config.threads = workers;
-	observed->ctx = relic_create_config(&config);
+	observed->ctx = relic_create_config(&config, sizeof(config));
 	if (observed->ctx == NULL)
 		return (false);
 	relic_diag_set(observed->ctx, diagnostic, observed);
@@ -323,7 +323,7 @@ compare(const char *scenario, const char *program, const char *query,
 		checkf(actual.counted == (admitted ? 1u : 0u) &&
 		    (!admitted || actual.declined == 0), scenario,
 		    "%zu workers select the certified strategy exactly when admitted", workers);
-		relic_stats(actual.ctx, &parallel);
+		relic_stats(actual.ctx, &parallel, sizeof(parallel));
 		if (workers == 1)
 			serial = parallel;
 		else if (admitted)
@@ -703,7 +703,7 @@ shared_storage_and_actual_work(void)
 	    "shared counted work", "the shared producer answers");
 	require_other_worker = false;
 	inspect_retained_keys = false;
-	relic_stats(actual.ctx, &stats);
+	relic_stats(actual.ctx, &stats, sizeof(stats));
 	check(stats.derivations == 12017 && stats.tuples_inserted == 17 &&
 	    stats.tuples_scanned == 12017 && stats.tuples_looked_up == 0 &&
 	    stats.tuples == 12000 && actual.counted == 1,
@@ -722,7 +722,7 @@ shared_storage_and_actual_work(void)
 	check(answer_query(&actual, "q(N)?") == 0,
 	    "nullary counted work", "several source ranges combine into one empty key");
 	require_other_worker = inspect_retained_keys = false;
-	relic_stats(actual.ctx, &stats);
+	relic_stats(actual.ctx, &stats, sizeof(stats));
 	check(stats.derivations == 12001 && stats.tuples_inserted == 1 &&
 	    stats.tuples_scanned == 12001 && stats.tuples == 12000 &&
 	    actual.count == 1 && actual.values[0].integer == 12000,
@@ -918,7 +918,7 @@ stop_after_values_are_published(void *argument, const relic_value_t *row,
 	check(relic_relation_count(result->query->answer) == 0 &&
 	    ctx->eval_arena.total_bytes == 0,
 	    "completed counted delivery", "delivery uses no answer copy or producer scratch");
-	relic_stats(ctx, &stats);
+	relic_stats(ctx, &stats, sizeof(stats));
 	check(stats.tuples == 3402 && stats.tuples_inserted == 81 &&
 	    stats.derivations == 3402 && stats.tuples_scanned == 3402 &&
 	    relic_atomic_size_load(&ctx->account.round_bytes) != 0,

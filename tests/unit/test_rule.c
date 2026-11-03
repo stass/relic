@@ -1264,7 +1264,7 @@ a_body_that_is_a_relation_is_folded_in_place(void)
 		for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 			in_place = cases[i].in_place && flags == 0;
 			config.flags = flags;
-			ctx = relic_create_config(&config);
+			ctx = relic_create_config(&config, sizeof(config));
 			if (ctx == NULL) {
 				check(false, SCENARIO_IN_PLACE,
 				    "a context is created");
@@ -1312,7 +1312,7 @@ a_body_that_is_a_relation_is_folded_in_place(void)
 		 * flag.
 		 */
 		config.flags = flags;
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, SCENARIO_IN_PLACE, "a context is created");
 			return;

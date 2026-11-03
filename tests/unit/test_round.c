@@ -446,10 +446,10 @@ strings_rounds_merge(size_t threads)
 	    0, 0, &deferred_diagnostics);
 
 	if (serial != NULL && deferred != NULL) {
-		relic_stats(deferred, &loaded);
+		relic_stats(deferred, &loaded, sizeof(loaded));
 		serial_status = relic_materialize(serial);
 		deferred_status = relic_materialize(deferred);
-		relic_stats(deferred, &computed);
+		relic_stats(deferred, &computed, sizeof(computed));
 		checkf(serial_status == 0 && deferred_status == 0,
 		    SCENARIO_STRINGS, "%s: both materialize", what);
 		checkf(merged_rounds(deferred) > 0 &&
@@ -638,7 +638,7 @@ a_lookup_plan_keeps_its_indexed_access(size_t threads)
 		checkf(merged_rounds(deferred) == 0 &&
 		    abandoned_rounds(deferred) == 0, SCENARIO_DRIVER,
 		    "%s: the lookup plan runs whole without deferral", what);
-		relic_stats(deferred, &stats);
+		relic_stats(deferred, &stats, sizeof(stats));
 		checkf(stats.tuples == DRIVER_MATCHES * (1 + DRIVER_FAN) +
 		    DRIVER_MATCHES * DRIVER_FAN, SCENARIO_DRIVER,
 		    "%s: the join derives %u pairs, not %zu", what,
@@ -859,7 +859,7 @@ context_for(const char *program, unsigned int flags, size_t threads,
 	config.max_tuples = max_tuples;
 	config.max_memory = max_memory;
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, "creating a context", "a context is created");
 		return (NULL);
@@ -1059,7 +1059,7 @@ a_reservation_refuses_before_a_round_runs(size_t threads)
 	    "on %zu thread(s), a completed seed supplies its insertion history", threads);
 	relic_relation_clear(ctx, relation);
 	item.gained = false;
-	relic_stats(ctx, &before);
+	relic_stats(ctx, &before, sizeof(before));
 	ctx->account.limit = before.storage_bytes;
 	checkf(ctx->account.arena_bytes == 0 && ctx->account.round_bytes == 0 &&
 	    !relic_account_exceeds(&ctx->account, 0, 0) &&
@@ -1073,7 +1073,7 @@ a_reservation_refuses_before_a_round_runs(size_t threads)
 	    reservation_declines(ctx) == reservations + 1,
 	    SCENARIO_RESERVATION,
 	    "on %zu thread(s), the predicted reservation is refused", threads);
-	relic_stats(ctx, &after);
+	relic_stats(ctx, &after, sizeof(after));
 	checkf(bcmp(&before, &after, sizeof(before)) == 0 &&
 	    relic_relation_count(relation) == 0 && !item.gained &&
 	    history.ran && history.inserted == 1 && diagnostics.length == 0 &&
@@ -1109,7 +1109,7 @@ shared_as_expected(relic_t *deferred, size_t threads)
 {
 	relic_stats_t stats;
 
-	relic_stats(deferred, &stats);
+	relic_stats(deferred, &stats, sizeof(stats));
 	if (relic_pool_size(threads) > 1)
 		return (stats.parallel_rounds == merged_rounds(deferred));
 
@@ -1152,8 +1152,8 @@ contexts_agree(const char *scenario, const char *what, relic_t *serial,
 		return (false);
 	}
 
-	relic_stats(serial, &left);
-	relic_stats(deferred, &right);
+	relic_stats(serial, &left, sizeof(left));
+	relic_stats(deferred, &right, sizeof(right));
 	if (left.integer_values != right.integer_values ||
 	    left.string_values != right.string_values) {
 		checkf(false, scenario, "%s: the values counted should "
@@ -1428,13 +1428,13 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	serial = context_for(program, 0, 0, 0, 0, &serial_diagnostics);
 	if (serial == NULL)
 		return;
-	relic_stats(serial, &loaded);
+	relic_stats(serial, &loaded, sizeof(loaded));
 	if (relic_materialize(serial) != 0) {
 		check(false, scenario, "the program materializes unlimited");
 		relic_destroy(serial);
 		return;
 	}
-	relic_stats(serial, &needed);
+	relic_stats(serial, &needed, sizeof(needed));
 	relic_destroy(serial);
 
 	workers = relic_pool_size(threads);
@@ -1655,10 +1655,10 @@ computing_rounds_merge(size_t threads)
 	    0, 0, &deferred_diagnostics);
 
 	if (serial != NULL && deferred != NULL) {
-		relic_stats(deferred, &loaded);
+		relic_stats(deferred, &loaded, sizeof(loaded));
 		serial_status = relic_materialize(serial);
 		deferred_status = relic_materialize(deferred);
-		relic_stats(deferred, &computed);
+		relic_stats(deferred, &computed, sizeof(computed));
 		checkf(serial_status == 0 && deferred_status == 0,
 		    SCENARIO_COMPUTING, "%s: both materialize", what);
 		checkf(merged_rounds(deferred) > 0 &&
@@ -1921,7 +1921,7 @@ errors_fail_as_serially(size_t threads)
 		    &deferred_diagnostics);
 
 		if (serial != NULL && deferred != NULL) {
-			relic_stats(serial, &loaded);
+			relic_stats(serial, &loaded, sizeof(loaded));
 			serial_status = relic_materialize(serial);
 			deferred_status = relic_materialize(deferred);
 			checkf(serial_status != 0 && deferred_status != 0,
@@ -1943,7 +1943,7 @@ errors_fail_as_serially(size_t threads)
 			checkf(k == 1 || merged_rounds(deferred) > 0,
 			    SCENARIO_ERRORS, "%s: the rounds before it are "
 			    "merged", what);
-			relic_stats(serial, &failed);
+			relic_stats(serial, &failed, sizeof(failed));
 			checkf(failed.integer_values > loaded.integer_values,
 			    SCENARIO_ERRORS, "%s: the failing run interned "
 			    "integers", what);

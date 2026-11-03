@@ -254,7 +254,7 @@ fixture_load(fixture_t *fixture, const char *program, unsigned int flags,
 	bzero(&config, sizeof(config));
 	config.flags = flags;
 
-	fixture->ctx = relic_create_config(&config);
+	fixture->ctx = relic_create_config(&config, sizeof(config));
 	if (fixture->ctx == NULL)
 		return (false);
 	relic_diag_set(fixture->ctx, count_error, fixture);

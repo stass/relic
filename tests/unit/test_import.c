@@ -856,7 +856,7 @@ context_with_capture(const relic_config_t *config, capture_t *capture)
 
 	bzero(capture, sizeof(*capture));
 
-	ctx = relic_create_config(config);
+	ctx = relic_create_config(config, sizeof(*config));
 	if (ctx == NULL)
 		return (NULL);
 	relic_diag_set(ctx, capture_diagnostic, capture);
@@ -911,7 +911,7 @@ import_table(relic_t *ctx, const char *name, enum relic_format format,
 	import.format = format;
 	import.flags = flags;
 
-	status = relic_import_file(ctx, name, stream, &import);
+	status = relic_import_file(ctx, name, stream, &import, sizeof(import));
 	fclose(stream);
 
 	return (status);
@@ -1504,7 +1504,8 @@ every_refusal_reads_nothing(void)
 			break;
 
 		capture.errors = 0;
-		checkf(relic_import_file(ctx, "e", stream, &import) == -1 &&
+		checkf(relic_import_file(ctx, "e", stream, &import,
+		    sizeof(import)) == -1 &&
 		    capture.errors == 1 && strncmp(capture.message, expected,
 		    strlen(expected)) == 0 && ftell(stream) == 0,
 		    SCENARIO_DESCRIPTION, "description %zu should be refused "
@@ -1517,7 +1518,7 @@ every_refusal_reads_nothing(void)
 		    "a malformed call");
 	}
 
-	check(relic_import_file(ctx, "e", stream, NULL) == -1 &&
+	check(relic_import_file(ctx, "e", stream, NULL, 0) == -1 &&
 	    strcmp(capture.message, "no import description was given") == 0 &&
 	    ftell(stream) == 0, SCENARIO_DESCRIPTION,
 	    "no description should be refused");
@@ -1529,10 +1530,11 @@ every_refusal_reads_nothing(void)
 	import = good;
 	import.predicate = "unread";
 	symbols = relic_symbol_count(ctx);
-	check(relic_import_file(ctx, "e", NULL, &import) == -1 &&
+	check(relic_import_file(ctx, "e", NULL, &import,
+	    sizeof(import)) == -1 &&
 	    strcmp(capture.message, "no input stream was given") == 0,
 	    SCENARIO_DESCRIPTION, "no stream should be refused");
-	check(relic_import_path(ctx, NULL, &import) == -1 &&
+	check(relic_import_path(ctx, NULL, &import, sizeof(import)) == -1 &&
 	    strcmp(capture.message, "no path was given") == 0,
 	    SCENARIO_DESCRIPTION, "no path should be refused");
 	check(relic_symbol_count(ctx) == symbols, SCENARIO_DESCRIPTION,
@@ -1541,7 +1543,8 @@ every_refusal_reads_nothing(void)
 	/* The description is checked before the path is opened. */
 	import = good;
 	import.format = 0;
-	check(relic_import_path(ctx, "/nonexistent/e.tsv", &import) == -1 &&
+	check(relic_import_path(ctx, "/nonexistent/e.tsv", &import,
+	    sizeof(import)) == -1 &&
 	    strcmp(capture.message,
 	    "the import's format is neither csv nor tsv") == 0,
 	    SCENARIO_DESCRIPTION, "a bad description should not open its path");
@@ -1550,7 +1553,8 @@ every_refusal_reads_nothing(void)
 	import = good;
 	import.columns = wide;
 	import.column_count = RELIC_MAX_ARITY + 1;
-	check(relic_import_file(ctx, "e", stream, &import) == -1 &&
+	check(relic_import_file(ctx, "e", stream, &import,
+	    sizeof(import)) == -1 &&
 	    strcmp(capture.message, "expected 33 fields, found 2") == 0,
 	    SCENARIO_DESCRIPTION, "thirty-two kept columns should be read");
 
@@ -1839,7 +1843,7 @@ import_counting(relic_t *ctx, const char *table, size_t length, long *readp)
 	import.column_count = 2;
 	import.format = RELIC_FORMAT_TSV;
 
-	status = relic_import_file(ctx, "e", stream, &import);
+	status = relic_import_file(ctx, "e", stream, &import, sizeof(import));
 	*readp = ftell(stream);
 	fclose(stream);
 
@@ -2231,7 +2235,8 @@ a_stream_cannot_call_in(void)
 	import.column_count = 1;
 	import.format = RELIC_FORMAT_TSV;
 
-	check(relic_import_file(reading.ctx, "r", stream, &import) == 0 &&
+	check(relic_import_file(reading.ctx, "r", stream, &import,
+	    sizeof(import)) == 0 &&
 	    reading.refusals == 1, SCENARIO_REENTRY,
 	    "the read function's call should be refused");
 	check(rows_of(reading.ctx, "r(X)?") == 2, SCENARIO_REENTRY,
@@ -2278,7 +2283,8 @@ a_source_name_is_read_once(void)
 	import.format = RELIC_FORMAT_TSV;
 
 	check(relic_import_file(reading.ctx, source_name, stream,
-	    &import) != 0 && source_name[0] == 'X', SCENARIO_LOCATION,
+	    &import, sizeof(import)) != 0 && source_name[0] == 'X',
+	    SCENARIO_LOCATION,
 	    "an import of a field that is not an integer fails");
 	checkf(strcmp(capture.file, "original.csv") == 0 && capture.line == 2,
 	    SCENARIO_LOCATION, "the mistake should be located at "
@@ -2356,7 +2362,8 @@ a_description_is_read_once(void)
 	import.column_count = RELIC_MAX_ARITY + 8;
 	import.format = RELIC_FORMAT_TSV;
 
-	check(relic_import_file(reading.ctx, "w", stream, &import) == 0 &&
+	check(relic_import_file(reading.ctx, "w", stream, &import,
+	    sizeof(import)) == 0 &&
 	    reading.calls > 0 &&
 	    columns[RELIC_MAX_ARITY] == RELIC_COLUMN_STRING &&
 	    predicate[0] == 'v',
@@ -2403,7 +2410,8 @@ a_failed_read_adds_nothing(void)
 	import.column_count = 1;
 	import.format = RELIC_FORMAT_TSV;
 
-	check(relic_import_file(reading.ctx, "broken", stream, &import) ==
+	check(relic_import_file(reading.ctx, "broken", stream, &import,
+	    sizeof(import)) ==
 	    -1 && capture.errors == 1, SCENARIO_ALL_OR_NOTHING,
 	    "a failed read should fail the import with one error");
 	checkf(strncmp(capture.message, "cannot read broken: ",
@@ -2441,17 +2449,19 @@ a_path_is_opened_and_named(void)
 	import.column_count = 1;
 	import.format = RELIC_FORMAT_TSV;
 
-	check(relic_import_path(ctx, "/dev/null", &import) == 0 &&
+	check(relic_import_path(ctx, "/dev/null", &import,
+	    sizeof(import)) == 0 &&
 	    capture.errors == 0 && rows_of(ctx, "r(X)?") == 0,
 	    SCENARIO_LOCATION, "an empty file should import no facts");
 
 	import.flags = RELIC_IMPORT_HEADER;
-	check(relic_import_path(ctx, "/dev/null", &import) == -1 &&
+	check(relic_import_path(ctx, "/dev/null", &import,
+	    sizeof(import)) == -1 &&
 	    strcmp(capture.file, "/dev/null") == 0,
 	    SCENARIO_LOCATION, "a mistake in a file should name its path");
 
 	import.flags = 0;
-	check(relic_import_path(ctx, missing, &import) == -1 &&
+	check(relic_import_path(ctx, missing, &import, sizeof(import)) == -1 &&
 	    strncmp(capture.message, unopened, sizeof(unopened) - 1) == 0,
 	    SCENARIO_LOCATION, "a file that cannot be opened should be named");
 
@@ -3608,7 +3618,7 @@ import_failing(const char *table, size_t fail_at, unsigned int flags,
 	regular_stand_in = stream;
 #endif
 	outcome->status = relic_import_file(outcome->ctx, "table", stream,
-	    &import);
+	    &import, sizeof(import));
 #ifdef RELIC_IMPORT_REGULAR_FILE
 	regular_stand_in = NULL;
 #endif
@@ -3935,7 +3945,7 @@ import_from_channel(relic_t *ctx, producer_t *producer, const char *fifo,
 	import.format = RELIC_FORMAT_TSV;
 
 	if (fifo != NULL) {
-		*statusp = relic_import_path(ctx, fifo, &import);
+		*statusp = relic_import_path(ctx, fifo, &import, sizeof(import));
 		return (0);
 	}
 
@@ -3943,7 +3953,8 @@ import_from_channel(relic_t *ctx, producer_t *producer, const char *fifo,
 	if (stream == NULL)
 		return (-1);
 	producer->data = -1;
-	*statusp = relic_import_file(ctx, "table", stream, &import);
+	*statusp = relic_import_file(ctx, "table", stream, &import,
+	    sizeof(import));
 	fclose(stream);
 
 	return (0);

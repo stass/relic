@@ -160,7 +160,8 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	count.errors = 0;
 	relic_diag_set(ctx, count_error, &count);
 
-	status = relic_import_file(ctx, "fuzz.csv", stream, &import);
+	status = relic_import_file(ctx, "fuzz.csv", stream, &import,
+	    sizeof(import));
 	if (status != 0 && count.errors == 0)
 		abort();
 

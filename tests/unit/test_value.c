@@ -171,7 +171,7 @@ interning_type_stays_within_the_limit(enum relic_type type,
 
 	bzero(&config, sizeof(config));
 	config.max_memory = limit;
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	check(ctx != NULL, SCENARIO_LIMIT, "a limited context should be created");
 	if (ctx == NULL)
 		return;

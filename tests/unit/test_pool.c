@@ -348,7 +348,7 @@ context_holding(const char *program, unsigned int flags, size_t threads)
 	config.flags = flags;
 	config.threads = threads;
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, "creating a context", "a context is created");
 		return (NULL);
@@ -374,7 +374,7 @@ closure_is_complete(relic_t *ctx)
 {
 	relic_stats_t stats;
 
-	relic_stats(ctx, &stats);
+	relic_stats(ctx, &stats, sizeof(stats));
 
 	return (stats.tuples == CHAIN_LENGTH + CHAIN_PATHS);
 }
@@ -384,7 +384,7 @@ tuples_held(relic_t *ctx)
 {
 	relic_stats_t stats;
 
-	relic_stats(ctx, &stats);
+	relic_stats(ctx, &stats, sizeof(stats));
 
 	return (stats.tuples);
 }
@@ -394,7 +394,7 @@ parallel_rounds(relic_t *ctx)
 {
 	relic_stats_t stats;
 
-	relic_stats(ctx, &stats);
+	relic_stats(ctx, &stats, sizeof(stats));
 
 	return (stats.parallel_rounds);
 }

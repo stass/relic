@@ -202,7 +202,7 @@ fixture_open(fixture_t *fixture, const char *program, const char *scenario)
 
 	bzero(&config, sizeof(config));
 	config.flags = RELIC_F_NO_REORDER;
-	fixture->ctx = relic_create_config(&config);
+	fixture->ctx = relic_create_config(&config, sizeof(config));
 	if (fixture->ctx == NULL ||
 	    relic_load_string(fixture->ctx, "text.dl", program) != 0 ||
 	    relic_check(fixture->ctx) != 0) {
@@ -661,9 +661,9 @@ an_evaluation_resolves_every_batch_whole(void)
 		return;
 	}
 
-	relic_stats(ctx, &before);
+	relic_stats(ctx, &before, sizeof(before));
 	status = relic_materialize(ctx);
-	relic_stats(ctx, &after);
+	relic_stats(ctx, &after, sizeof(after));
 	check(status == 0, SCENARIO_RESOLVED, "the materialization succeeds");
 	checkf(after.string_values == before.string_values + 7 &&
 	    after.integer_values == before.integer_values + 18,

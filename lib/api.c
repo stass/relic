@@ -7,6 +7,7 @@
 #include "config.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <strings.h>
 
@@ -101,7 +102,8 @@ relic_destroy(relic_t *ctx)
 
 /*
  * Draw a context's hash seed from the operating system.  Returns 0 with a
- * nonzero seed in *seedp, or -1 when there is none to be had.
+ * nonzero seed in *seedp, or -1 with errno set when there is none to be
+ * had: as getentropy(2) set it, or EIO for a source of nothing but zeros.
  *
  * Zero is the one value a seed may not take: reserving it is what lets the
  * hash functions tell an owner that was never given a seed from one that
@@ -126,21 +128,41 @@ draw_hash_seed(uint64_t *seedp)
 		}
 	}
 
+	errno = EIO;
 	return (-1);
 }
 
 relic_t *
-relic_create_config(const relic_config_t *config)
+relic_create_config(const relic_config_t *config, size_t size)
 {
+	relic_config_t ours;
 	relic_t *ctx;
 	uint64_t hash_seed;
+	int error;
+
+	/*
+	 * A zeroed configuration means every limit unlimited, so a caller
+	 * that passes none gets the same context as one that passes a zeroed
+	 * structure.
+	 */
+	bzero(&ours, sizeof(ours));
+	if (config != NULL) {
+		error = relic_struct_copy_in(config, size, &ours, sizeof(ours),
+		    RELIC_CONFIG_SIZE_1_0);
+		if (error != 0) {
+			errno = error;
+			return (NULL);
+		}
+	}
 
 	/*
 	 * A thread count past the maximum is refused rather than lowered to
 	 * it: a caller who wrote one meant something else.
 	 */
-	if (config != NULL && config->threads > RELIC_THREADS_MAX)
+	if (ours.threads > RELIC_THREADS_MAX) {
+		errno = EINVAL;
 		return (NULL);
+	}
 
 	/*
 	 * Without a seed nobody else can know, every table is open to keys
@@ -158,14 +180,7 @@ relic_create_config(const relic_config_t *config)
 
 	bzero(ctx, sizeof(*ctx));
 	ctx->hash_seed = hash_seed;
-
-	/*
-	 * A zeroed configuration means every limit unlimited, so a caller
-	 * that passes none gets the same context as one that passes a zeroed
-	 * structure.
-	 */
-	if (config != NULL)
-		ctx->config = *config;
+	ctx->config = ours;
 	ctx->config.threads = relic_pool_size(ctx->config.threads);
 
 	relic_account_init(&ctx->account, ctx->config.max_memory);
@@ -185,7 +200,44 @@ relic_create_config(const relic_config_t *config)
 relic_t *
 relic_create(void)
 {
-	return (relic_create_config(NULL));
+	return (relic_create_config(NULL, 0));
+}
+
+int
+relic_struct_copy_in(const void *theirs, size_t their_size, void *ours,
+    size_t our_size, size_t oldest_size)
+{
+	const unsigned char *bytes;
+	size_t known, i;
+
+	if (their_size < oldest_size)
+		return (EINVAL);
+
+	bytes = theirs;
+	for (i = our_size; i < their_size; i++) {
+		if (bytes[i] != 0)
+			return (E2BIG);
+	}
+
+	known = their_size < our_size ? their_size : our_size;
+	bzero(ours, our_size);
+	bcopy(theirs, ours, known);
+
+	return (0);
+}
+
+void
+relic_struct_copy_out(const void *ours, size_t our_size, void *theirs,
+    size_t their_size, size_t oldest_size)
+{
+	size_t known;
+
+	bzero(theirs, their_size);
+	if (their_size < oldest_size)
+		return;
+
+	known = their_size < our_size ? their_size : our_size;
+	bcopy(ours, theirs, known);
 }
 
 const char *

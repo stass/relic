@@ -33,7 +33,9 @@ dnl release version and edited deliberately: a release that changes nothing
 dnl in the library keeps the same version-info.  By libtool's rules a change
 dnl inside the library alone is current:revision+1:age, an added entry point
 dnl is current+1:0:age+1, and a removed or changed one -- a field added to a
-dnl complete type among them -- is current+1:0:0.
+dnl relic_value_t or a relic_location_t among them -- is current+1:0:0.  A
+dnl field added at the end of a structure passed with its size is an added
+dnl interface (specs/design-api.md#versioning).
 RELIC_ABI_CURRENT=1
 RELIC_ABI_REVISION=0
 RELIC_ABI_AGE=0

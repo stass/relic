@@ -132,7 +132,7 @@ open_context(const uint8_t *data, size_t size, unsigned int flags,
 	config.max_memory = EVAL_MAX_MEMORY;
 	config.flags = flags;
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL)
 		abort();
 	errors->ctx = ctx;

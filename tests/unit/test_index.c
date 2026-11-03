@@ -145,7 +145,7 @@ context(const char *scenario, const relic_config_t *config)
 {
 	relic_t *ctx;
 
-	ctx = relic_create_config(config);
+	ctx = relic_create_config(config, sizeof(*config));
 	if (ctx == NULL)
 		check(false, scenario, "a context should be created");
 

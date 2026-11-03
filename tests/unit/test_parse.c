@@ -165,7 +165,7 @@ context_configured(const relic_config_t *config, diag_log_t *log)
 
 	bzero(log, sizeof(*log));
 
-	ctx = relic_create_config(config);
+	ctx = relic_create_config(config, sizeof(*config));
 	if (ctx == NULL)
 		return (NULL);
 

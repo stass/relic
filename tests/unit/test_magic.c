@@ -276,7 +276,7 @@ context_configured(const char *program, const relic_config_t *config,
 
 	bzero(log, sizeof(*log));
 
-	ctx = relic_create_config(config);
+	ctx = relic_create_config(config, sizeof(*config));
 	if (ctx == NULL) {
 		check(false, "creating a context", "a context is created");
 		return (NULL);
@@ -2090,7 +2090,7 @@ a_bound_chain_derives_linearly(void)
 		text_append(&explained, "", 0);
 		relic_explain_set(ctx, record_explained, &explained);
 		rows = answer(ctx, "path(n0, X)?");
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		relic_destroy(ctx);
 
 		/*

@@ -392,10 +392,10 @@ load_operands(relic_t *ctx, const options_t *options, int argc, char *argv[])
 		import = &options->imports[j];
 		if (import == options->stdin_import)
 			loaded = relic_import_file(ctx, "<stdin>", stdin,
-			    &import->import);
+			    &import->import, sizeof(import->import));
 		else
 			loaded = relic_import_path(ctx, import->path,
-			    &import->import);
+			    &import->import, sizeof(import->import));
 		if (loaded != 0)
 			status = -1;
 	}
@@ -612,7 +612,8 @@ invocation_open(invocation_t *invocation, const char *program_name,
 	 * Creation fails for one of two reasons and does not say which, so
 	 * the message names both.
 	 */
-	invocation->ctx = relic_create_config(&options->config);
+	invocation->ctx = relic_create_config(&options->config,
+	    sizeof(options->config));
 	if (invocation->ctx == NULL) {
 		report_error(program_name,
 		    "cannot create a context: out of memory or no random device");
@@ -638,7 +639,7 @@ write_stats(relic_t *ctx, FILE *stream)
 {
 	relic_stats_t stats;
 
-	relic_stats(ctx, &stats);
+	relic_stats(ctx, &stats, sizeof(stats));
 
 	fprintf(stream, "stats: iterations %ju\n",
 	    (uintmax_t)stats.iterations);

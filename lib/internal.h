@@ -546,6 +546,64 @@ int	 relic_enter(relic_t *ctx, const char *verb, const char *subject);
 void	 relic_leave(relic_t *ctx);
 
 /*
+ * The size of each structure passed with its size as relic 1.0 declared
+ * it, measured to the end of its last 1.0 field.  These are the floors a
+ * caller's size is held to, and never change: raising one would refuse
+ * every caller built against an older header.
+ */
+#define	RELIC_SIZE_THROUGH(type, field) \
+	(offsetof(type, field) + sizeof(((type *)NULL)->field))
+
+#define	RELIC_CONFIG_SIZE_1_0	RELIC_SIZE_THROUGH(relic_config_t, threads)
+#define	RELIC_IMPORT_SIZE_1_0	RELIC_SIZE_THROUGH(relic_import_t, flags)
+#define	RELIC_STATS_SIZE_1_0 \
+	RELIC_SIZE_THROUGH(relic_stats_t, integer_values)
+
+/*
+ * A structure the library reads may have no implicit padding past its 1.0
+ * layout.  A caller that initializes one field by field leaves padding
+ * unspecified, and padding past an older library's structure would be
+ * refused as a field it lacks, or, past a newer one's, read as a field.
+ * Padding inside the 1.0 layout, such as relic_config_t's between `flags`
+ * and `threads` on LP64, is harmless: every library's structure holds it,
+ * so it is copied and never checked or read.
+ *
+ * Each field added to a read structure gets an assertion that it begins
+ * where the field before it ends, and the size assertion names the new
+ * last field, so that padding anywhere past 1.0 fails the build.  The
+ * statistics are only written, so padding in them is harmless.
+ */
+_Static_assert(sizeof(relic_config_t) ==
+    RELIC_SIZE_THROUGH(relic_config_t, threads),
+    "relic_config_t ends in padding or a field no assertion names");
+_Static_assert(sizeof(relic_import_t) ==
+    RELIC_SIZE_THROUGH(relic_import_t, flags),
+    "relic_import_t ends in padding or a field no assertion names");
+
+/*
+ * The one place the rule for structures passed with their size, which
+ * relic.h states, is enforced.  `theirs` is the caller's structure of
+ * `their_size` bytes, `ours` the library's of `our_size`, and `oldest_size`
+ * the structure's 1.0 size from above.
+ *
+ * relic_struct_copy_in() fills `ours` from `theirs`: the bytes both know
+ * are copied and the rest of `ours` zeroed, so a field the caller predates
+ * takes its default.  It returns 0; EINVAL when `their_size` is below
+ * `oldest_size`; or E2BIG when a byte of `theirs` past `our_size` is not
+ * zero, a field the caller set that this library does not have.  On
+ * failure `ours` is left as it was.
+ *
+ * relic_struct_copy_out() fills `theirs` from `ours`: the bytes both know
+ * are copied and the rest of `theirs` zeroed.  When `their_size` is below
+ * `oldest_size`, every byte of `theirs` is zeroed and nothing copied.
+ * Neither ever touches a byte past `their_size`.
+ */
+int	 relic_struct_copy_in(const void *theirs, size_t their_size,
+	    void *ours, size_t our_size, size_t oldest_size);
+void	 relic_struct_copy_out(const void *ours, size_t our_size,
+	    void *theirs, size_t their_size, size_t oldest_size);
+
+/*
  * lib/diag.c
  *
  * Each of these formats a diagnostic and hands it to the installed

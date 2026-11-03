@@ -199,7 +199,7 @@ static bool	 field_value(relic_t *ctx, enum relic_column column,
 static int	 import_named_file(relic_t *ctx, const char *path,
 		    const relic_import_plan_t *plan);
 static bool	 import_plan_init(relic_t *ctx, const relic_import_t *import,
-		    relic_import_plan_t *plan);
+		    size_t size, relic_import_plan_t *plan);
 static void	 import_plan_reset(relic_import_plan_t *plan);
 static int	 import_stream(relic_t *ctx, const char *source_name,
 		    FILE *stream, const relic_import_plan_t *plan);
@@ -944,7 +944,7 @@ stop(relic_table_reader_t *reader, const relic_table_event_t *event)
 
 int
 relic_import_file(relic_t *ctx, const char *source_name, FILE *stream,
-    const relic_import_t *import)
+    const relic_import_t *import, size_t size)
 {
 	relic_import_plan_t plan;
 	int status;
@@ -957,7 +957,7 @@ relic_import_file(relic_t *ctx, const char *source_name, FILE *stream,
 	if (stream == NULL) {
 		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "no input stream was given");
-	} else if (import_plan_init(ctx, import, &plan)) {
+	} else if (import_plan_init(ctx, import, size, &plan)) {
 		status = import_stream(ctx, source_name, stream, &plan);
 		import_plan_reset(&plan);
 	}
@@ -968,7 +968,8 @@ relic_import_file(relic_t *ctx, const char *source_name, FILE *stream,
 }
 
 int
-relic_import_path(relic_t *ctx, const char *path, const relic_import_t *import)
+relic_import_path(relic_t *ctx, const char *path, const relic_import_t *import,
+    size_t size)
 {
 	relic_import_plan_t plan;
 	int status;
@@ -981,7 +982,7 @@ relic_import_path(relic_t *ctx, const char *path, const relic_import_t *import)
 	if (path == NULL) {
 		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "no path was given");
-	} else if (import_plan_init(ctx, import, &plan)) {
+	} else if (import_plan_init(ctx, import, size, &plan)) {
 		status = import_named_file(ctx, path, &plan);
 		import_plan_reset(&plan);
 	}
@@ -992,18 +993,45 @@ relic_import_path(relic_t *ctx, const char *path, const relic_import_t *import)
 }
 
 /*
- * Check an import's description and copy what the import reads into
- * `plan`.  Returns false having reported why the description cannot be
- * read, or memory.
+ * Check an import's description, `size` bytes of the caller's, and copy
+ * what the import reads into `plan`.  Returns false having reported why the
+ * description cannot be read, or memory.
  *
- * No caller code runs between the check and the copy, so the plan holds
- * exactly what was checked.  A plan that could not be made holds nothing.
+ * The description is read once, into a copy in this library's layout, and
+ * the copy is what is checked and planned from.  No caller code runs between
+ * the check and the plan, so the plan holds exactly what was checked.  A
+ * plan that could not be made holds nothing.
  */
 static bool
-import_plan_init(relic_t *ctx, const relic_import_t *import,
+import_plan_init(relic_t *ctx, const relic_import_t *import, size_t size,
     relic_import_plan_t *plan)
 {
+	relic_import_t description;
+	int error;
+
 	bzero(plan, sizeof(*plan));
+
+	if (import == NULL) {
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
+		    "no import description was given");
+		return (false);
+	}
+
+	error = relic_struct_copy_in(import, size, &description,
+	    sizeof(description), RELIC_IMPORT_SIZE_1_0);
+	if (error == EINVAL) {
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
+		    "an import description of %zu bytes is smaller than "
+		    "relic 1.0's", size);
+		return (false);
+	}
+	if (error != 0) {
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
+		    "the import description sets a field this library "
+		    "does not have");
+		return (false);
+	}
+	import = &description;
 
 	if (!validate_import(ctx, import))
 		return (false);
@@ -1099,12 +1127,6 @@ static bool
 validate_import(relic_t *ctx, const relic_import_t *import)
 {
 	size_t i;
-
-	if (import == NULL) {
-		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
-		    "no import description was given");
-		return (false);
-	}
 
 	if (import->predicate == NULL) {
 		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,

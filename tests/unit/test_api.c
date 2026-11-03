@@ -24,6 +24,7 @@
 
 #include "config.h"
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -60,6 +61,24 @@
 	"a refusal does not hide why an operation failed"
 #define	SCENARIO_THREADS \
 	"a context takes at most RELIC_THREADS_MAX threads"
+#define	SCENARIO_SIZED_CONFIG \
+	"a configuration is read to the size its caller gives"
+#define	SCENARIO_SIZED_IMPORT \
+	"an import is read to the size its caller gives"
+#define	SCENARIO_SIZED_STATS \
+	"statistics are written to the size their caller gives"
+
+/*
+ * The sizes of the structures passed with their size as relic 1.0 declared
+ * them, to the end of each one's last field.  They are written out here
+ * rather than taken from the library so that the test pins the 1.0 layout.
+ */
+#define	CONFIG_SIZE_1_0 \
+	(offsetof(relic_config_t, threads) + sizeof(size_t))
+#define	IMPORT_SIZE_1_0 \
+	(offsetof(relic_import_t, flags) + sizeof(unsigned int))
+#define	STATS_SIZE_1_0 \
+	(offsetof(relic_stats_t, integer_values) + sizeof(size_t))
 #define	SCENARIO_TRANSIENT	"an answer does not outlive its delivery"
 #define	SCENARIO_VALUES		"a value holds only what its type can"
 
@@ -247,6 +266,10 @@ static void	 check_failure_kind(relic_t *ctx, int status,
 		    enum relic_error_class expected, const char *what);
 static const char *class_name(enum relic_error_class error_class);
 static void	 a_context_takes_at_most_the_maximum_threads(void);
+static void	 a_configuration_is_read_to_the_size_given(void);
+static void	 an_import_is_read_to_the_size_given(void);
+static void	 statistics_are_written_to_the_size_given(void);
+static bool	 bytes_are(const void *bytes, size_t size, unsigned char byte);
 static void	 a_mixed_comparison_is_noted_once_per_rule(void);
 static void	 a_mixed_note_follows_the_rule_not_its_place(void);
 static void	 a_query_and_its_rewrite_share_one_note(void);
@@ -313,7 +336,8 @@ context_with(const char *program, const relic_config_t *config,
 
 	bzero(log, sizeof(*log));
 
-	ctx = config != NULL ? relic_create_config(config) : relic_create();
+	ctx = config != NULL ? relic_create_config(config,
+	    sizeof(*config)) : relic_create();
 	if (ctx == NULL) {
 		check(false, "creating a context", "a context is created");
 		return (NULL);
@@ -409,11 +433,12 @@ reenter_every_way(reentry_t *reentry)
 		fputs("x\n", stream);
 		rewind(stream);
 		refused(reentry, relic_import_file(reentry->ctx, "inner.tsv",
-		    stream, &inner_import), "relic_import_file()");
+		    stream, &inner_import, sizeof(inner_import)),
+		    "relic_import_file()");
 		fclose(stream);
 	}
 	refused(reentry, relic_import_path(reentry->ctx, "/dev/null",
-	    &inner_import), "relic_import_path()");
+	    &inner_import, sizeof(inner_import)), "relic_import_path()");
 	refused(reentry, relic_check(reentry->ctx), "relic_check()");
 	refused(reentry, relic_materialize(reentry->ctx),
 	    "relic_materialize()");
@@ -438,7 +463,7 @@ reenter_every_way(reentry_t *reentry)
 	relic_explain_set(reentry->ctx, NULL, NULL);
 	relic_destroy(reentry->ctx);
 
-	relic_stats(reentry->ctx, &stats);
+	relic_stats(reentry->ctx, &stats, sizeof(stats));
 	checkf(relic_string(reentry->ctx, reentry->value.v.id, NULL) != NULL &&
 	    relic_query_count(reentry->ctx) == 1, SCENARIO_REENTRY,
 	    "%s can read strings and count queries", reentry->from);
@@ -788,7 +813,7 @@ an_answer_does_not_outlive_its_delivery(void)
 		    relic_error(ctx) != NULL ? relic_error(ctx) : "no error");
 		relic_query_destroy(query);
 
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		checkf(stats.tuples == 3, SCENARIO_TRANSIENT,
 		    "after query %d the context should hold the 3 facts, not "
 		    "%zu tuples", round + 1, stats.tuples);
@@ -959,7 +984,7 @@ a_failure_says_what_kind_it_is(void)
 	if (table != NULL && fputs("12\nseven\n", table) >= 0 &&
 	    fseek(table, 0, SEEK_SET) == 0)
 		check_failure_kind(ctx, relic_import_file(ctx, "n.csv", table,
-		    &integers), RELIC_ERROR_REJECTED,
+		    &integers, sizeof(integers)), RELIC_ERROR_REJECTED,
 		    "importing a field that is not an integer");
 	else
 		check(false, SCENARIO_KIND, "a table is written");
@@ -1659,7 +1684,7 @@ a_mixed_comparison_is_noted_once_per_rule(void)
 			config.flags |= RELIC_F_NOTE_MIXED;
 		bzero(&log, sizeof(log));
 
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, SCENARIO_MIXED, "a context is created");
 			return;
@@ -1696,7 +1721,7 @@ a_mixed_comparison_is_noted_once_per_rule(void)
 		relic_destroy(ctx);
 
 		bzero(&log, sizeof(log));
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, SCENARIO_MIXED, "a context is created");
 			return;
@@ -1745,7 +1770,7 @@ a_mixed_note_follows_the_rule_not_its_place(void)
 	config.threads = mixed_threads;
 	bzero(&log, sizeof(log));
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, SCENARIO_MIXED, "a context is created");
 		return;
@@ -1791,7 +1816,7 @@ a_query_and_its_rewrite_share_one_note(void)
 	config.threads = mixed_threads;
 	bzero(&log, sizeof(log));
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, SCENARIO_MIXED, "a context is created");
 		return;
@@ -2061,7 +2086,7 @@ a_names_arities_are_those_the_program_named_it_at(void)
 	    "a name only a query named should have its arity, not %#jx",
 	    (uintmax_t)arities);
 
-	(void)relic_import_path(ctx, "/dev/null", &import);
+	(void)relic_import_path(ctx, "/dev/null", &import, sizeof(import));
 	status = relic_predicate_arities(ctx, "imported", &arities);
 	checkf(status == 0 && arities == UINT64_C(1) << 1, SCENARIO_ARITIES,
 	    "a name an empty import named should have its arity, not %#jx",
@@ -2151,21 +2176,247 @@ a_context_takes_at_most_the_maximum_threads(void)
 
 	bzero(&config, sizeof(config));
 	config.threads = RELIC_THREADS_MAX + 1;
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	check(ctx == NULL, SCENARIO_THREADS,
 	    "a context of RELIC_THREADS_MAX + 1 threads is refused");
 	relic_destroy(ctx);
 
 	config.threads = SIZE_MAX;
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	check(ctx == NULL, SCENARIO_THREADS,
 	    "a context of SIZE_MAX threads is refused");
 	relic_destroy(ctx);
 
 	config.threads = RELIC_THREADS_MAX;
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	check(ctx != NULL, SCENARIO_THREADS,
 	    "a context of RELIC_THREADS_MAX threads is created");
+	relic_destroy(ctx);
+}
+
+/*
+ * Whether each of `size` bytes is `byte`.
+ */
+static bool
+bytes_are(const void *bytes, size_t size, unsigned char byte)
+{
+	const unsigned char *p;
+	size_t i;
+
+	p = bytes;
+	for (i = 0; i < size; i++) {
+		if (p[i] != byte)
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * A configuration is read to the size the caller gives: one smaller than
+ * relic 1.0's is refused with EINVAL, the exact size is read, and a larger
+ * one, as a caller built against a later header passes, is read when the
+ * bytes this library does not know are zero and refused with E2BIG when they
+ * are not.  No configuration at all is every default, whatever the size.
+ */
+static void
+a_configuration_is_read_to_the_size_given(void)
+{
+	struct {
+		relic_config_t	config;
+		uint64_t	later[2];
+	} larger;
+	relic_config_t config;
+	relic_t *ctx;
+
+	bzero(&config, sizeof(config));
+
+	errno = 0;
+	ctx = relic_create_config(&config, CONFIG_SIZE_1_0 - 1);
+	check(ctx == NULL && errno == EINVAL, SCENARIO_SIZED_CONFIG,
+	    "a size one byte short of the structure is refused with EINVAL");
+	relic_destroy(ctx);
+
+	errno = 0;
+	ctx = relic_create_config(&config, 0);
+	check(ctx == NULL && errno == EINVAL, SCENARIO_SIZED_CONFIG,
+	    "a size of zero with a configuration is refused with EINVAL");
+	relic_destroy(ctx);
+
+	ctx = relic_create_config(&config, sizeof(config));
+	check(ctx != NULL, SCENARIO_SIZED_CONFIG,
+	    "the structure's own size is read");
+	relic_destroy(ctx);
+
+	ctx = relic_create_config(NULL, 0);
+	check(ctx != NULL, SCENARIO_SIZED_CONFIG,
+	    "no configuration is every default");
+	relic_destroy(ctx);
+
+	ctx = relic_create_config(NULL, sizeof(config));
+	check(ctx != NULL, SCENARIO_SIZED_CONFIG,
+	    "no configuration is every default whatever the size");
+	relic_destroy(ctx);
+
+	bzero(&larger, sizeof(larger));
+	ctx = relic_create_config(&larger.config, sizeof(larger));
+	check(ctx != NULL, SCENARIO_SIZED_CONFIG,
+	    "a larger structure whose tail is zero is read");
+	relic_destroy(ctx);
+
+	larger.config.threads = RELIC_THREADS_MAX + 1;
+	errno = 0;
+	ctx = relic_create_config(&larger.config, sizeof(larger));
+	check(ctx == NULL && errno == EINVAL, SCENARIO_SIZED_CONFIG,
+	    "the fields of a larger structure are still checked");
+	relic_destroy(ctx);
+
+	larger.config.threads = 0;
+	larger.later[1] = 1;
+	errno = 0;
+	ctx = relic_create_config(&larger.config, sizeof(larger));
+	check(ctx == NULL && errno == E2BIG, SCENARIO_SIZED_CONFIG,
+	    "a larger structure whose tail is not zero is refused with E2BIG");
+	relic_destroy(ctx);
+}
+
+/*
+ * An import description is read to the size the caller gives, by the rule
+ * a configuration is: too small or with a tail that is not zero, it is
+ * refused as an argument, and otherwise it is read.
+ */
+static void
+an_import_is_read_to_the_size_given(void)
+{
+	struct {
+		relic_import_t	import;
+		uint64_t	later[2];
+	} larger;
+	relic_import_t import;
+	diag_log_t log;
+	relic_t *ctx;
+	FILE *table;
+	bool written, rewound;
+	int status;
+
+	bzero(&import, sizeof(import));
+	import.predicate = "imported";
+	import.columns = (const enum relic_column[]){ RELIC_COLUMN_SYMBOL };
+	import.column_count = 1;
+	import.format = RELIC_FORMAT_TSV;
+
+	ctx = context_with("", NULL, &log);
+	if (ctx == NULL)
+		return;
+
+	check(relic_import_path(ctx, "/dev/null", &import,
+	    sizeof(import)) == 0, SCENARIO_SIZED_IMPORT,
+	    "the structure's own size is read");
+
+	check(relic_import_path(ctx, "/dev/null", &import,
+	    IMPORT_SIZE_1_0 - 1) == -1 &&
+	    relic_error_class(ctx) == RELIC_ERROR_ARGUMENT,
+	    SCENARIO_SIZED_IMPORT,
+	    "a size one byte short of the structure is refused");
+
+	check(relic_import_path(ctx, "/dev/null", &import, 0) == -1 &&
+	    relic_error_class(ctx) == RELIC_ERROR_ARGUMENT,
+	    SCENARIO_SIZED_IMPORT, "a size of zero is refused");
+
+	bzero(&larger, sizeof(larger));
+	larger.import = import;
+	check(relic_import_path(ctx, "/dev/null", &larger.import,
+	    sizeof(larger)) == 0, SCENARIO_SIZED_IMPORT,
+	    "a larger structure whose tail is zero is read");
+
+	larger.later[0] = 1;
+	check(relic_import_path(ctx, "/dev/null", &larger.import,
+	    sizeof(larger)) == -1 &&
+	    relic_error_class(ctx) == RELIC_ERROR_ARGUMENT,
+	    SCENARIO_SIZED_IMPORT,
+	    "a larger structure whose tail is not zero is refused");
+
+	table = tmpfile();
+	if (table == NULL) {
+		check(false, SCENARIO_SIZED_IMPORT, "a table is created");
+		relic_destroy(ctx);
+		return;
+	}
+	written = fputs("a\n", table) >= 0;
+	rewound = written && fseek(table, 0, SEEK_SET) == 0;
+	check(rewound, SCENARIO_SIZED_IMPORT, "a table is written");
+	if (rewound) {
+		status = relic_import_file(ctx, "t.tsv", table,
+		    &larger.import, sizeof(larger));
+		check(status == -1 &&
+		    relic_error_class(ctx) == RELIC_ERROR_ARGUMENT &&
+		    ftell(table) == 0, SCENARIO_SIZED_IMPORT,
+		    "and is refused from a stream before the stream is read");
+	}
+	fclose(table);
+
+	bzero(&larger, sizeof(larger));
+	check(relic_import_path(ctx, "/dev/null", &larger.import,
+	    sizeof(larger)) == -1 &&
+	    relic_error_class(ctx) == RELIC_ERROR_ARGUMENT,
+	    SCENARIO_SIZED_IMPORT,
+	    "a larger structure that is all zero is still refused");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Statistics are written to the size the caller gives: a buffer larger than
+ * the structure gets the structure and zeros past it, and one smaller than
+ * relic 1.0's gets zeros and no counter, with nothing written past it.
+ */
+static void
+statistics_are_written_to_the_size_given(void)
+{
+	struct {
+		relic_stats_t	stats;
+		unsigned char	later[24];
+	} larger;
+	relic_stats_t stats, small;
+	diag_log_t log;
+	relic_t *ctx;
+
+	ctx = context_with("e(a, b).\ne(b, c).\n"
+	    "p(X, Y) :- e(X, Y).\np(X, Z) :- p(X, Y), e(Y, Z).\n", NULL, &log);
+	if (ctx == NULL)
+		return;
+	if (relic_materialize(ctx) != 0) {
+		check(false, SCENARIO_SIZED_STATS, "the program materializes");
+		relic_destroy(ctx);
+		return;
+	}
+
+	memset(&stats, 0xa5, sizeof(stats));
+	relic_stats(ctx, &stats, sizeof(stats));
+	check(stats.tuples == 5 && stats.derivations > 0,
+	    SCENARIO_SIZED_STATS, "the structure's own size is filled");
+
+	memset(&larger, 0xa5, sizeof(larger));
+	relic_stats(ctx, &larger.stats, sizeof(larger));
+	check(memcmp(&larger.stats, &stats, sizeof(stats)) == 0,
+	    SCENARIO_SIZED_STATS,
+	    "a larger buffer gets the same counters");
+	check(bytes_are(larger.later, sizeof(larger.later), 0),
+	    SCENARIO_SIZED_STATS,
+	    "and zeros past the structure this library knows");
+
+	memset(&small, 0xa5, sizeof(small));
+	relic_stats(ctx, &small, STATS_SIZE_1_0 - 1);
+	check(bytes_are(&small, STATS_SIZE_1_0 - 1, 0), SCENARIO_SIZED_STATS,
+	    "a buffer smaller than relic 1.0's structure is zeroed");
+	check(((unsigned char *)&small)[STATS_SIZE_1_0 - 1] == 0xa5,
+	    SCENARIO_SIZED_STATS, "and nothing is written past it");
+
+	memset(&small, 0xa5, sizeof(small));
+	relic_stats(ctx, &small, 0);
+	check(bytes_are(&small, sizeof(small), 0xa5), SCENARIO_SIZED_STATS,
+	    "a buffer of no bytes is not written");
+
 	relic_destroy(ctx);
 }
 
@@ -2205,6 +2456,9 @@ main(void)
 	a_names_arities_are_those_the_program_named_it_at();
 	a_prepared_query_runs_over_the_program_as_it_stands();
 	a_context_takes_at_most_the_maximum_threads();
+	a_configuration_is_read_to_the_size_given();
+	an_import_is_read_to_the_size_given();
+	statistics_are_written_to_the_size_given();
 
 	return (check_summary("test_api"));
 }

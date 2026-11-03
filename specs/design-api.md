@@ -33,7 +33,9 @@ result -- because the library must be free to change what they hold. Five
 are complete -- the value, the location a diagnostic points at, the
 configuration, an import's description and the statistics -- because a
 caller builds or reads each of them field by field and an accessor per field
-buys nothing. A complete type's layout is part of the binary interface.
+buys nothing. The value's and the location's layouts are part of the binary
+interface. The other three are passed with their size, so they may grow at
+the end without breaking it; [Versioning](#versioning) states the rule.
 
 Every entry point follows one return convention: an `int` is 0 on success
 and -1 on failure, a pointer is the object or NULL, and a `void` entry point
@@ -299,8 +301,9 @@ exactly one place.
   them. No switch changes an answer, though two strategies may hold
   different amounts while they compute one -- every strategy switch is
   such a case -- and so one may meet a limit the other does not. A new
-  diagnostic is a switch bit rather than a field because the structure's
-  layout is frozen and a library that predates the bit ignores it.
+  diagnostic is a switch bit rather than a field because a library that
+  predates the bit ignores it, where a field it predates and the caller set
+  refuses the context.
 * **Threads** is the size of the worker pool the context owns, the calling
   thread included. Zero and one both mean the calling thread alone; a count
   past the header's maximum refuses the context rather than being lowered,
@@ -534,11 +537,35 @@ version and follows libtool's rules: an added entry point is `c+1:0:a+1`, a
 removed or changed one `c+1:0:0`, and a change inside the library alone
 `c:r+1:a`. Three consequences are easy to miss:
 
-* **A field added to a complete type is incompatible**, because it changes
-  the layout callers allocate. That is why the configuration has no step
-  limit and why a counter added to the statistics is an interface change.
-  Fields that belong together are added in one incompatible change rather
-  than two.
+* **A field added at the end of a structure passed with its size is a
+  compatible addition**, `c+1:0:a+1`. The configuration, an import's
+  description and the statistics are each passed with the caller's
+  `sizeof`, and the library reads or writes only the bytes both sides know,
+  by the rule Linux's `copy_struct_from_user()` applies behind `openat2(2)`
+  and `clone3(2)`; `include/relic.h` states it for callers. In short, a
+  structure the library reads defaults every field past the caller's size,
+  and refuses a nonzero byte past its own structure and a size smaller than
+  relic 1.0's: `relic_create_config()` with errno `EINVAL` for the size and
+  `E2BIG` for the byte, as `openat2(2)` does, and an import as an argument
+  error. The statistics are written for the bytes both know and zeroed
+  past them, and `relic_stats()`, which cannot fail, answers a size smaller
+  than 1.0's by zeroing the caller's bytes. `relic_struct_copy_in()` and
+  `relic_struct_copy_out()` in `lib/api.c` are the one place the rule is
+  enforced. A release that adds a field:
+  * puts it at the end, with a default of zero, so that a zeroed structure
+    still asks for every default;
+  * leaves a structure the library reads with no implicit padding past its
+    1.0 layout, naming any padding as a reserved field the library requires
+    to be zero, since padding a caller left unspecified would be refused by
+    an older library or read as a field by a newer one; padding inside the
+    1.0 layout is harmless, since every library's structure holds it;
+  * leaves the 1.0 sizes in `lib/internal.h` alone, which are the floor a
+    caller's size is held to, and adds an assertion beside them that the
+    new field begins where the one before it ends, updating the size
+    assertion to name it, so that padding anywhere past 1.0 fails the build.
+* **A field added to the value or the location is incompatible**, because
+  it changes the layout callers allocate and neither is passed with its
+  size.
 * **A change to what an entry point returns is incompatible** even when the
   entry points that read the new return are added beside it: a result whose
   values carry the result's identifiers rather than the context's changes

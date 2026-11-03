@@ -243,8 +243,8 @@ a_deferred_round_stops_as_serially(size_t threads)
 		    deferred->pool->abandoned_rounds > 0, SCENARIO_DEFERRED,
 		    "on %zu thread(s), the round is abandoned", threads);
 
-		relic_stats(serial, &serial_stats);
-		relic_stats(deferred, &deferred_stats);
+		relic_stats(serial, &serial_stats, sizeof(serial_stats));
+		relic_stats(deferred, &deferred_stats, sizeof(deferred_stats));
 		checkf(serial_stats.storage_bytes ==
 		    deferred_stats.storage_bytes &&
 		    serial_stats.integer_values ==
@@ -486,7 +486,8 @@ imports_with_error(relic_t *ctx, const char *text, const char *expected,
 	import.format = RELIC_FORMAT_CSV;
 	bzero(&seen, sizeof(seen));
 	relic_diag_set(ctx, note_error, &seen);
-	status = relic_import_file(ctx, "rows.csv", stream, &import);
+	status = relic_import_file(ctx, "rows.csv", stream, &import,
+	    sizeof(import));
 	relic_diag_set(ctx, NULL, NULL);
 	fclose(stream);
 
@@ -552,7 +553,7 @@ computing_context(unsigned int flags, size_t threads)
 	bzero(&config, sizeof(config));
 	config.flags = flags;
 	config.threads = threads;
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	check(ctx != NULL, SCENARIO_DEFERRED, "a context should be created");
 	if (ctx != NULL && relic_load_string(ctx, "far.dl", program) != 0) {
 		check(false, SCENARIO_DEFERRED, "the program should load");
@@ -615,7 +616,7 @@ counted_result_batches_share_the_failure_prefix(void)
 		bzero(&config, sizeof(config));
 		config.threads = threads;
 		config.flags = RELIC_F_PARALLEL_ALWAYS;
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, "counted result ceiling", "the context creates");
 			return;
@@ -641,7 +642,7 @@ counted_result_batches_share_the_failure_prefix(void)
 			if (threads == 1)
 				prefix[row] = ctx->values.integers[row];
 		}
-		relic_stats(ctx, &actual);
+		relic_stats(ctx, &actual, sizeof(actual));
 		check(actual.derivations == 3385 && actual.tuples_inserted == 81 &&
 		    actual.tuples_scanned == 3402,
 		    "counted result ceiling", "failed value batches count attempted groups but no finalized rows");

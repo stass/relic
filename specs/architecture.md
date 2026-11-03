@@ -979,7 +979,12 @@ and the statistics counters. The counters are a fixed, small set read at
 one moment, which is why they are a struct; rows and diagnostics are
 unbounded and arrive while work is in progress, which is why they are
 callbacks. What the counters count depends on the evaluation strategy and
-is not a stable interface.
+is not a stable interface. The configuration, the import description and
+the statistics are passed with the caller's `sizeof`, and the library reads
+or writes only the bytes both sides know, so a field added at the end of
+one is a compatible addition rather than a layout change (see
+[versioning](design-api.md#versioning)); the value and the location are
+not, and their layouts are frozen.
 
 The header is strict C11, includes nothing internal and not `config.h`, and
 is guarded for inclusion from C++. Only symbols matching `^relic_` are

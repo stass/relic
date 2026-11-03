@@ -3982,21 +3982,26 @@ compute_answer(relic_t *ctx, const relic_query_t *query,
 }
 
 void
-relic_stats(relic_t *ctx, relic_stats_t *stats)
+relic_stats(relic_t *ctx, relic_stats_t *stats, size_t size)
 {
-	bzero(stats, sizeof(*stats));
+	relic_stats_t ours;
 
-	stats->iterations = ctx->counters.iterations;
-	stats->derivations = ctx->counters.derivations;
-	stats->tuples_inserted = ctx->counters.tuples_inserted;
-	stats->tuples_scanned = ctx->counters.read.tuples_scanned;
-	stats->tuples_looked_up = ctx->counters.read.tuples_looked_up;
-	stats->parallel_rounds = ctx->counters.parallel_rounds;
+	bzero(&ours, sizeof(ours));
 
-	stats->tuples = relic_relation_total_tuples(ctx);
-	stats->storage_bytes = relic_relation_total_bytes(ctx) +
+	ours.iterations = ctx->counters.iterations;
+	ours.derivations = ctx->counters.derivations;
+	ours.tuples_inserted = ctx->counters.tuples_inserted;
+	ours.tuples_scanned = ctx->counters.read.tuples_scanned;
+	ours.tuples_looked_up = ctx->counters.read.tuples_looked_up;
+	ours.parallel_rounds = ctx->counters.parallel_rounds;
+
+	ours.tuples = relic_relation_total_tuples(ctx);
+	ours.storage_bytes = relic_relation_total_bytes(ctx) +
 	    relic_value_storage_bytes(ctx) + relic_pred_table_bytes(ctx);
-	stats->symbol_values = relic_value_count_of(ctx, RELIC_SYMBOL);
-	stats->string_values = relic_value_count_of(ctx, RELIC_STRING);
-	stats->integer_values = relic_value_count_of(ctx, RELIC_INTEGER);
+	ours.symbol_values = relic_value_count_of(ctx, RELIC_SYMBOL);
+	ours.string_values = relic_value_count_of(ctx, RELIC_STRING);
+	ours.integer_values = relic_value_count_of(ctx, RELIC_INTEGER);
+
+	relic_struct_copy_out(&ours, sizeof(ours), stats, size,
+	    RELIC_STATS_SIZE_1_0);
 }

@@ -432,7 +432,7 @@ run_strategy(const random_program_t *program, const char *text,
 	bzero(&config, sizeof(config));
 	config.flags = strategy->flags;
 	config.threads = strategy->threads;
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL)
 		errx(1, "relic_create_config failed");
 
@@ -465,7 +465,7 @@ run_strategy(const random_program_t *program, const char *text,
 			kind = evaluation_failure(ctx);
 			goto done;
 		}
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		run->derivations = stats.derivations;
 	}
 
@@ -487,7 +487,7 @@ run_strategy(const random_program_t *program, const char *text,
 			goto done;
 		}
 
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		run->totals[q] = stats.tuples;
 		run->strings[q] = stats.string_values;
 
@@ -524,7 +524,7 @@ count_derivations(const random_program_t *program, FILE *report,
 
 	bzero(&config, sizeof(config));
 	config.flags = RELIC_F_NAIVE | RELIC_F_NO_MAGIC;
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL)
 		errx(1, "relic_create_config failed");
 

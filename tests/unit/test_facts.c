@@ -278,7 +278,8 @@ context_with(const relic_config_t *config, const char *program,
 
 	bzero(log, sizeof(*log));
 
-	ctx = config != NULL ? relic_create_config(config) : relic_create();
+	ctx = config != NULL ? relic_create_config(config,
+	    sizeof(*config)) : relic_create();
 	if (ctx == NULL) {
 		check(false, "creating a context", "a context is created");
 		return (NULL);

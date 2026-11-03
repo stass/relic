@@ -237,7 +237,7 @@ chain_context(unsigned int flags, size_t threads, interrupter_t *interrupter)
 	config.flags = flags;
 	config.threads = threads;
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, "creating a context", "a context is created");
 		return (NULL);
@@ -395,7 +395,7 @@ an_interrupt_from_a_note_fails(const char *program, unsigned int flags,
 	bzero(&config, sizeof(config));
 	config.flags = flags | RELIC_F_NOTE_MIXED;
 	config.threads = threads;
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, SCENARIO_NOTE, "a context is created");
 		return;
@@ -415,7 +415,7 @@ an_interrupt_from_a_note_fails(const char *program, unsigned int flags,
 	    SCENARIO_NOTE, "at %zu threads the materialization of \"%s\" "
 	    "should fail as interrupted, not with \"%s\"", threads, program,
 	    interrupter.last_error);
-	relic_stats(ctx, &stats);
+	relic_stats(ctx, &stats, sizeof(stats));
 	checkf((stats.parallel_rounds > 0) == (shares && threads > 1),
 	    SCENARIO_NOTE, "at %zu threads the round deriving \"%s\" should "
 	    "be shared only on more than one, and %" PRIu64 " were", threads,

@@ -294,7 +294,7 @@ context_flagged(const char *program, diag_log_t *log, unsigned int flags)
 	config.flags = flags | deferral_flags;
 	config.threads = deferral_threads;
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, "creating a context", "a context is created");
 		return (NULL);
@@ -637,7 +637,7 @@ a_query_over_a_limit_delivers_no_rows(void)
 	config.max_tuples = 8;
 	config.flags = strategy_flags | deferral_flags;
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, SCENARIO_LIMIT, "a context is created");
 		return;
@@ -802,7 +802,7 @@ a_discard_gives_back_what_the_limits_count(void)
 	config.max_tuples = 6;
 	config.flags = strategy_flags | deferral_flags;
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, SCENARIO_RELEASE, "a context is created");
 		return;
@@ -822,7 +822,7 @@ a_discard_gives_back_what_the_limits_count(void)
 	}
 	answers_are(SCENARIO_RELEASE, ctx, "e(X)?", "a|b|c");
 
-	relic_stats(ctx, &stats);
+	relic_stats(ctx, &stats, sizeof(stats));
 	checkf(stats.tuples == 3, SCENARIO_RELEASE,
 	    "the context should hold 3 tuples, not %zu", stats.tuples);
 
@@ -931,7 +931,7 @@ materialized_counters_are(const char *scenario, const char *program,
 
 	ctx = context_flagged(program, NULL, flags);
 	if (ctx != NULL && relic_materialize(ctx) == 0) {
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		counters_are(scenario, what, &stats, expected);
 	} else {
 		checkf(false, scenario, "%s: the program is materialized",
@@ -1009,7 +1009,7 @@ the_counters_record_the_work_done(void)
 
 	ctx = context_flagged(program, NULL, 0);
 	if (ctx != NULL && relic_materialize(ctx) == 0) {
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		counters_are(SCENARIO_STATS, "semi-naive", &stats,
 		    (counters_t){ .iterations = 4, .derivations = 6,
 		    .inserted = 6, .scanned = 9, .looked_up = 3 });
@@ -1021,7 +1021,7 @@ the_counters_record_the_work_done(void)
 		/* Nothing was loaded, so nothing is evaluated again. */
 		check(relic_materialize(ctx) == 0, SCENARIO_STATS,
 		    "a second materialization succeeds");
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		check(stats.iterations == 4 && stats.derivations == 6,
 		    SCENARIO_STATS, "a current program costs nothing");
 	} else {
@@ -1172,7 +1172,7 @@ a_rule_no_query_reaches_costs_it_no_memory(void)
 	config.max_memory = UNREACHED_LIMIT;
 	config.flags = deferral_flags;
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL || relic_load_string(ctx, "test.dl", program) != 0) {
 		check(false, SCENARIO_UNREACHED, "the program loads");
 		relic_destroy(ctx);
@@ -1282,7 +1282,7 @@ every_derivation_is_made_once(void)
 	    run_query(ctx, "tc(X, Y)?", &rendering) == 0) {
 		check(rendering.rows == 1600, SCENARIO_ONCE,
 		    "the closure is every ordered pair");
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		counters_are(SCENARIO_ONCE, "the complete graph", &stats,
 		    (counters_t){ .iterations = 2, .derivations = 67200,
 		    .inserted = 1600, .scanned = 4800, .looked_up = 64000 });
@@ -1340,7 +1340,7 @@ two_member_literals_derive_once(void)
 	    run_query(ctx, "p(X, Y)?", &rendering) == 0) {
 		check(rendering.rows == 190, SCENARIO_ONCE,
 		    "p holds every pair in chain order");
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		checkf(stats.iterations == 7 && stats.derivations == 1349 &&
 		    stats.tuples_scanned == 570, SCENARIO_ONCE,
 		    "the chain should take 7 1349 570, took %" PRIu64 " %"
@@ -1390,7 +1390,7 @@ a_delta_is_emptied_when_its_member_rests(void)
 
 	ctx = context_flagged(program, NULL, 0);
 	if (ctx != NULL && relic_materialize(ctx) == 0) {
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		checkf(stats.iterations == 6 && stats.derivations == 6 &&
 		    stats.tuples_inserted == 6, SCENARIO_ONCE,
 		    "the alternating members should take 6 6 6, took %"
@@ -1424,9 +1424,9 @@ an_unkeyed_count_reads_no_source_rows(void)
 	if (ctx == NULL)
 		return;
 
-	relic_stats(ctx, &before);
+	relic_stats(ctx, &before, sizeof(before));
 	(void)answers_are(scenario, ctx, "N = count { e(X, Y) }?", "2");
-	relic_stats(ctx, &after);
+	relic_stats(ctx, &after, sizeof(after));
 	check(after.tuples_scanned == before.tuples_scanned &&
 	    after.tuples_looked_up == before.tuples_looked_up, scenario,
 	    "counting a complete source should read no tuple");
@@ -1494,7 +1494,7 @@ context_threaded(const char *program, unsigned int flags, size_t threads)
 	config.flags = flags;
 	config.threads = threads;
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, "creating a context", "a context is created");
 		return (NULL);
@@ -1584,7 +1584,7 @@ rounds_are_shared_when_they_repay_it(void)
 
 	ctx = context_threaded(chain, RELIC_F_PARALLEL_ALWAYS, 1);
 	if (ctx != NULL && relic_materialize(ctx) == 0) {
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		checkf(stats.parallel_rounds == 0, SCENARIO_SHARED,
 		    "on one thread no round is shared, not %" PRIu64,
 		    stats.parallel_rounds);
@@ -1595,7 +1595,7 @@ rounds_are_shared_when_they_repay_it(void)
 
 	ctx = context_threaded(chain, RELIC_F_PARALLEL_ALWAYS, 2);
 	if (ctx != NULL && relic_materialize(ctx) == 0) {
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		checkf((stats.parallel_rounds > 0) == threads_available,
 		    SCENARIO_SHARED, "on two threads rounds are shared, "
 		    "%" PRIu64 " of them", stats.parallel_rounds);
@@ -1606,7 +1606,7 @@ rounds_are_shared_when_they_repay_it(void)
 
 	ctx = context_threaded(chain, 0, DEFERRAL_THREADS);
 	if (ctx != NULL && relic_materialize(ctx) == 0) {
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		checkf(stats.iterations > 0 && stats.parallel_rounds == 0,
 		    SCENARIO_SHARED, "the chain's %" PRIu64 " rounds are too "
 		    "small to share, %" PRIu64 " were", stats.iterations,
@@ -1624,7 +1624,7 @@ rounds_are_shared_when_they_repay_it(void)
 
 	ctx = context_threaded(layered, 0, DEFERRAL_THREADS);
 	if (ctx != NULL && relic_materialize(ctx) == 0) {
-		relic_stats(ctx, &stats);
+		relic_stats(ctx, &stats, sizeof(stats));
 		checkf(stats.tuples == LAYERED_EDGES + LAYERED_PATHS,
 		    SCENARIO_SHARED, "the layered graph has %d paths, not %zu",
 		    LAYERED_PATHS, stats.tuples - LAYERED_EDGES);
@@ -1741,7 +1741,7 @@ serial_cache_execution(enum serial_cache_exit ending)
 		bzero(&config, sizeof(config));
 		config.flags = RELIC_F_NOTE_MIXED;
 		config.max_memory = run == 0 ? 0 : 64 * 1024 * 1024;
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, SCENARIO_SERIAL_CACHE, "create the context");
 			return;
@@ -1770,7 +1770,7 @@ serial_cache_execution(enum serial_cache_exit ending)
 		if (ending == SERIAL_CACHE_INTERRUPT)
 			check(relic_error_class(ctx) == RELIC_ERROR_INTERRUPTED,
 			    SCENARIO_SERIAL_CACHE, "the note can interrupt execution");
-		relic_stats(ctx, &stats[run]);
+		relic_stats(ctx, &stats[run], sizeof(stats[run]));
 		if (status == 0)
 			serial_cache_grid_is_intact(ctx);
 		relic_destroy(ctx);

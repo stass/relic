@@ -852,7 +852,7 @@ context_creation_fails_without_entropy(void)
 
 	entropy_unavailable = true;
 	ctx = relic_create();
-	configured = relic_create_config(&config);
+	configured = relic_create_config(&config, sizeof(config));
 	entropy_unavailable = false;
 
 	check(ctx == NULL, SCENARIO_ENTROPY,
@@ -1386,7 +1386,7 @@ sweep_mixed_commit(const char *later, size_t facts, bool pooled)
 	completed = 0;
 
 	for (budget = 0; budget < LOAD_SWEEP; budget++) {
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL || relic_load_string(ctx, "first.dl",
 		    "held(a).\nseen(X) :- held(X).\n") != 0 ||
 		    relic_materialize(ctx) != 0 ||
@@ -1625,7 +1625,8 @@ an_import_that_ran_out_of_memory_adds_nothing(void)
 
 		rewind(stream);
 		refuse_allocations_after(budget);
-		status = relic_import_file(ctx, "people.csv", stream, &import);
+		status = relic_import_file(ctx, "people.csv", stream, &import,
+		    sizeof(import));
 		serve_every_allocation();
 
 		checkf(errors_reported == (status != 0 ? 1u : 0u),
@@ -1654,7 +1655,7 @@ an_import_that_ran_out_of_memory_adds_nothing(void)
 
 		rewind(stream);
 		checkf(relic_import_file(ctx, "people.csv", stream,
-		    &import) == 0 && relic_base_total(ctx) == 3,
+		    &import, sizeof(import)) == 0 && relic_base_total(ctx) == 3,
 		    SCENARIO_IMPORT, "importing should succeed once the "
 		    "allocator recovers, with allocation %ld refused", budget);
 
@@ -1713,7 +1714,7 @@ an_import_refused_once_reads_on_or_fails(void)
 		FILE *stream;
 		int status;
 
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		stream = tmpfile();
 		if (ctx == NULL || stream == NULL ||
 		    fwrite(table, 1, sizeof(table) - 1, stream) !=
@@ -1732,7 +1733,8 @@ an_import_refused_once_reads_on_or_fails(void)
 		rewind(stream);
 		if (budget >= 0)
 			refuse_one_allocation_after(budget);
-		status = relic_import_file(ctx, "people.csv", stream, &import);
+		status = relic_import_file(ctx, "people.csv", stream, &import,
+		    sizeof(import));
 		serve_every_allocation();
 
 		if (budget < 0) {
@@ -1814,7 +1816,7 @@ an_import_on_threads_refused_once_reads_on_or_fails(void)
 		relic_t *ctx;
 		int status;
 
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, SCENARIO_IMPORT_ONCE,
 			    "a context should be made");
@@ -1827,7 +1829,8 @@ an_import_on_threads_refused_once_reads_on_or_fails(void)
 		before = allocations_made();
 		if (budget >= 0)
 			refuse_one_allocation_after(budget);
-		status = relic_import_file(ctx, "rows.tsv", stream, &import);
+		status = relic_import_file(ctx, "rows.tsv", stream, &import,
+		    sizeof(import));
 		serve_every_allocation();
 
 		checkf(pool_settled(ctx), SCENARIO_IMPORT_ONCE,
@@ -1946,7 +1949,7 @@ a_window_declined_for_memory_is_read_and_windows_go_on(void)
 
 	reached = false;
 	for (budget = 0; budget < CAPPED_IMPORT_SWEEP && !reached; budget++) {
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, SCENARIO_IMPORT_RESUME,
 			    "a context should be made");
@@ -1957,7 +1960,8 @@ a_window_declined_for_memory_is_read_and_windows_go_on(void)
 
 		rewind(stream);
 		refuse_one_allocation_after(budget);
-		status = relic_import_file(ctx, "digits.tsv", stream, &import);
+		status = relic_import_file(ctx, "digits.tsv", stream, &import,
+		    sizeof(import));
 		serve_every_allocation();
 
 		declined = ctx->counters.windows_declined;
@@ -2062,7 +2066,7 @@ a_path_whose_close_fails_adds_nothing(void)
 	if (write_temporary("dee\neve\n", path, sizeof(path))) {
 		errors_reported = 0;
 		next_close_fails = true;
-		status = relic_import_path(ctx, path, &import);
+		status = relic_import_path(ctx, path, &import, sizeof(import));
 		checkf(!next_close_fails && status != 0 &&
 		    errors_reported == 1 &&
 		    relic_error_class(ctx) == RELIC_ERROR_IO &&
@@ -2071,7 +2075,8 @@ a_path_whose_close_fails_adds_nothing(void)
 		    "should fail once having added nothing, not %zu facts",
 		    relic_base_total(ctx) - 3);
 
-		check(relic_import_path(ctx, path, &import) == 0 &&
+		check(relic_import_path(ctx, path, &import,
+		    sizeof(import)) == 0 &&
 		    relic_base_total(ctx) == 5, SCENARIO_CLOSE,
 		    "the import should succeed once its file closes");
 		unlink(path);
@@ -3409,7 +3414,7 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 		relic_t *ctx;
 		int status;
 
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, SCENARIO_EVALUATE,
 			    "a context should be created");
@@ -3582,7 +3587,7 @@ an_abandoned_rewrite_out_of_memory_reports_once(void)
 		size_t before;
 		int status;
 
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, SCENARIO_FALLBACK,
 			    "a context should be created");
@@ -3817,7 +3822,7 @@ sweep_compute_retry(const char *program, size_t threads,
 		size_t before;
 		int status;
 
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, SCENARIO_COMPUTE,
 			    "a context should be created");
@@ -3947,7 +3952,7 @@ sweep_late_index_retry(uint32_t flags, size_t threads)
 		relic_t *ctx;
 		int status;
 
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, SCENARIO_LATE_INDEX,
 			    "a context should be created");
@@ -4592,7 +4597,7 @@ sweep_aggregate_query(unsigned int flags, size_t threads,
 		relic_t *ctx;
 		int status;
 
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, SCENARIO_AGGREGATE,
 			    "a context should be created");
@@ -4705,7 +4710,7 @@ sweep_arena(unsigned int flags, const char *strategy)
 	 * An undisturbed run gives the answers and the number of requests the
 	 * steps make, which is how far the sweep goes: one run per request.
 	 */
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, SCENARIO_ARENA, "a context should be created");
 		return;
@@ -4735,7 +4740,7 @@ sweep_arena(unsigned int flags, const char *strategy)
 
 	refused = 0;
 	for (budget = 0; budget < requests; budget++) {
-		ctx = relic_create_config(&config);
+		ctx = relic_create_config(&config, sizeof(config));
 		if (ctx == NULL) {
 			check(false, SCENARIO_ARENA,
 			    "a context should be created");
@@ -5070,7 +5075,8 @@ counted_queries_survive_private_refusals(void)
 				bzero(&config, sizeof(config));
 				config.threads = threads;
 				config.flags = RELIC_F_PARALLEL_ALWAYS;
-				ctx = relic_create_config(&config);
+				ctx = relic_create_config(&config,
+				    sizeof(config));
 				if (ctx == NULL)
 					abort();
 				relic_diag_set(ctx, count_error, NULL);

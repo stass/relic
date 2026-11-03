@@ -158,7 +158,7 @@ fixture_open(fixture_t *fixture, const char *scenario)
 
 	bzero(fixture, sizeof(*fixture));
 
-	fixture->ctx = relic_create_config(NULL);
+	fixture->ctx = relic_create_config(NULL, 0);
 	if (fixture->ctx == NULL) {
 		check(false, scenario, "a context should be created");
 		return (false);

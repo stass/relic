@@ -71,6 +71,42 @@ extern "C" {
 RELIC_EXPORT const char *relic_version(void);
 
 /*
+ * Structures passed with their size.  A call that reads or fills a
+ * relic_config_t, a relic_import_t or a relic_stats_t takes the structure's
+ * size beside it: the caller passes sizeof the structure as its own header
+ * declares it, and the library reads or writes those `size` bytes and no
+ * others.  A later release adds fields only at a structure's end, each with
+ * a default of zero, so the size tells the library which fields the caller
+ * knows.  A program built against one release therefore runs against an
+ * older or a newer one without breaking binary compatibility, as long as it
+ * leaves at zero the fields the older one lacks.
+ *
+ * A structure the library reads, a configuration or an import:
+ *
+ *	A field past the caller's size, one the caller's header predates,
+ *	takes its default.
+ *
+ *	The bytes from the library's own sizeof up to the caller's size must
+ *	all be zero.  A byte that is not means the caller set a field this
+ *	library lacks, and the call is refused.
+ *
+ *	A size smaller than the structure relic 1.0 declared is refused: no
+ *	caller can have been built with one.
+ *
+ * So a caller zeroes the whole structure with bzero(3) or memset(3), or
+ * initializes it with = { 0 }, before setting its fields, and a zeroed
+ * structure asks for every default.  A refused call fails as its
+ * description says before it reads anything else, a stream or a file
+ * included.
+ *
+ * A structure the library fills, the statistics, is written for the bytes
+ * both sides know, and the caller's bytes past the library's own structure
+ * are zeroed, so a counter the library predates reads as zero.  A size
+ * smaller than the structure relic 1.0 declared fills nothing: the caller's
+ * `size` bytes are zeroed and no counter is reported.
+ */
+
+/*
  * A relic context: a loaded program, the values it mentions, and the
  * relations derived from it.  Contexts share nothing, so a program may hold
  * as many as it likes, but one context is not itself thread-safe:
@@ -227,8 +263,8 @@ typedef struct relic_config relic_config_t;
  * so a library that predates a switch runs a caller that sets it as if it
  * were not set.
  *
- * The structure's layout is part of the binary interface, so a release that
- * adds a limit changes the library's interface version.
+ * relic_create_config() reads the structure by the rule for structures
+ * passed with their size, so a release may add a limit at its end.
  */
 struct relic_config {
 	size_t		max_memory;	/* storage and working state, bytes */
@@ -361,18 +397,30 @@ struct relic_config {
 #define	RELIC_F_NO_BATCH_IMPORT	0x0400u
 
 /*
- * Create a context.  Returns NULL when the configuration asks for more than
- * RELIC_THREADS_MAX threads, when memory is exhausted, or when getentropy(2)
- * cannot supply the random bytes the context keys its hash tables with, as
- * in a sandbox with no random device.  There is no other way for it to
- * fail, and no context yet to report through, so no failure is reported to
- * a diagnostic callback.
+ * Create a context.  relic_create_config() reads `config`, which is `size`
+ * bytes, by the rule for structures passed with their size; a NULL `config`
+ * asks for every default whatever `size` is.  Returns NULL with errno
+ * EINVAL when `size` is smaller than relic 1.0's configuration or the
+ * configuration asks for more than RELIC_THREADS_MAX threads, and with
+ * errno E2BIG when the configuration sets a field this library does not
+ * have.  It also returns NULL when memory is exhausted, or when
+ * getentropy(2) cannot supply the random bytes the context keys its hash
+ * tables with, as in a sandbox with no random device.  There is no other
+ * way for it to fail, and no context yet to report through, so no failure
+ * is reported to a diagnostic callback.
+ *
+ *	relic_config_t config;
+ *
+ *	bzero(&config, sizeof(config));
+ *	config.max_memory = 64 << 20;
+ *	ctx = relic_create_config(&config, sizeof(config));
  *
  * relic_create() is relic_create_config() with every limit at its default.
  * relic_destroy() releases everything the context owns and accepts NULL.
  */
 RELIC_EXPORT relic_t *relic_create(void);
-RELIC_EXPORT relic_t *relic_create_config(const relic_config_t *config);
+RELIC_EXPORT relic_t *relic_create_config(const relic_config_t *config,
+    size_t size);
 RELIC_EXPORT void relic_destroy(relic_t *ctx);
 
 /*
@@ -624,8 +672,9 @@ typedef struct relic_import relic_import_t;
  * RELIC_COLUMN_SKIP, at most 32.  `flags` holds RELIC_IMPORT_ bits.
  *
  * The enumerators start at one, so a description or column left zeroed is
- * refused rather than read as some format or type.  The structure's layout
- * is part of the binary interface; a later boolean goes in `flags`.
+ * refused rather than read as some format or type.  The import calls read
+ * the structure by the rule for structures passed with their size; a later
+ * boolean goes in `flags`, and any other later field at the end.
  */
 struct relic_import {
 	const char		*predicate;
@@ -643,8 +692,9 @@ struct relic_import {
  * closes it.  relic_import_file() reads a stream the caller owns, naming
  * diagnostics `source_name`, or "<input>" when that is NULL; a read
  * function of the caller's own behind the stream is held to the rule for
- * callbacks that the description of relic_t sets out.  The description, and
- * the columns it points at, are borrowed for the call.
+ * callbacks that the description of relic_t sets out.  The description,
+ * which is `size` bytes, and the columns it points at, are borrowed for the
+ * call.
  *
  * Each returns 0, or -1 with the reason reported and nothing added.  An
  * import is all or nothing, like a load: a table that cannot be read, a
@@ -656,16 +706,18 @@ struct relic_import {
  * derived, as relic_fact_add() does.
  *
  * An import is refused, with nothing read, when the description, the path
- * or the stream is NULL; when `predicate` is not a name relic_fact_add()
+ * or the stream is NULL; when `size` is smaller than relic 1.0's
+ * description, or the description sets a field this library does not
+ * have; when `predicate` is not a name relic_fact_add()
  * accepts; when there are no columns, a column is not an enumerator of
  * relic_column, or more than 32 are kept; when `format` is not an
  * enumerator of relic_format; or when `flags` holds a bit this library does
  * not define, since an import flag changes what is read.
  */
 RELIC_EXPORT int relic_import_file(relic_t *ctx, const char *source_name,
-    FILE *stream, const relic_import_t *import);
+    FILE *stream, const relic_import_t *import, size_t size);
 RELIC_EXPORT int relic_import_path(relic_t *ctx, const char *path,
-    const relic_import_t *import);
+    const relic_import_t *import, size_t size);
 
 /*
  * The arities at which the program has a predicate named `name`: bit n of
@@ -984,8 +1036,8 @@ typedef struct relic_stats relic_stats_t;
  *
  * The counts depend on the evaluation strategy and on how the engine is
  * implemented, and are not stable from one release to the next; only the
- * answers are.  The structure's layout is part of the binary interface, so a
- * release that adds a counter changes the library's interface version.
+ * answers are.  relic_stats() fills the structure by the rule for structures
+ * passed with their size, so a release may add a counter at its end.
  */
 struct relic_stats {
 	uint64_t	iterations;
@@ -1002,9 +1054,14 @@ struct relic_stats {
 };
 
 /*
- * Fill *stats, which must not be NULL, with the context's counters.
+ * Fill *stats, which must not be NULL and is `size` bytes, with the
+ * context's counters, by the rule for structures passed with their size.
+ * A `size` smaller than relic 1.0's statistics is a mistake the call cannot
+ * report, since it cannot fail: the caller's `size` bytes are zeroed and
+ * no counter is reported.
  */
-RELIC_EXPORT void relic_stats(relic_t *ctx, relic_stats_t *stats);
+RELIC_EXPORT void relic_stats(relic_t *ctx, relic_stats_t *stats,
+    size_t size);
 
 /*
  * Receives the plans evaluation runs, one line at a time: the context

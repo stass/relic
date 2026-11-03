@@ -151,7 +151,7 @@ main(void)
 	bzero(&config, sizeof(config));
 	config.max_tuples = 1000;
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		fprintf(stderr, "embed: cannot create a context\n");
 		return (1);

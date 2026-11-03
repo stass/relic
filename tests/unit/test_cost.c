@@ -222,7 +222,7 @@ example_build(example_t *example)
 
 	bzero(example, sizeof(*example));
 	bzero(&config, sizeof(config));
-	example->ctx = relic_create_config(&config);
+	example->ctx = relic_create_config(&config, sizeof(config));
 	if (example->ctx == NULL)
 		return (false);
 

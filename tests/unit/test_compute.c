@@ -165,7 +165,7 @@ context_for(const char *program, unsigned int flags, size_t max_memory,
 	config.flags = flags;
 	config.max_memory = max_memory;
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create_config(&config, sizeof(config));
 	if (ctx == NULL) {
 		check(false, "creating a context", "a context is created");
 		return (NULL);
@@ -491,7 +491,7 @@ an_undefined_result_fails_the_evaluation(void)
 	    SCENARIO_UNDEFINED, "one error names the rule: \"%s\"",
 	    diagnostics.error);
 
-	relic_stats(ctx, &stats);
+	relic_stats(ctx, &stats, sizeof(stats));
 	checkf(stats.tuples == 5, SCENARIO_UNDEFINED,
 	    "only the five facts should be held, not %zu tuples",
 	    stats.tuples);
