@@ -1180,6 +1180,8 @@ Any byte that is not printable ASCII in a diagnostic is escaped.
 .Cm csv
 and
 .Cm tsv
-write a string's bytes as they are, control characters included.
+written to a file or a pipe hold a string's bytes as they are, control
+characters included.
 They are meant for programs to read; the results of an untrusted program in
-either format, printed to a terminal, can carry escape sequences.
+either format, passed through a pipe to a pager or any other program that
+forwards them to a terminal, can carry escape sequences.

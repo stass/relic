@@ -5,82 +5,131 @@ relic 1.0.0 (unreleased)
   The first release: a Datalog engine for C, as a library, librelic, and a
   command-line tool, relic(1).
 
-  * The language: facts, rules and queries over symbols, strings and 64-bit
-    integers, with stratified negation, where _ in a negated atom is a
-    column it does not test, so that not order(_, C, _) holds when C has
-    no order at all; integer arithmetic in comparisons;
-    the string functions length, cat, substr, index, match and str, match
-    taking a linear-time regular expression; and the aggregates count, sum,
-    min and max.  Digits followed by a period and a digit, or by an
-    exponent, as in 1.5 or 1e5, are an error: there are no floating-point
-    numbers, and 1.5 is reserved for them, as are # and $ outside a string
-    or a comment.
-  * Evaluation: semi-naive fixed points, secondary indexes built when a plan
-    first asks for one, joins ordered by estimated cost, each round of a
-    recursive rule choosing between two join orders by the work it
-    estimates for each over what the round reads, including the work of
-    building an index the order needs and its relation lacks, which is
-    built only when a round first chooses that order, an atom that binds
-    nothing the rest of its rule reads, through _ or a variable named once,
-    tested for a matching tuple rather than joined once per match, and
-    queries answered through a Magic Sets rewrite, which restricts what is
-    derived to what the query's constants reach wherever negation and the
-    rewrite's size allow, and otherwise evaluates in full.  A recursion
-    that passes the free columns of a bound call through unchanged, as a
-    transitive closure queried from a node does, is walked from each bound
-    value and answered for it alone, rather than for every node the walk
-    reaches.  Rounds of evaluation, with plans beginning in a scan divided
-    along that scan's tuples and other plans run whole, the reading of a
-    large table imported from a regular file on eight threads or more,
-    and the adding of a
-    large load's facts to relations that already hold some, can be shared
-    among threads, with the same answers in the same order whatever their
-    number. An unkeyed count over a complete relation reads its tuple
-    count without scanning its rows. Full grouped counts over a distinct
-    projection of one base relation can retain only their keys and counts,
-    delivering the answer without storing the intermediate predicates.
-    Derived relations use hash tags to avoid unrelated tuple comparisons
-    during evaluation, at a cost of one extra byte per allocated canonical-index
-    slot. Parallel evaluation of
-    dense binary relations over assigned values uses a bounded shared table
-    of first occurrences to reduce temporary memory while preserving order.
-    Serial plans can cache confirmed duplicates in dense binary relations,
-    avoiding repeated hash lookups with bounded temporary storage when no
-    memory limit is set.
-  * Optional limits on the tuples held, on the memory relations, values,
-    plans and rewrites occupy, and on the bytes of one program text or one
-    field of an imported table: a load, an import, an evaluation or a query
-    that would exceed one is refused with a diagnostic, and changes
-    nothing.  A query's Magic rewrite is held to a limit on its work, in
-    proportion to the program unless set; a rewrite that outgrows it is
-    abandoned with a warning, and the query answered from the whole
-    program.
-  * The tool: answers in text, CSV, TSV or JSON; facts imported from CSV and
-    TSV tables, -I edge.tsv naming its predicate and format by its file name
-    and -T edge:symbol,symbol declaring the predicate's column types once;
-    whole relations written to files with -O path.tsv, in CSV, TSV, JSON or
-    as facts, -O path.dl, that a later run loads back as a program;
-    an interactive mode with line editing where libedit is present, where
-    control-C stops the query running and returns to the prompt; the plan of
-    every evaluation with -e and its counters with -X stats.
-  * The library: one header, <relic.h>, a pkg-config module, librelic, and
-    only relic_ symbols exported.  A failed call returns -1 or NULL, and an
-    operation on a context explains its failure through a diagnostic
-    callback and relic_error(); no ordinary failure exits the process.
-    relic_error_class() says what kind of failure it was -- input the
+  Language
+
+  * A program is facts, rules and queries.  Values are symbols, strings
+    and 64-bit integers.  They are distinct types: the symbol foo and the
+    string "foo" are never equal, and ordering values of different types
+    with <, <=, > or >= is false.
+  * Negation is stratified.  In a negated atom, _ is a column the atom
+    does not test, so not order(_, C, _) holds when C has no order at all.
+    A program that recurses through negation or an aggregate is rejected.
+  * Comparisons accept integer expressions with + - * / mod, unary minus
+    and parentheses.  An equality assigns a variable nothing else binds.
+    A result outside 64 bits and a division by zero are errors, not
+    wrapped values.
+  * Six string functions work on bytes: length, cat, substr, index, match
+    and str.  match takes a regular expression like those of grep -E, less
+    counted repetition, character classes and back-references.  It runs in
+    time linear in the string, so no pattern can make it backtrack.
+  * The aggregates count, sum, min and max fold the rows of a body in
+    braces into one value.
+  * There are no floating-point numbers.  A number such as 1.5 or 1e5 is
+    an error, because those forms are reserved.  So are # and $ outside a
+    string or a comment.
+
+  Evaluation
+
+  * Recursive rules are evaluated to a fixed point, using indexes and a
+    join order chosen from estimated cost.
+  * A query that names constants is answered through a Magic Sets rewrite,
+    so relic derives what the query can reach rather than every relation.
+    A program the rewrite does not suit, or whose rewrite would grow too
+    large, is evaluated in full instead, with a warning in the second
+    case.  The answers never differ, but evaluating in full can meet an
+    arithmetic or string error that the rewrite would have avoided.
+  * Evaluation and the import of large tables can run on several threads.
+    The default is one; -j chooses more.
+    The answers, their order and the diagnostics are the same whatever the
+    number of threads.  Small programs stay on one thread.
+  * Without -s, the order of the rows is unspecified but the same on every
+    run over the same input.
+  * Optional limits cap the tuples held, the memory that relations,
+    values, plans and rewrites occupy, and the size of one program text or
+    one field of an imported table.  A load, an import, an evaluation or a
+    query that would exceed a limit is refused with a diagnostic and
+    changes nothing.  A finite memory limit can make some evaluations
+    slower.
+  * A query that fails delivers no rows rather than a truncated answer.
+    Only an interrupted query can have delivered a prefix of its rows.
+
+  The relic(1) tool
+
+  * Answers are written as text, CSV, TSV or JSON, with -F.  -s sorts them.
+    In text, and in CSV and TSV written to a terminal, control characters
+    and bytes that are not valid UTF-8 are escaped, so results are safe to
+    print.  Written to a file or a pipe, CSV and TSV hold each value's
+    bytes and read back unchanged.
+  * Facts are imported from CSV and TSV tables with -I.  A file name such
+    as edge.tsv gives the predicate and the format, and
+    -T edge:symbol,symbol declares the column types once.  A table is
+    added entirely or not at all.
+  * Whole relations are written with -O, as CSV, TSV, JSON, or as facts
+    with -O path.dl that a later run loads as a program.
+  * -o and -O refuse to write a file that the run also reads or writes: a
+    program file, an imported table, redirected standard input or output,
+    or another output.  Files are compared by identity, so a link to a
+    file is the file.
+    The refusal is a usage error, reported before anything is read or
+    written.
+  * -q answers a query given on the command line, -c checks the program and
+    its tables and evaluates nothing, -a evaluates the whole program
+    before answering, -n writes no rows, and -v and -vv say more on the
+    standard error.
+  * -j threads shares evaluation among threads; the default is 1, and
+    -j 0 uses one per processor, up to 256.  -l limit=value sets a
+    resource limit.
+  * -i starts an interactive session with line editing where libedit is
+    present.  Control-C stops the running query and returns to the prompt.
+  * -e writes the plan of every evaluation.  -X selects internal behaviours
+    for testing and debugging, including -X stats for the evaluation
+    counters.  The plan text and the -X switches are not stable.
+  * The tool checks everything before it evaluates anything, and reports
+    every mistake found.  It exits 1 for any failure, and 2 for a
+    malformed command line.
+
+  The C library
+
+  * One header, <relic.h>, strict ISO C11 and usable from C++.  A
+    pkg-config module, librelic, supplies the flags.  Only symbols that
+    begin with relic_ are exported.
+  * A program creates a context with relic_create() or
+    relic_create_config(), loads text, files or single facts, imports
+    tables, and runs queries.  A query's rows go to a callback as they are
+    derived, or are collected into a result that holds its own copy of
+    every symbol and string and outlives the context.
+  * A configuration, an import and the statistics are passed with their
+    size: the caller passes sizeof of the structure, and a later release
+    can add fields at its end.  A program built against one release runs
+    against an older or a newer one, as long as it leaves the fields the
+    older one lacks at zero.
+  * Every failure is reported by return value: -1 from a function that
+    returns int, NULL from one that returns a pointer.  A call on a context
+    explains the failure through relic_error(), relic_error_class() and the
+    diagnostic callback.  No ordinary failure exits the process.
+  * relic_error_class() says what kind of failure it was: input the
     language rejects, an evaluation error, a limit, a file, memory, an
-    interrupt, a malformed call or a bug in relic -- so that a program
-    need not read the text.
-    An answer is streamed to a row callback, or collected into a result
-    that holds its own copy of every symbol and string and outlives the
-    context, read with relic_result_string() and ordered with
-    relic_result_compare().
-    relic_interrupt() stops an evaluation in progress, from a signal
+    interrupt, a malformed call or a bug in relic.  A program need not
+    read the text.
+  * relic_interrupt() stops an evaluation in progress, from a signal
     handler, another thread or a callback, and leaves the context ready
     for the next.
-  * No runtime dependency beyond the C library; libedit is optional.
-  * Optional ThinLTO builds, enabled with --enable-thinlto, check compiler,
-    archive and linker compatibility during configuration. Object audits
-    cover LLVM bitcode as well as native objects.
+  * Contexts share nothing.  One context is used by one thread at a time;
+    relic_interrupt() is the one call another thread may make on it.  A
+    collected result is immutable, and any number of threads may read it.
+  * The RELIC_UNSTABLE_ configuration switches select alternative
+    evaluation strategies for testing and comparison.  They are not part of
+    the interface: a release may change or remove one, and a program must
+    not depend on them.
+  * relic(3) documents every function.
+
+  Requirements and platforms
+
+  * No third-party runtime dependencies.  A C11 compiler, make and a POSIX
+    shell build a release tarball.  libedit is optional, for line editing
+    in the interactive mode, and --disable-threads builds without threads.
+    A git checkout also needs the autotools.
+  * --enable-thinlto builds with LLVM link-time optimization, after
+    configuration checks that the compiler, archiver and linker support it.
   * Built and tested on macOS, on Linux with glibc and with musl, and on
-    FreeBSD.
+    FreeBSD.  OpenBSD and NetBSD are supported targets.

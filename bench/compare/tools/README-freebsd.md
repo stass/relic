@@ -51,7 +51,7 @@ invalid 96-byte alignment. Installed headers carry the same change.
 Choose a tool installation prefix and configure Souffle:
 
 ```sh
-BENCH_TOOLS="$PWD/installed"
+BENCH_TOOLS="$HOME/relic-work/tools/installed"
 cmake -S souffle-2.5 -B souffle-build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER=/usr/bin/cc -DCMAKE_CXX_COMPILER=/usr/bin/c++ \
