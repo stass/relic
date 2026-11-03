@@ -28,6 +28,16 @@ struct relic_count_store {
 	uint16_t	 output[RELIC_MAX_ARITY];
 };
 
+/* Whether count storage grew, or what refused it. */
+enum count_growth {
+	COUNTS_GROWN,
+	COUNTS_LIMITED,		/* the memory limit */
+	COUNTS_NO_MEMORY	/* the allocator, or a size past SIZE_MAX */
+};
+
+static enum count_growth reserve_counts(relic_t *ctx,
+		    relic_destination_t *destination, size_t added);
+
 void
 relic_destination_set(relic_destination_t *destination,
     relic_relation_t *relation)
@@ -40,7 +50,35 @@ relic_destination_set(relic_destination_t *destination,
 	destination->view.kind = RELIC_DESTINATION_SET;
 }
 
-/* 1 constructed, 0 outside the counted grammar, -1 already reported. */
+/*
+ * Make `destination` count the emissions of `plan`, the complete producer
+ * of `rule`, by the `width` EMIT columns `columns` (its key), each key
+ * holding how many producer tuples have it; `output` places the key
+ * columns and the count, numbered `width`, in the result.  Returns 1
+ * constructed, 0 when the plan is outside the counted grammar, -1 having
+ * reported a failure.
+ *
+ * The grammar admits only plans for which three facts hold, each needed
+ * for the count to stand in for the producer's tuples:
+ *
+ * - Every emission is a distinct producer tuple.  The plan is one SCAN of
+ *   the whole source followed only by ASSIGN and FILTER, and
+ *   relic_plan_derives_distinct() proves that two source rows never emit
+ *   one tuple.  The emissions with a key are therefore exactly its distinct
+ *   tuples, their number is its count, and no tuple needs keeping to
+ *   discard a repeat.
+ * - No count passes source_bound.  ASSIGN binds one value and FILTER keeps
+ *   or drops a row, so each source row emits at most once, and a key's
+ *   count is at most the source's size; relic_contribution_combine() relies
+ *   on that bound, and relic_destination_begin_round() checks that the
+ *   source still has the size it was given.
+ * - Every value the producer may be the first to compute lies in its key.
+ *   A parallel task projects each batch to its key before it marks the
+ *   values it has not seen (screen_batch() in lib/task.c), while a serial
+ *   batch publishes every value it emits.  The two publish the same values
+ *   in the same order only because the columns projection drops hold only
+ *   values that already have identifiers (relic_emit_term_assigned()).
+ */
 int
 relic_destination_count(relic_t *ctx, relic_destination_t *destination,
     const relic_rule_t *rule, const relic_plan_t *plan,
@@ -49,7 +87,7 @@ relic_destination_count(relic_t *ctx, relic_destination_t *destination,
 {
 	const relic_op_t *emit;
 	uint16_t i, key;
-	uint64_t seen;
+	uint64_t keys, seen;
 	size_t operation;
 
 	bzero(destination, sizeof(*destination));
@@ -73,22 +111,18 @@ relic_destination_count(relic_t *ctx, relic_destination_t *destination,
 		if (plan->ops[operation].kind != RELIC_OP_ASSIGN &&
 		    plan->ops[operation].kind != RELIC_OP_FILTER)
 			return (0);
+	keys = 0;
 	for (key = 0; key < width; key++) {
 		if (columns[key] >= emit->u.emit.arity ||
 		    (key != 0 && columns[key] <= columns[key - 1]))
 			return (0);
 		destination->view.columns[key] = columns[key];
+		keys |= UINT64_C(1) << columns[key];
 	}
-	for (i = 0; i < emit->u.emit.arity; i++) {
-		for (key = 0; key < width; key++)
-			if (columns[key] == i)
-				break;
-		if (key != width)
-			continue;
-		if (emit->u.emit.terms[i].action != RELIC_PLAN_CONSTANT &&
-		    emit->u.emit.terms[i].action != RELIC_PLAN_BOUND)
+	for (i = 0; i < emit->u.emit.arity; i++)
+		if ((keys & (UINT64_C(1) << i)) == 0 &&
+		    !relic_emit_term_assigned(emit->u.emit.terms[i].action))
 			return (0);
-	}
 	destination->relation = relic_relation_create(ctx, RELIC_ID_NONE, 0, width);
 	if (destination->relation == NULL)
 		return (-1);
@@ -261,34 +295,63 @@ relic_destination_project(const relic_destination_view_t *view,
 			    view->columns[column]];
 }
 
-/* Counts grow by actual new keys, identically in serial and deferred appends. */
-static int
+/*
+ * Counts grow by actual new keys, identically in serial and deferred appends.
+ * A refused growth leaves the counts as they were and says what refused it,
+ * which the account does not record for a round's charge.  The counted path
+ * runs only without a configured limit (relic_grouped_answer()), so today
+ * only the allocator refuses; the distinction keeps the report true should
+ * that ever change.
+ */
+static enum count_growth
 reserve_counts(relic_t *ctx, relic_destination_t *destination, size_t added)
 {
 	uint32_t *counts;
 	size_t capacity, bytes, old;
 
 	if (destination->view.kind == RELIC_DESTINATION_SET || added == 0)
-		return (0);
+		return (COUNTS_GROWN);
 	capacity = relic_grow_array_capacity_stepwise(destination->count->capacity,
 	    relic_relation_count(destination->relation), added, 1);
 	if (capacity == 0 || capacity > SIZE_MAX / sizeof(*counts))
-		return (-1);
+		return (COUNTS_NO_MEMORY);
 	if (capacity == destination->count->capacity)
-		return (0);
+		return (COUNTS_GROWN);
 	bytes = capacity * sizeof(*counts);
 	if (!relic_account_charge_round(&ctx->account, bytes))
-		return (-1);
+		return (COUNTS_LIMITED);
 	counts = realloc(destination->count->values, bytes);
 	if (counts == NULL) {
 		relic_account_release_round(&ctx->account, bytes);
-		return (-1);
+		return (COUNTS_NO_MEMORY);
 	}
 	old = destination->count->capacity * sizeof(*counts);
 	destination->count->values = counts;
 	destination->count->capacity = capacity;
 	relic_account_release_round(&ctx->account, old);
-	return (0);
+	return (COUNTS_GROWN);
+}
+
+/*
+ * Report that storage for deriving into `destination` could not be had:
+ * the memory limit refusing it when `limited`, as it refuses an insertion,
+ * or else the allocator.  A round's charge records no refusal in the
+ * account (relic_account_charge_round()), so the caller, which saw which
+ * one refused, says so.
+ */
+void
+relic_destination_refuse_memory(relic_t *ctx,
+    const relic_destination_t *destination, bool limited)
+{
+	char described[RELIC_PRED_TEXT_MAX];
+
+	if (!limited) {
+		relic_diag_no_memory(ctx);
+		return;
+	}
+	relic_diag_limit(ctx, "memory", ctx->account.limit, "deriving",
+	    relic_destination_describe(ctx, destination, described,
+	    sizeof(described)));
 }
 
 int
@@ -296,6 +359,7 @@ relic_destination_insert(relic_t *ctx, relic_destination_t *destination,
     const relic_dom_t *tuples, size_t count, bool *added, size_t *completed)
 {
 	const relic_dom_t *tuple;
+	enum count_growth growth;
 	relic_tuple_id_t id;
 	size_t row;
 
@@ -311,8 +375,10 @@ relic_destination_insert(relic_t *ctx, relic_destination_t *destination,
 			destination->count->values[id - 1] = relic_contribution_combine(
 			    &destination->view, destination->count->values[id - 1], 1);
 		} else {
-			if (reserve_counts(ctx, destination, 1) != 0) {
-				relic_diag_no_memory(ctx);
+			growth = reserve_counts(ctx, destination, 1);
+			if (growth != COUNTS_GROWN) {
+				relic_destination_refuse_memory(ctx, destination,
+				    growth == COUNTS_LIMITED);
 				return (-1);
 			}
 			id = relic_relation_end(destination->relation);
@@ -391,7 +457,8 @@ int
 relic_destination_reserve_append(relic_t *ctx, relic_destination_t *destination,
     relic_destination_append_t *append)
 {
-	if (reserve_counts(ctx, destination, append->relation.count) != 0)
+	if (reserve_counts(ctx, destination, append->relation.count) !=
+	    COUNTS_GROWN)
 		return (-1);
 	return (relic_relation_reserve_append(ctx, destination->relation,
 	    &append->relation));

@@ -1185,8 +1185,10 @@ count_new_tuples(relic_merge_t *merge)
 
 /*
  * Stage every new tuple in its target's append, a task to a part, and then
- * list each append's staged tuples by stripe, an index to a part.  Returns
- * 0, or -1 when an append's arrays or the list of parts could not be had.
+ * list each append's staged tuples by stripe, an index to a part.  A dense
+ * collector's positions, all copied into the append, are then released.
+ * Returns 0, or -1 when an append's arrays or the list of parts could not
+ * be had or the context was interrupted.
  */
 static int
 stage_new_tuples(relic_merge_t *merge)
@@ -1215,8 +1217,7 @@ stage_new_tuples(relic_merge_t *merge)
 			merge->appends[0].relation.growth.by_stripe[s] =
 			    merge->appends[0].relation.stripe_start[s + 1] -
 			    merge->appends[0].relation.stripe_start[s];
-		relic_dense_close(merge->dense);
-		merge->dense = NULL;
+		relic_dense_release_order(merge->dense);
 	}
 
 	return (0);

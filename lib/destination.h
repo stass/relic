@@ -110,10 +110,18 @@ int	 relic_destination_pair(relic_t *ctx,
 int	 relic_destination_begin_round(relic_t *ctx,
 	    const relic_destination_t *destination, const relic_plan_t *plan,
 	    size_t items, size_t targets);
+
+/*
+ * Name a destination in a diagnostic, and report an interrupt or a memory
+ * refusal met while deriving into it.
+ */
 const char *relic_destination_describe(relic_t *ctx,
 	    const relic_destination_t *destination, char *buffer, size_t size);
 int	 relic_destination_refuse_interrupted(relic_t *ctx, const char *verb,
 	    const relic_destination_t *destination);
+void	 relic_destination_refuse_memory(relic_t *ctx,
+	    const relic_destination_t *destination, bool limited);
+
 uint32_t relic_destination_count_value(const relic_destination_t *destination,
 	    relic_tuple_id_t id);
 

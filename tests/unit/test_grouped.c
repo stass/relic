@@ -425,6 +425,8 @@ feature_shapes(void)
 static void
 near_misses(void)
 {
+	char *program;
+
 	compare("a full tuple projection must be distinct",
 	    "s(1). s(2). p(K) :- s(X), K = X mod 2.\n"
 	    "g(K) :- p(K). q(K,N) :- g(K), N = count { p(K) }.\n",
@@ -478,7 +480,17 @@ near_misses(void)
 	compare("a zero-column key counts a nonempty producer", "s(1). s(2).\n"
 	    "p(X) :- s(X). g() :- p(_). q(N) :- g(), N = count { p(X) }.\n",
 	    "q(N)?", true);
-
+	/*
+	 * Every V is a new integer interleaved with the new keys, so a counted
+	 * path that projected V away would assign the keys and counts other
+	 * IDs than the ordinary evaluation that publishes V.
+	 */
+	program = numbered_program(12000,
+	    "p(X,K,V) :- s(X), K = X mod 17 + 100000, V = X * 3 + 200000.\n"
+	    "g(K) :- p(_,K,_). q(K,N) :- g(K), N = count { p(X,K,V) }.\n");
+	compare("a computed non-key number declines the counted path",
+	    program, "q(K,N)?", false);
+	free(program);
 }
 
 
@@ -1029,6 +1041,57 @@ note_callbacks_interrupt_without_replay(void)
 	free(program);
 }
 
+/*
+ * The counted path runs only without a configured limit, so no public
+ * configuration lets a limit refuse its storage.  relic_grouped_answer()
+ * reads the configuration, though, and a limit set on the account alone, a
+ * state only a test can make, lets the path run under one.  Whichever of
+ * the path's allocations the limit then refuses, the report names the
+ * limit rather than the allocator.
+ */
+static void
+count_storage_reports_its_limit(void)
+{
+	observed_t observed;
+	relic_account_t *account;
+	char *program;
+	size_t extra, held, refused_counted;
+	bool answered;
+
+	program = numbered_program(64, rules);
+	refused_counted = 0;
+	answered = false;
+	for (extra = 0; extra < 65536; extra += 8) {
+		if (!open_context(&observed, program, 0, 1)) {
+			check(false, "an account limit", "the program loads");
+			break;
+		}
+		account = &observed.ctx->account;
+		held = account->store_bytes + account->value_bytes +
+		    account->pool_bytes + account->predtab_bytes +
+		    account->arena_bytes;
+		account->limit = held + extra;
+		if (answer_query(&observed, "q(K,N)?") == 0) {
+			answered = true;
+			close_context(&observed);
+			break;
+		}
+		if (observed.counted != 0)
+			refused_counted++;
+		checkf(strstr(observed.diagnostics, "limit exceeded: memory=") !=
+		    NULL && strstr(observed.diagnostics, "out of memory") == NULL,
+		    "an account limit", "a refusal %zu bytes over the held total "
+		    "names the limit: %s", extra, observed.diagnostics);
+		close_context(&observed);
+	}
+	check(refused_counted != 0, "an account limit",
+	    "the limit refuses the counted path itself");
+	check(answered, "an account limit",
+	    "the query succeeds once the limit leaves it room");
+	free(program);
+}
+
+
 int
 main(void)
 {
@@ -1048,5 +1111,6 @@ main(void)
 	shared_refusal_retries_the_same_consumer();
 	shared_storage_and_actual_work();
 	callbacks_keep_their_interruption_contract();
+	count_storage_reports_its_limit();
 	return (check_summary("test_grouped"));
 }

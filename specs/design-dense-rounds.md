@@ -37,7 +37,10 @@ before allocation, so a cell position fits 32 bits. A nonrepresentable
 domain declines dense collection without changing evaluation.
 
 One round owner holds the fixed atomic rank array, scalar worker sequences,
-temporary ordering arrays and their charges. The rank array never moves
+temporary ordering arrays and their charges. The round that opens the
+collector is the only one to close it, after the merge returns; ordering and
+staging advance it through states that each remain readable, so no reader
+meets a closed collector. The rank array never moves
 while workers can reach it. The shared path requires eight-byte lock-free
 64-bit atomics. The build enables the update primitive only where that
 support is established without an additional runtime library; a run-time
@@ -151,7 +154,10 @@ Release the extra position array and rank array after sorting. Decode the
 ordered positions to their two assigned identifiers, compute each ordinary
 wide hash once, and fill the normal append through `relic_relation_stage()`.
 Count canonical stripes from staged entries. Release the last position array
-before key classification and reservation.
+before key classification and reservation, leaving the collector with no
+positions. A round with no new tuple is the same state reached directly:
+ordering releases the rank and ordering arrays and allocates no position
+array, and every reader asks only for positions below the count.
 
 The existing classification, exact serial-memory admission, reservation and
 application consume this append. Dense collection creates no public relation,

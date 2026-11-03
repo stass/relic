@@ -194,7 +194,12 @@ depend on read work and on which computed values are already published.
 
 Every potentially new P value belongs to its key. Omitting assigned non-key
 columns and repeated keys therefore preserves the first occurrence of every
-new value, provided projection preserves P head-column order. Serial batches
+new value, provided projection preserves P head-column order. This is what
+lets the paths agree: a serial batch publishes every value P emits, while a
+deferred task projects each emission to its key before looking for new
+values, so a computed non-key column would be published by one and never seen
+by the other. The destination admits a non-key column only when its EMIT
+term reads a constant or a domain slot, which always hold assigned values. Serial batches
 publish those values through the actual producer continuation. Deferred
 execution resolves them in the same first-occurrence order before applying
 its complete key/count result. All producer values precede count-result values.

@@ -415,6 +415,10 @@ an_old_only_round_needs_no_order_array(void)
 		    SCENARIO, "an empty append succeeds without adding tuples");
 		check(fixture.dense.ranks == NULL && fixture.dense.order == NULL,
 		    SCENARIO, "an old-only round keeps no ordering arrays");
+		check(fixture.dense.job == &fixture.job &&
+		    fixture.dense.pool == fixture.pool &&
+		    fixture.dense.count == 0 && fixture.dense.charged == 0,
+		    SCENARIO, "the collector stays open, empty, for its owner to close");
 	}
 	fixture_close(&fixture);
 }

@@ -133,6 +133,31 @@ enum relic_term_action {
 };
 
 /*
+ * Whether an EMIT column read through `action` holds a value that already
+ * has an identifier.  A constant does, and so does BOUND: the planner turns
+ * every EMIT read of a number or a text slot into NUMBER or TEXT, so an
+ * EMIT's BOUND reads a domain slot.  NUMBER and TEXT hold what the round
+ * computed, which may be new.  BIND and ANY never occur in an EMIT.  The
+ * switch names every action, so the compiler asks for a decision on one
+ * added later.
+ */
+static inline bool
+relic_emit_term_assigned(enum relic_term_action action)
+{
+	switch (action) {
+	case RELIC_PLAN_CONSTANT:
+	case RELIC_PLAN_BOUND:
+		return (true);
+	case RELIC_PLAN_NUMBER:
+	case RELIC_PLAN_TEXT:
+	case RELIC_PLAN_BIND:
+	case RELIC_PLAN_ANY:
+		return (false);
+	}
+	return (false);
+}
+
+/*
  * The kind of a slot, as the paragraph above sets out, and so of the value
  * a postfix program leaves: an identifier, a computed integer, or a
  * computed string.

@@ -297,7 +297,10 @@ enum relic_order relic_value_view_order(const relic_value_view_t *left,
  *
  * relic_account_charge_round() admits `bytes` more for a round's buffers
  * and counts them, or returns false having counted nothing; unlike an
- * arena's refusal, a round's is not recorded, since nothing reports it.
+ * arena's refusal, a round's is not recorded.  Most of a round's refusals
+ * decline it silently, for its serial run to meet and report, so a record
+ * would be blamed on a later failure; a caller that reports one itself
+ * knows which refused it.
  * relic_account_release_round() gives back bytes a round counted.
  */
 bool	 relic_account_charge_round(relic_account_t *account, size_t bytes);

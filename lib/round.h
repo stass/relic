@@ -323,7 +323,15 @@ struct relic_round_job {
  * after the barrier, order and scratch alternate as radix input and output.
  * Only the final order array is fully sorted by rank.
  * Histograms belong to ordered parts, not the workers claiming those parts.
- * charged covers these arrays alone; close releases them and zeroes the owner.
+ * charged covers these arrays alone.
+ *
+ * The round that opens a collector closes it, after the merge returns; the
+ * merge only reads it and steps it forward.  relic_dense_order() succeeds
+ * leaving `count` ordered positions in `order` and nothing else, NULL when
+ * there are none; when it fails the collector keeps whatever it held, for
+ * the close to release.  relic_dense_release_order() gives the positions
+ * back once staging has copied them, leaving none.  Every reader asks for
+ * positions below `count`, so an empty result needs no case of its own.
  */
 struct relic_dense {
 	relic_round_job_t	*job;
@@ -350,6 +358,7 @@ void	 relic_dense_close(relic_dense_t *dense);
 bool	 relic_dense_take(relic_dense_t *dense, size_t task,
 	    uint32_t *sequence, const relic_dom_t *tuple);
 int	 relic_dense_order(relic_dense_t *dense);
+void	 relic_dense_release_order(relic_dense_t *dense);
 void	 relic_dense_tuple(const relic_dense_t *dense, size_t position,
 	    relic_dom_t *tuple);
 
@@ -438,7 +447,9 @@ const relic_round_item_t *relic_round_first_call(const relic_round_t *round);
  * round to be run serially.  `texts_bytes` is at least what the serial
  * run's text buffers would hold by the round's end, which the memory limit
  * is asked of beside the growth. Dense collection supplies ordered positions
- * instead of candidates. The caller closes either collector after the merge.
+ * instead of candidates; the merge orders and stages them, and releases
+ * them once staged, but never closes the collector. The caller closes
+ * either collector after the merge.
  */
 bool	 relic_round_merge(relic_t *ctx, relic_pool_t *pool,
 	    relic_round_t *round, size_t texts_bytes, relic_dense_t *dense);

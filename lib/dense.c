@@ -26,6 +26,7 @@ static relic_dom_t decode(const relic_dense_t *dense, size_t position);
 static void	 initialize_part(void *argument, size_t part, size_t worker);
 static void	 list_part(void *argument, size_t part, size_t worker);
 static void	 radix_part(void *argument, size_t part, size_t worker);
+static void	 release_ranking(relic_dense_t *dense);
 static void	 seed_part(void *argument, size_t part, size_t worker);
 static bool	 stopped(relic_dense_t *dense);
 
@@ -123,8 +124,7 @@ relic_dense_open(relic_dense_t *dense, relic_pool_t *pool,
 		if (emit->arity != 2)
 			return (0);
 		for (c = 0; c < 2; c++) {
-			if (emit->terms[c].action != RELIC_PLAN_CONSTANT &&
-			    emit->terms[c].action != RELIC_PLAN_BOUND)
+			if (!relic_emit_term_assigned(emit->terms[c].action))
 				return (0);
 		}
 	}
@@ -204,11 +204,34 @@ seed_part(void *argument, size_t part, size_t worker RELIC_UNUSED)
 }
 
 /*
- * A cell holds zero for an old tuple, UINT64_MAX for unseen, or task:sequence.
- * Only an earlier task can lower it. Since workers claim increasing tasks,
- * one worker wins each cell at most once: its sequence is bounded by cells.
- * Surviving sequences retain first-derivation order within their owning task.
- * The word publishes no other data, so relaxed CAS and the pool barrier suffice.
+ * A cell holds zero for a tuple the target already has, UINT64_MAX while
+ * no task has claimed it, or task << 32 | sequence for the claim that
+ * holds it; UINT64_MAX names a task above every real one.  A task claims a
+ * cell only from a higher-numbered task, so a cell's task only decreases,
+ * and once every task has run it names the lowest task that derives the
+ * tuple, whatever the schedule.  That task claims the cell at its first
+ * derivation of the tuple, since no lower task can hold it, and never
+ * again, since its own later derivations find the cell already its own;
+ * only a lower-numbered task could take the cell away.
+ *
+ * `sequence` is the worker's dense_sequence, which numbers its successful
+ * claims in the order it makes them.  A task runs on one worker from start
+ * to end, so within a task the numbers follow its derivations, and the
+ * cells a task keeps sort in the order of their first derivation there.
+ * The sequence values themselves depend on the schedule, but that order
+ * does not.  Tasks are cut from the round in its serial order, so ordering
+ * the ranks, by task and then by sequence, gives the order in which a
+ * serial run first derives each tuple.
+ *
+ * relic_pool_for() hands each worker its tasks in increasing order, so a
+ * worker that claimed a cell for one task never claims it again for a
+ * later one: it claims each cell at most once, which bounds its sequence
+ * by cells.  Any false return, such as for a tuple outside the rectangle or
+ * past the room the limit admits, abandons the round, which then runs
+ * serially; the ranks of an abandoned round are never ordered.
+ *
+ * The word publishes no other data, so relaxed CAS and the pool barrier
+ * suffice.
  */
 bool
 relic_dense_take(relic_dense_t *dense RELIC_UNUSED, size_t task RELIC_UNUSED,
@@ -313,7 +336,7 @@ relic_dense_order(relic_dense_t *dense)
 		return (-1);
 	}
 	if (dense->count == 0) {
-		relic_dense_close(dense);
+		release_ranking(dense);
 		return (0);
 	}
 	bytes = relic_saturating_product(dense->count, sizeof(*dense->order));
@@ -358,22 +381,52 @@ relic_dense_order(relic_dense_t *dense)
 			return (-1);
 		dense->pool->tasks[task].inserted++;
 	}
-	/* Only ordered positions survive into append staging. */
+	release_ranking(dense);
+	return (0);
+}
+
+/*
+ * Free what only ordering needs, keeping the `count` ordered positions and
+ * their charge: staging reads nothing else.  With no positions, order was
+ * never allocated and nothing stays charged.
+ */
+static void
+release_ranking(relic_dense_t *dense)
+{
+	size_t kept;
+
+	kept = dense->count * sizeof(*dense->order);
+	assert(kept <= dense->charged && (dense->order != NULL || kept == 0));
 	free(dense->ranks);
 	free(dense->scratch);
 	free(dense->histograms);
 	dense->ranks = NULL;
 	dense->scratch = NULL;
 	dense->histograms = NULL;
-	relic_account_release_round(dense->job->account, dense->charged - bytes);
-	dense->charged = bytes;
-	return (0);
+	relic_account_release_round(dense->job->account, dense->charged - kept);
+	dense->charged = kept;
+}
+
+void
+relic_dense_release_order(relic_dense_t *dense)
+{
+	assert(dense->ranks == NULL && dense->scratch == NULL &&
+	    dense->histograms == NULL);
+	free(dense->order);
+	dense->order = NULL;
+	dense->count = 0;
+	if (dense->charged != 0)
+		relic_account_release_round(dense->job->account, dense->charged);
+	dense->charged = 0;
 }
 
 void
 relic_dense_tuple(const relic_dense_t *dense, size_t position, relic_dom_t *tuple)
 {
-	size_t cell = dense->order[position];
+	size_t cell;
+
+	assert(position < dense->count);
+	cell = dense->order[position];
 
 	tuple[0] = decode(dense, cell / dense->width);
 	tuple[1] = decode(dense, cell % dense->width);

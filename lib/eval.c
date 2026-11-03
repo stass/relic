@@ -534,9 +534,6 @@ static void	 note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
 static void	 report_failure(relic_t *ctx, const relic_rule_t *rule,
 		    const relic_destination_t *destination,
 		    const relic_exec_error_t *error);
-static void	 report_texts_refused(relic_t *ctx,
-		    const relic_destination_t *destination,
-		    enum relic_exec_failure failure);
 static int	 resolve_pending(relic_evaluation_t *eval,
 		    relic_relation_t *relation);
 static const char *describe_fold(const relic_aggregate_t *aggregate,
@@ -784,7 +781,8 @@ report_failure(relic_t *ctx, const relic_rule_t *rule,
 		break;
 	case RELIC_FAIL_LIMIT:
 	case RELIC_FAIL_NO_MEMORY:
-		report_texts_refused(ctx, destination, error->failure);
+		relic_destination_refuse_memory(ctx, destination,
+		    error->failure == RELIC_FAIL_LIMIT);
 		return;
 	}
 
@@ -798,27 +796,6 @@ report_failure(relic_t *ctx, const relic_rule_t *rule,
 	    "%s in rule %s%s%s", what, relic_pred_describe(ctx,
 	    ctx->program.rules.entries[rule->origin].head, described,
 	    sizeof(described)), separator, detail);
-}
-
-/*
- * Report that a buffer for the strings a round's plans compute could not
- * be had, for `failure`: the memory limit refusing it, as it refuses an
- * insertion into `relation`, or the allocator.
- */
-static void
-report_texts_refused(relic_t *ctx, const relic_destination_t *destination,
-    enum relic_exec_failure failure)
-{
-	char described[RELIC_PRED_TEXT_MAX];
-
-	if (failure != RELIC_FAIL_LIMIT) {
-		relic_diag_no_memory(ctx);
-		return;
-	}
-
-	relic_diag_limit(ctx, "memory", ctx->account.limit, "deriving",
-	    relic_destination_describe(ctx, destination, described,
-	    sizeof(described)));
 }
 
 /*
@@ -1325,8 +1302,8 @@ run_round(relic_evaluation_t *eval, relic_round_t *round)
 	if (calling != NULL &&
 	    relic_scratch_begin_texts(&eval->scratch, &eval->ctx->account,
 	    &failure) != 0) {
-		report_texts_refused(eval->ctx, round->targets[calling->target],
-		    failure);
+		relic_destination_refuse_memory(eval->ctx,
+		    round->targets[calling->target], failure == RELIC_FAIL_LIMIT);
 		return (-1);
 	}
 
