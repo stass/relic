@@ -254,7 +254,7 @@ exports_write(invocation_t *invocation, bool sorted)
 
 /*
  * Write one export: the answer to its query, into its file.  The file is
- * created or truncated only when the first bytes reach it, or once the
+ * created or truncated only when the first row is written, or once the
  * query has succeeded with none: the library delivers no row until
  * everything in the evaluation that can fail has succeeded, so an export
  * whose evaluation fails -- at a limit, for memory -- leaves its file as it

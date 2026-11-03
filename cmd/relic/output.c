@@ -6,6 +6,7 @@
 
 #include "config.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -26,7 +27,10 @@
  * control characters escaped, C1 included, so a symbol and a string never
  * look alike and a program cannot send a terminal escape sequence to whoever
  * reads its results.  csv and tsv are machine formats and write a value's
- * bytes, with only the quoting or escaping their own separators need.  json
+ * bytes, with only the quoting or escaping their own separators need, so
+ * that a table they write reads back as the same values; but to a terminal,
+ * which no table is read back from, they write every byte that is not part
+ * of a printable character as \xHH, as a string literal does.  json
  * writes integers as numbers and everything else as JSON strings, a string
  * value keeping its quoted literal inside the JSON string, so that a leading
  * quote marks a string and any bytes survive in a document that must be
@@ -59,9 +63,9 @@
  * rows are counted and dropped, which is what -n asks for, and what .plan
  * does with the rows of the query it shows.
  *
- * An output attached to a file by its path opens the file only when the
- * first bytes must reach it, or once a query has succeeded without any, so
- * that a query that fails leaves the file as it was.
+ * An output attached to a file by its path opens the file only when a
+ * query's first row is written, or once a query has succeeded without any,
+ * so that a query that fails leaves the file as it was.
  */
 
 /* The bytes gathered before they are handed to the stream. */
@@ -98,16 +102,21 @@ struct row_order {
 };
 
 static void	 begin_query(output_t *out);
+static size_t	 character_length(const unsigned char *bytes,
+		    size_t available, bool *printablep);
 static int	 compare_rows(const row_order_t *order,
 		    const relic_value_t *left, const relic_value_t *right);
 static int	 count_row(void *context, const relic_value_t *values,
 		    size_t count);
 static bool	 csv_needs_quotes(const char *bytes, size_t length);
 static void	 end_query(output_t *out);
+static const char *field_escape(enum output_format format, char byte);
 static char	 field_separator(enum output_format format);
 static void	 flush_buffer(output_t *out);
 static int	 give_buffer(output_t *out, const char *name,
 		    enum output_format format, bool sorted);
+static void	 hex_escape(const unsigned char *bytes, size_t length,
+		    char *piece, size_t size);
 static bool	 open_pending(output_t *out);
 static size_t	 format_decimal(int64_t integer,
 		    char text[INTEGER_TEXT_MAX]);
@@ -116,8 +125,11 @@ static void	 merge_sort(const row_order_t *order,
 		    size_t count);
 static size_t	 literal_piece(const unsigned char *bytes, size_t available,
 		    char *piece, size_t size);
+static size_t	 printable_piece(const unsigned char *bytes, size_t available,
+		    char *piece, size_t size);
 static void	 put_byte(output_t *out, char byte);
 static void	 put_bytes(output_t *out, const char *bytes, size_t length);
+static void	 put_field(output_t *out, const char *bytes, size_t length);
 static void	 put_literal(output_t *out, const char *bytes, size_t length,
 		    enum literal_context context);
 static void	 put_literal_text(output_t *out, const char *text,
@@ -126,7 +138,7 @@ static void	 put_text(output_t *out, const char *text);
 static int	 receive_row(void *context, const relic_value_t *values,
 		    size_t count);
 static void	 report_write_failure(output_t *out, int error);
-static const char *tsv_escape(char byte);
+static void	 use_stream(output_t *out, FILE *stream);
 static size_t	 utf8_sequence_length(const unsigned char *bytes,
 		    size_t available);
 static const char *value_bytes(const output_t *out,
@@ -185,12 +197,6 @@ output_init(output_t *out, const char *program_name, relic_t *ctx)
 	out->separated = true;
 }
 
-/*
- * The stream's own buffer is turned off, so that what other writers send
- * through stdio reaches the descriptor at once, in order with the blocks
- * flush_buffer() writes to it directly.  A stream that refuses keeps its
- * buffer, and flush_buffer() empties it before each block.
- */
 int
 output_attach(output_t *out, FILE *stream, const char *name,
     enum output_format format, bool sorted)
@@ -198,8 +204,7 @@ output_attach(output_t *out, FILE *stream, const char *name,
 	if (give_buffer(out, name, format, sorted) != 0)
 		return (-1);
 
-	setvbuf(stream, NULL, _IONBF, 0);
-	out->stream = stream;
+	use_stream(out, stream);
 
 	return (0);
 }
@@ -263,11 +268,27 @@ open_pending(output_t *out)
 		return (false);
 	}
 
-	setvbuf(stream, NULL, _IONBF, 0);
-	out->stream = stream;
+	use_stream(out, stream);
 	out->pending_path = NULL;
 
 	return (true);
+}
+
+/*
+ * Make `stream` the one the output writes to, and find whether it is a
+ * terminal, which decides how csv and tsv write a value.
+ *
+ * The stream's own buffer is turned off, so that what other writers send
+ * through stdio reaches the descriptor at once, in order with the blocks
+ * flush_buffer() writes to it directly.  A stream that refuses keeps its
+ * buffer, and flush_buffer() empties it before each block.
+ */
+static void
+use_stream(output_t *out, FILE *stream)
+{
+	setvbuf(stream, NULL, _IONBF, 0);
+	out->stream = stream;
+	out->terminal = isatty(fileno(stream)) == 1;
 }
 
 /*
@@ -327,9 +348,10 @@ write_block(FILE *stream, const char *bytes, size_t length)
 }
 
 /*
- * Hand the bytes the buffer holds to the stream, opening its file first if
- * it is not yet open, and empty the buffer whether or not they were
- * written: put_byte() and put_bytes() rely on a flush leaving room.
+ * Hand the bytes the buffer holds to the stream, which begin_query() opened
+ * before the first of them was gathered, and empty the buffer whether or
+ * not they were written: put_byte() and put_bytes() rely on a flush leaving
+ * room.
  *
  * Once a write has failed nothing more reaches the stream: what was
  * gathered since is dropped here, and receive_row() or write_sorted_rows()
@@ -342,7 +364,8 @@ flush_buffer(output_t *out)
 {
 	int error;
 
-	if (out->filled > 0 && !out->write_failed && open_pending(out)) {
+	if (out->filled > 0 && !out->write_failed) {
+		assert(out->stream != NULL);
 		error = write_block(out->stream, out->buffer, out->filled);
 		if (error != 0)
 			report_write_failure(out, error);
@@ -510,16 +533,83 @@ utf8_sequence_length(const unsigned char *bytes, size_t available)
 }
 
 /*
+ * How many bytes the character that begins at `bytes` takes, and whether it
+ * is printable, which is what decides whether a person may be shown it as it
+ * is.
+ *
+ * A character is not printable when it is a C0 control or DEL; a byte that
+ * does not begin a valid UTF-8 sequence, which counts as a character of one
+ * byte; or a C1 control, U+0080 to U+009F, of two bytes, which some
+ * terminals obey as the start of an escape sequence just as they do ESC.
+ * Everything else -- printable ASCII, or a whole UTF-8 character above the
+ * C1 range -- is printable.
+ */
+static size_t
+character_length(const unsigned char *bytes, size_t available,
+    bool *printablep)
+{
+	size_t length;
+
+	length = utf8_sequence_length(bytes, available);
+	if (length == 0) {
+		*printablep = false;
+		return (1);
+	}
+
+	*printablep = bytes[0] >= 0x20 && bytes[0] != 0x7f &&
+	    !(length == 2 && bytes[0] == 0xc2 && bytes[1] < 0xa0);
+
+	return (length);
+}
+
+/*
+ * Write `length` bytes, at most two, into `piece` as \xHH escapes.
+ */
+static void
+hex_escape(const unsigned char *bytes, size_t length, char *piece,
+    size_t size)
+{
+	assert(length == 1 || length == 2);
+
+	if (length == 2)
+		snprintf(piece, size, "\\x%02x\\x%02x",
+		    (unsigned int)bytes[0], (unsigned int)bytes[1]);
+	else
+		snprintf(piece, size, "\\x%02x", (unsigned int)bytes[0]);
+}
+
+/*
+ * How the character that begins at `bytes` is written where a person may
+ * read it: into `piece`, returning how many bytes it took.  A printable
+ * character is copied and every byte of any other is written as \xHH, so a
+ * piece is always valid UTF-8 holding no control character, NUL included.
+ */
+static size_t
+printable_piece(const unsigned char *bytes, size_t available, char *piece,
+    size_t size)
+{
+	size_t length;
+	bool printable;
+
+	length = character_length(bytes, available, &printable);
+	if (!printable) {
+		hex_escape(bytes, length, piece, size);
+		return (length);
+	}
+
+	bcopy(bytes, piece, length);
+	piece[length] = '\0';
+
+	return (length);
+}
+
+/*
  * The next piece of a string literal: how the character that begins at
  * `bytes` is written, into `piece`, and how many bytes it took.
  *
  * A backslash, a double quote, newline, tab, carriage return and NUL have
- * escapes of their own.  Every other byte that is not part of a printable
- * character is written as \xHH: the C0 controls and DEL; a byte that does
- * not begin a valid UTF-8 sequence; and both bytes of a C1 control, U+0080 to
- * U+009F, which some terminals obey as the start of an escape sequence just
- * as they do ESC.  Everything else -- printable ASCII, or a whole UTF-8
- * character above the C1 range -- is copied.
+ * escapes of their own, and every other character is written as
+ * printable_piece() writes it.
  *
  * \xHH is an escape the language already has, so the literal still spells
  * exactly the bytes the string holds, and it is always valid UTF-8 holding no
@@ -533,8 +623,6 @@ static size_t
 literal_piece(const unsigned char *bytes, size_t available, char *piece,
     size_t size)
 {
-	size_t length;
-
 	switch (bytes[0]) {
 	case '\\':
 		strlcpy(piece, "\\\\", size);
@@ -558,23 +646,7 @@ literal_piece(const unsigned char *bytes, size_t available, char *piece,
 		break;
 	}
 
-	length = utf8_sequence_length(bytes, available);
-
-	if (length == 2 && bytes[0] == 0xc2 && bytes[1] < 0xa0) {
-		snprintf(piece, size, "\\x%02x\\x%02x",
-		    (unsigned int)bytes[0], (unsigned int)bytes[1]);
-		return (2);
-	}
-
-	if (length == 0 || bytes[0] < 0x20 || bytes[0] == 0x7f) {
-		snprintf(piece, size, "\\x%02x", (unsigned int)bytes[0]);
-		return (1);
-	}
-
-	bcopy(bytes, piece, length);
-	piece[length] = '\0';
-
-	return (length);
+	return (printable_piece(bytes, available, piece, size));
 }
 
 /*
@@ -671,45 +743,18 @@ csv_needs_quotes(const char *bytes, size_t length)
 }
 
 /*
- * A csv field: a value's bytes, quoted when they must be, with a double
- * quote inside a quoted field doubled.
- */
-static void
-write_csv_value(output_t *out, const relic_value_t *value)
-{
-	const char *bytes;
-	size_t length;
-	size_t i;
-
-	if (value->type == RELIC_INTEGER) {
-		write_integer(out, value->v.integer);
-		return;
-	}
-
-	bytes = value_bytes(out, value, &length);
-
-	if (!csv_needs_quotes(bytes, length)) {
-		put_bytes(out, bytes, length);
-		return;
-	}
-
-	put_byte(out, '"');
-	for (i = 0; i < length; i++) {
-		if (bytes[i] == '"')
-			put_byte(out, '"');
-		put_byte(out, bytes[i]);
-	}
-	put_byte(out, '"');
-}
-
-/*
- * The escape a byte takes inside a tsv field, or NULL for a byte written as
- * it is: a backslash, tab, newline and carriage return are escaped, so that
- * neither separator can appear inside a field.
+ * The escape a byte takes inside a field of the csv or tsv `format`, or NULL
+ * for a byte the format needs no escape for.  In csv a double quote is
+ * doubled, as it must be inside a quoted field, and a field that holds one
+ * is always quoted.  In tsv a backslash, tab, newline and carriage return are
+ * escaped, so that neither separator can appear inside a field.
  */
 static const char *
-tsv_escape(char byte)
+field_escape(enum output_format format, char byte)
 {
+	if (format == OUTPUT_CSV)
+		return (byte == '"' ? "\"\"" : NULL);
+
 	switch (byte) {
 	case '\\':
 		return ("\\\\");
@@ -725,17 +770,68 @@ tsv_escape(char byte)
 }
 
 /*
- * A tsv field: a value's bytes, each run of bytes that needs no escape
- * copied whole, and each byte that does replaced by its escape.
+ * Write a value's bytes as the inside of a csv or tsv field: each run of
+ * bytes that needs no escape copied whole, and each piece that does replaced
+ * by its escape.
+ *
+ * A byte the format has an escape for takes it wherever the field goes.  To
+ * a terminal, every byte of a character that is not printable is written as
+ * \xHH as well, so that a value cannot send the terminal a control
+ * sequence; anywhere else it is copied, so that the field reads back as the
+ * value's bytes.
  */
 static void
-write_tsv_value(output_t *out, const relic_value_t *value)
+put_field(output_t *out, const char *bytes, size_t length)
+{
+	const unsigned char *unsigned_bytes;
+	const char *escape;
+	char piece[LITERAL_PIECE_MAX];
+	size_t run_start;
+	size_t taken;
+	size_t i;
+	bool printable;
+
+	unsigned_bytes = (const unsigned char *)bytes;
+
+	run_start = 0;
+	i = 0;
+	while (i < length) {
+		escape = field_escape(out->format, bytes[i]);
+		taken = 1;
+		if (escape == NULL && out->terminal) {
+			taken = character_length(&unsigned_bytes[i], length - i,
+			    &printable);
+			if (!printable) {
+				hex_escape(&unsigned_bytes[i], taken, piece,
+				    sizeof(piece));
+				escape = piece;
+			}
+		}
+
+		if (escape == NULL) {
+			i += taken;
+			continue;
+		}
+
+		put_bytes(out, &bytes[run_start], i - run_start);
+		put_text(out, escape);
+		i += taken;
+		run_start = i;
+	}
+	put_bytes(out, &bytes[run_start], length - run_start);
+}
+
+/*
+ * A csv field: a value, quoted when its bytes must be.  Whether they must is
+ * decided by the bytes themselves, so a field is quoted the same way
+ * whether or not its bytes are escaped for a terminal.
+ */
+static void
+write_csv_value(output_t *out, const relic_value_t *value)
 {
 	const char *bytes;
-	const char *escape;
 	size_t length;
-	size_t run_start;
-	size_t i;
+	bool quoted;
 
 	if (value->type == RELIC_INTEGER) {
 		write_integer(out, value->v.integer);
@@ -744,17 +840,27 @@ write_tsv_value(output_t *out, const relic_value_t *value)
 
 	bytes = value_bytes(out, value, &length);
 
-	run_start = 0;
-	for (i = 0; i < length; i++) {
-		escape = tsv_escape(bytes[i]);
-		if (escape == NULL)
-			continue;
+	quoted = csv_needs_quotes(bytes, length);
+	if (quoted)
+		put_byte(out, '"');
+	put_field(out, bytes, length);
+	if (quoted)
+		put_byte(out, '"');
+}
 
-		put_bytes(out, &bytes[run_start], i - run_start);
-		put_text(out, escape);
-		run_start = i + 1;
+static void
+write_tsv_value(output_t *out, const relic_value_t *value)
+{
+	const char *bytes;
+	size_t length;
+
+	if (value->type == RELIC_INTEGER) {
+		write_integer(out, value->v.integer);
+		return;
 	}
-	put_bytes(out, &bytes[run_start], length - run_start);
+
+	bytes = value_bytes(out, value, &length);
+	put_field(out, bytes, length);
 }
 
 /*
@@ -865,7 +971,8 @@ write_value(output_t *out, const relic_value_t *value)
  * Write what comes before a query's first row: a blank line after an earlier
  * query's results, or the bracket that opens a JSON document.  Called when
  * the first row is written, or when the query ends with none, so that a
- * query that fails writes nothing.
+ * query that fails writes nothing.  A file not yet open is opened here, so
+ * that whether it is a terminal is known before any value is written.
  */
 static void
 begin_query(output_t *out)
@@ -873,6 +980,8 @@ begin_query(output_t *out)
 	if (out->begun)
 		return;
 	out->begun = true;
+
+	(void)open_pending(out);
 
 	if (out->format == OUTPUT_JSON)
 		put_byte(out, '[');
@@ -1190,7 +1299,7 @@ output_is_stdout(const output_t *out)
 void
 output_prompted(output_t *out)
 {
-	if (out->stream != NULL && isatty(fileno(out->stream)) == 1)
+	if (out->terminal)
 		out->separated = false;
 }
 
@@ -1211,8 +1320,8 @@ output_prompted(output_t *out)
  * once it has been sorted, and an interrupt while it is written stops it
  * between two rows in the same way.
  *
- * An output whose file is not yet open opens it when the first bytes reach
- * it, or once the query has succeeded without writing any, so a query that
+ * An output whose file is not yet open opens it when the first row is
+ * written, or once the query has succeeded without any, so a query that
  * fails before its first row leaves the file as it was.
  */
 int
@@ -1243,7 +1352,6 @@ output_query(output_t *out, relic_query_t *query, size_t *rowsp)
 	*rowsp = out->rows_written;
 
 	flush_buffer(out);
-	(void)open_pending(out);
 
 	return (out->write_failed ? -1 : 0);
 }

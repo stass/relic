@@ -133,9 +133,9 @@ context's `-e` output.
 A query's result is a set of rows of equal width. Every format writes one
 row per answer and each value by its type. The exact byte forms are in
 `man/relic.1`; what matters here is why each format escapes what it does.
-Output is byte-transparent: csv and tsv write a string's bytes as they are,
-and text and json write every byte either as itself or as an escape that
-spells it, so nothing a string holds is lost.
+Output is byte-transparent: csv and tsv write a string's bytes as they are
+to a file or a pipe, and text and json write every byte either as itself or
+as an escape that spells it, so nothing a string holds is lost.
 
 **text** writes each value as a program would: an integer in decimal, a
 symbol as its bytes, a string as a quoted literal, columns separated by a
@@ -157,9 +157,17 @@ string is not an empty line some readers would skip. **tsv** escapes
 backslash, tab, newline and carriage return instead of quoting, so neither
 separator can appear inside a field. Both are untyped: a symbol and a string
 with the same bytes are written alike. Both are machine formats and carry
-control bytes unescaped, ESC included; printed to a terminal, an untrusted
-program's results in either can carry escape sequences, as `cat` of the
-program itself could.
+control bytes unescaped, ESC included, to a file or a pipe, so that a table
+relic writes is a table it reads back. **To a terminal**, which no table is
+read back from, both write every byte that is not part of a printable
+character as `\xHH`, by the text format's rule, so an untrusted program's
+results, or an imported table's, cannot send the terminal an escape
+sequence there either; tsv's own escapes come first, while csv, which
+escapes nothing else, leaves a backslash as it is, so on a terminal a
+csv field's `\x1b` can be either four bytes or one, as `ls -q`'s `?` can be
+any byte. Whether the stream is a terminal is found once, when it is
+attached or opened and before anything is written to it, so a file named by
+`-o` or `-O` counts when it is one, such as `/dev/tty`.
 
 **json** writes one document per query, an array of rows, each row an
 array of values. An integer is a JSON number, written exactly; a symbol is a

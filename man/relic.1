@@ -1040,7 +1040,8 @@ not valid UTF-8 are escaped, so results are always safe to print.
 RFC 4180 fields separated by commas, each record ending in a newline.
 A field is quoted when it holds a comma, a double quote, a carriage return
 or a newline, or is empty.
-Symbols and strings are written as their bytes, unescaped.
+Symbols and strings are written as their bytes, unescaped, except at a
+terminal, described below.
 .It Cm tsv
 Fields separated by one tab.
 A backslash, tab, newline and carriage return inside a value are written as
@@ -1048,7 +1049,8 @@ A backslash, tab, newline and carriage return inside a value are written as
 .Ql \et ,
 .Ql \en
 and
-.Ql \er .
+.Ql \er ,
+and every other byte as it is, except at a terminal.
 .It Cm json
 One document per query: an array of rows, each an array of values, one row
 per line.
@@ -1058,6 +1060,28 @@ value is a JSON string holding the
 format's quoted literal, so a JSON string beginning with a double quote is
 a string value and any other is a symbol.
 .El
+.Pp
+Written to a file or a pipe,
+.Cm csv
+and
+.Cm tsv
+hold each value's bytes, so a table written with them reads back with
+.Fl I
+as the same values.
+Written to a terminal, standard output or a file named by
+.Fl o
+or
+.Fl O
+that is one, they write every byte of a value that is not part of a
+printable character as
+.Ql \exHH ,
+by the rule of the
+.Cm text
+format, so that results are safe to print there too:
+.Cm tsv
+keeps its own escapes, and
+.Cm csv
+leaves a backslash as it is.
 .Pp
 Diagnostics, plans, counts and counters are written to the standard error,
 so the standard output holds only results and, in an interactive session,

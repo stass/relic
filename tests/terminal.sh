@@ -57,10 +57,13 @@ EOF
 # the empty lines that end the session after the last answer dropped.  The
 # terminal and libedit may each write the mark as ^D, and libedit may back
 # over one with backspaces, so all three are deleted wherever they are.
+# What comes back is bytes, not always valid in the locale's encoding, and
+# is read in the C locale.
 answers_of() {
-	tr -d '\r\b' < "$1" | sed -e 's/relic> //g' -e 's/\^D//g' |
-	    grep -v '?$' |
-	    awk '{ lines[NR] = $0 } END {
+	LC_ALL=C tr -d '\r\b' < "$1" |
+	    LC_ALL=C sed -e 's/relic> //g' -e 's/\^D//g' |
+	    LC_ALL=C grep -v '?$' |
+	    LC_ALL=C awk '{ lines[NR] = $0 } END {
 		last = NR
 		while (last > 0 && lines[last] == "")
 			last--
@@ -138,5 +141,77 @@ if [ "$status" -ne 2 ] ||
 	cat "$work/import" >&2
 	fail "an import of - at a terminal exited $status"
 fi
+
+# csv and tsv write a value's bytes to a file or a pipe, so that the table
+# reads back, but at a terminal every byte that is not part of a printable
+# character is written as \xHH, so that a value cannot send the terminal an
+# escape sequence: here an OSC that would retitle the window, a C1 CSI, a
+# carriage return that would write over the line, a newline, a byte that is
+# not UTF-8, NUL and DEL.  Printable characters of two, three and four bytes
+# are written as they are.  tsv keeps its own escapes, and so its backslash
+# is doubled and csv's is not.  The check is made on the stream the rows go
+# to: standard output, a file named by -o, or one named by -O.
+cat > "$work/hostile.dl" <<'EOF'
+p("a\x1b]0;pwn\x07b").
+p("c\xc2\x9bd").
+p("e\rf\ng").
+p("h\xffi\\j").
+p("k\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80l").
+p("m\0n").
+p("o\x7fp").
+p(X)?
+EOF
+printable=$(printf 'k\303\251\342\202\254\360\237\230\200l')
+printf '%s\n' 'a\x1b]0;pwn\x07b' 'c\xc2\x9bd' '"e\x0df\x0ag"' 'h\xffi\j' \
+    "$printable" 'm\x00n' 'o\x7fp' > "$work/expected.csv"
+printf '%s\n' 'a\x1b]0;pwn\x07b' 'c\xc2\x9bd' 'e\rf\ng' 'h\xffi\\j' \
+    "$printable" 'm\x00n' 'o\x7fp' > "$work/expected.tsv"
+for format in csv tsv; do
+	for output in '' '-o /dev/tty' "-n -O $format:p=/dev/tty"; do
+		# $output is unquoted to split into its options, or into
+		# nothing.
+		"$pty" "$RELIC" -s -F "$format" $output "$work/hostile.dl" \
+		    < /dev/null > "$work/typed" ||
+		    fail "-F $format $output at a terminal exited $?"
+		answers_of "$work/typed" > "$work/answers"
+		if ! cmp -s "$work/expected.$format" "$work/answers"; then
+			echo "-F $format $output wrote at a terminal:" >&2
+			od -c "$work/answers" >&2
+			fail "-F $format $output escaped wrongly at a terminal"
+		fi
+	done
+done
+
+# A session's answers are written the same way.
+grep -v '?$' "$work/hostile.dl" > "$work/facts.dl"
+for format in csv tsv; do
+	printf 'p(X)?\n' |
+	    "$pty" -p 'relic> ' "$RELIC" -i -s -F "$format" "$work/facts.dl" \
+	    > "$work/typed" || fail "a session with -F $format exited $?"
+	answers_of "$work/typed" > "$work/answers"
+	if ! cmp -s "$work/expected.$format" "$work/answers"; then
+		echo "a session with -F $format wrote at a terminal:" >&2
+		od -c "$work/answers" >&2
+		fail "a session with -F $format escaped wrongly at a terminal"
+	fi
+done
+
+# Through a pipe the same rows are the values' bytes.
+{
+	printf 'a\033]0;pwn\007b\nc\302\233d\n"e\rf\ng"\nh\377i\\j\n'
+	printf '%s\nm\000n\no\177p\n' "$printable"
+} > "$work/expected.csv"
+{
+	printf 'a\033]0;pwn\007b\nc\302\233d\ne\\rf\\ng\nh\377i\\\\j\n'
+	printf '%s\nm\000n\no\177p\n' "$printable"
+} > "$work/expected.tsv"
+for format in csv tsv; do
+	"$RELIC" -s -F "$format" "$work/hostile.dl" | cat > "$work/piped" ||
+	    fail "-F $format into a pipe exited $?"
+	if ! cmp -s "$work/expected.$format" "$work/piped"; then
+		od -c "$work/piped" >&2
+		fail "-F $format into a pipe did not write the values' bytes"
+	fi
+done
 
 exit 0

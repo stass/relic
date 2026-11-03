@@ -100,8 +100,10 @@ typedef struct export_operand export_operand_t;
  * An output with no `buffer` discards every row, counting it, which is what
  * -n asks for.  output_attach() gives it a buffer and a stream to write to;
  * output_attach_file() gives it a buffer and `pending_path`, the file it
- * opens when the first bytes must reach it, after which `stream` is that
- * file and `pending_path` NULL.
+ * opens when the first row is written, after which `stream` is that
+ * file and `pending_path` NULL.  `terminal` is whether `stream` is a
+ * terminal, found once, when it is attached or opened, and always before the
+ * first value is written to it.
  *
  * The rows of one query are written as they are delivered, or collected and
  * sorted first when `sorted` is set.  `queries_written` is what decides
@@ -137,6 +139,7 @@ struct output {
 	bool			 begun;
 	bool			 separated;
 	bool			 sorted;
+	bool			 terminal;
 	bool			 write_failed;
 };
 
@@ -210,7 +213,7 @@ void	write_stats(relic_t *ctx, FILE *stream);
  * gives it a stream, named `name` in messages, to write them to instead,
  * returning 0, or -1 having reported that memory ran out.
  * output_attach_file() gives it the file at `path` instead, named by its
- * path, which is created or truncated only when the first bytes reach it
+ * path, which is created or truncated only when the first row is written
  * or a query succeeds without writing any; a file that cannot be opened is
  * reported then, as a write that failed.  Its rows are facts of
  * `predicate` in OUTPUT_DL, which takes one and is written only to a file;

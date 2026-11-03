@@ -65,12 +65,12 @@ files. relic does not, for three reasons.
   program may come from someone else: the fuzz targets take arbitrary
   programs, the hash seed is random so no program can be crafted against
   it, and text and json output escape the control bytes a program's strings
-  hold. Loading a program gives it no capability but computation. A
-  directive that opened a path would let a program read any file the user
-  can read and print it as rows -- a private key among them -- and one that
-  wrote a path could overwrite any file the user can write. With files named
-  only by whoever runs the tool or embeds the library, a program opens
-  nothing.
+  hold, as csv and tsv do at a terminal. Loading a program gives it no
+  capability but computation. A directive that opened a path would let a
+  program read any file the user can read and print it as rows -- a
+  private key among them -- and one that wrote a path could overwrite any
+  file the user can write. With files named only by whoever runs the tool
+  or embeds the library, a program opens nothing.
 * **The program stays a function of its text.** Data named by the caller
   is an argument, as input is to every other Unix filter. A program that
   named its own files would mean something different on every machine.
@@ -432,7 +432,7 @@ Within the tool's [phases](design-cli.md#phases):
 
 ## Writing a file
 
-**A file is opened when its first bytes reach it**, created or truncated as
+**A file is opened when its first row is written**, created or truncated as
 `-o`'s is, or once its query has succeeded with no rows, which creates an
 empty file. The library delivers no row until everything in the evaluation
 that can fail has succeeded, so an export whose evaluation fails -- at a
