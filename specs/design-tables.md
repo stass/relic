@@ -515,10 +515,11 @@ ignores case or normalizes Unicode, two names that differ only in that,
 are one file. An input, which the run opens only later, is identified when
 the outputs have been opened: by `fstat(2)` of the file its path opens,
 once `stat(2)` says it is a regular file, opened for reading without
-blocking, so opening it has no effect of its own. Opening the path, rather
-than only `stat(2)` of it, is what makes `/dev/stdin` and `/dev/fd/0` the
-files their descriptors hold: on macOS `stat(2)` of such a path gives the
-inode with the device of `/dev`. An input that names an output's new file
+blocking, so opening it has no effect of its own. A path that names a
+descriptor, such as `/dev/stdin` or `/dev/fd/0`, is identified only where
+`stat(2)` reports it as a regular file, as macOS does; where it reports a
+device, as FreeBSD's devfs does without fdescfs, it has no identity, and
+the check is best effort there. An input that names an output's new file
 is that file, and is refused. Anything else has no identity and conflicts
 with nothing: a device or a FIFO holds no stored data an output could
 replace, so any number of outputs may write `/dev/null`; a directory fails

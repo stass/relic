@@ -161,14 +161,6 @@ if [ "$status" -ne 2 ] || ! cmp -s "$work/q.dl" "$work/q.kept"; then
 	fail "-o over the program on standard input exited $status, expected 2"
 fi
 
-# A path that names a descriptor is the file the descriptor holds, however
-# the system reports the path's own device.
-status=0
-"$RELIC" -o "$work/q.dl" /dev/stdin < "$work/q.dl" >/dev/null 2>&1 ||
-    status=$?
-if [ "$status" -ne 2 ] || ! cmp -s "$work/q.dl" "$work/q.kept"; then
-	fail "-o over the program read as /dev/stdin exited $status, expected 2"
-fi
 status=0
 "$RELIC" -o /dev/stdout -O "tsv:path=$work/stdout.tsv" "$work/q.dl" \
     >"$work/stdout.tsv" 2>/dev/null || status=$?

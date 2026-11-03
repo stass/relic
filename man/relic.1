@@ -837,6 +837,10 @@ a symbolic link to it, a hard link to it and, on a file system that ignores
 case,
 .Ql Out.tsv
 are one file, whether it existed before the run or not.
+The check is a best effort against mistakes on the command line: an input
+named by a path such as
+.Pa /dev/stdin
+is recognized only on systems that report it as the file it reads.
 A device such as
 .Pa /dev/null
 holds nothing an output could replace, and any number of outputs may write
