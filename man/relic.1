@@ -512,8 +512,13 @@ is described in
 Write query results to
 .Ar file ,
 created or truncated, instead of the standard output.
-The file is opened only once the program and every query have been checked,
-so a run that fails its checks leaves an existing file alone.
+The file is created or truncated only once a query has been answered, or
+once a run with no query succeeds, so a run that fails before then, in
+evaluating its first query at a limit included, leaves an existing file
+alone.
+It may not be the same file as any other the run reads or writes, as
+.Sx EXPORTS
+describes.
 .It Fl q Ar query
 Answer
 .Ar query ,
@@ -794,15 +799,29 @@ A file name that says neither is named with a head, whose path is
 everything after the first
 .Ql = .
 The standard output is not a path an export writes; a query writes it.
-An export may not write a path the command line spells otherwise: that of
-another export, the
+.Pp
+No output may be the same file as anything else the run reads or writes.
+An export or the
 .Fl o
-file, an imported table or a program
-.Ar file .
-Each is a usage error.
-Paths are compared as written, so another spelling of the same file, or a
-file the standard input or output is redirected to, is not caught, and an
-export to it truncates it.
+file may not be a program
+.Ar file ,
+an imported table, the file the standard input is redirected from when the
+program, a table or an interactive session reads it, the file the standard
+output is redirected to when results or a session's replies go there, or
+another output.
+Each is a usage error, reported before anything is read or written.
+Files are compared by what they are rather than how they are spelled, so
+.Ql out.tsv ,
+.Ql ./out.tsv ,
+a symbolic link to it and a hard link to it are one file, and a file that
+does not exist yet is the name it would be created under in its directory.
+A device such as
+.Pa /dev/null
+holds nothing an output could replace, and any number of outputs may write
+one.
+Two names of a file that does not exist yet are not caught as one when they
+differ only in case, or in Unicode normalization, on a file system that
+ignores the difference, or when one is a symbolic link to the other.
 .Pp
 A predicate is a name and an arity together.
 An export with no

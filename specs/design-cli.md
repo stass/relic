@@ -60,7 +60,7 @@ Each phase runs only if the one before it succeeded:
 5. With `-c`, stop: the program, its queries, its tables and its exports
    are valid.
 6. With `-a`, **materialize** the whole program.
-7. **Open** the output.
+7. **Attach** the output.
 8. **Run** each query in turn and write its rows. The first query that
    fails ends the run, because a failure in evaluation -- most often a
    limit -- would recur in every query after it.
@@ -68,9 +68,20 @@ Each phase runs only if the one before it succeeded:
 10. With `-i`, run the **interactive session**.
 11. **Close** the output, and report a write that failed.
 
-The output is opened after everything is validated, so a run that fails
-validation leaves an existing `-o` file alone; a run that fails during
-evaluation leaves it holding what the queries before the failing one wrote.
+The output is attached after everything is validated, and the `-o` file is
+created or truncated only once a query has been answered -- the library
+delivers no row before its query's evaluation has succeeded -- or once a
+run with no query succeeds, as an export's file is. A run that fails before
+then, in validation or in evaluating its first query, at a limit included,
+leaves an existing `-o` file alone; a run that fails later leaves it holding
+what the queries before the failing one wrote. A run that succeeds leaves it
+holding exactly its results, none included. A `-o` file that cannot be
+opened is therefore reported once the first query has been answered.
+
+No output -- the `-o` file, an export, or standard output when results or a
+session's replies go there -- may be the same file as anything else the run
+reads or writes. The rule, how a file is identified, and where it falls
+short are in [design-tables.md](design-tables.md#writing-a-file).
 
 `-c` contradicts `-a` and `-i`, which demand evaluation, and each pairing is
 a usage error; `-V` stands alone. Options that do not apply in a mode --

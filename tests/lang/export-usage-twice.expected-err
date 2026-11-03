@@ -1,4 +1,4 @@
-relic: error: invalid export: path.tsv is the path of an earlier export
+relic: error: -O tsv:path=path.tsv and -O path.tsv are the same file
 usage: relic [-aceinsv] [-F format] [-I import] [-j threads]
              [-l limit=value] [-O export] [-o file] [-q query]
              [-T types] [-X debug] [file ...]

@@ -449,17 +449,43 @@ an existing file had. The tool writes every file as `-o`
 does, following symbolic links, with the mode `fopen(3)` gives a new file,
 and the exit status is what says whether a file is whole.
 
-**An export may not write a path the command line spells otherwise**: another
-export's, the `-o` file, an imported table or a program operand. An export
-truncates its file, so it would destroy what another writer wrote or replace
-an input with one of its relations -- `-O path.dl` over a program named
-`path.dl`. **Paths are compared as written.** That catches the mistake a
-command line makes by naming one file twice, and is not a guarantee:
-`out.tsv` and `./out.tsv`, a file standard output was redirected to, and a
-path through `/dev/fd` are other spellings. Following every spelling to a
-file's identity would mean the tool opening every file the run reads
-itself, before the library does, and each platform's `/dev/fd` names files
-its own way.
+**No output may be the same file as anything else the run reads or
+writes.** The outputs are the `-o` file, every export, and standard output
+when results or a session's replies go there; the inputs are the program
+operands, the imported tables, and standard input when the program, a table
+or the session reads it. Every output truncates its file, so one that is an
+input would replace it -- `-o q.dl q.dl` would replace the program with its
+own answers -- and one that is another output would destroy what that one
+wrote. The command line is refused as a usage error, before anything is
+read or written, naming the output and the file it is.
+
+**Files are compared by identity, not by spelling**, in one check over every
+pair of an output with any file listed before it, so that each new kind of
+input or output joins one list rather than a set of pairwise rules. An
+existing regular file is its device and inode, which `x`, `./x`, a symbolic
+link and a hard link all share, read by `fstat(2)` of standard input or
+output or of the file a path opens. Opening the path, rather than only
+`stat(2)` of it, is what makes `/dev/stdin` and `/dev/fd/1` the files their
+descriptors hold: on macOS `stat(2)` of such a path gives the inode with
+the device of `/dev`. Only a path `stat(2)` says is a regular file is
+opened, without blocking or truncating, so opening it has no effect of its
+own; it is opened for writing when the run writes it, since a path naming a
+descriptor opens only in a mode the descriptor allows. A file that does not exist yet is the device and
+inode of the directory it would be created in, with its final name there,
+so `-o x` and `-O dl:p=./x` are caught before either creates it. Anything
+else has no identity and conflicts with nothing: a device or a FIFO holds no
+stored data an output could replace, so any number of outputs may write
+`/dev/null`, and a directory or a path that cannot be examined fails when it
+is opened.
+
+The check is a guard against mistakes on the command line, not a security
+boundary, and it falls short in three places. Two names of a file that does
+not exist yet are compared by their bytes, so on a file system that ignores
+case or normalizes Unicode, `Out.tsv` and `out.tsv` are two new files. A symbolic link to a file
+that does not exist is identified by the link's own name, so an output
+through it and an output to its target are not caught. And the files are
+identified when the command line is read, so a file another process
+creates, links or renames before the run opens it is not seen.
 
 ## Failure paths and limits
 

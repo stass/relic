@@ -39,6 +39,18 @@
 #define	RELIC_CMD_UNUSED
 #endif
 
+/*
+ * The tool reports exactly three outcomes: the requested work succeeded, the
+ * program or query was rejected, or the command line was malformed.  Every
+ * option maps onto this set rather than introducing a status of its own, so
+ * that a caller in a shell script can branch on it.
+ */
+enum {
+	RELIC_EXIT_OK = 0,
+	RELIC_EXIT_ERROR = 1,
+	RELIC_EXIT_USAGE = 2
+};
+
 /* Room for "<query N>" or "<export N>" with N any size_t, and a terminator. */
 #define	CMD_QUERY_NAME_MAX	32
 
@@ -217,7 +229,11 @@ void	write_stats(relic_t *ctx, FILE *stream);
  * stream, reported once.  output_write_buffered() only hands the stream
  * what the output has gathered, a write failure reported as a row's is.
  * output_close() does what output_flush() does, releases the buffer, and
- * closes the stream unless it is standard output.
+ * closes the stream unless it is standard output, returning -1 when a write
+ * or the close failed, reported.  When the run that wrote to the output
+ * `succeeded`, the file of output_attach_file() that nothing has opened yet
+ * is created or truncated first, so that it holds exactly what the run
+ * wrote, which is nothing; a run that failed leaves it as it was.
  * output_is_stdout() is whether the stream is standard output, which other
  * writers to standard output share.
  *
@@ -237,7 +253,7 @@ int	output_flush(output_t *out);
 void	output_write_buffered(output_t *out);
 bool	output_is_stdout(const output_t *out);
 void	output_prompted(output_t *out);
-int	output_close(output_t *out);
+int	output_close(output_t *out, bool succeeded);
 
 /*
  * cmd/relic/repl.c
@@ -260,7 +276,6 @@ int	repl_run(invocation_t *invocation, output_t *output,
 extern volatile sig_atomic_t repl_interrupted;
 
 typedef struct column_types column_types_t;
-typedef struct command_paths command_paths_t;
 typedef struct import_operand import_operand_t;
 
 /*
@@ -309,18 +324,6 @@ struct export_operand {
 	bool			 has_arity;
 };
 
-/*
- * The paths a command line names besides its exports', which no export may
- * write: the -o file or NULL, the `import_count` imports' tables and the
- * `file_count` program operands, all borrowed.
- */
-struct command_paths {
-	const char		*output_path;
-	const import_operand_t	*imports;
-	char *const		*files;
-	size_t			 import_count;
-	size_t			 file_count;
-};
 
 /*
  * What parsing an -I, -T or -O argument came to: what it names, an argument
@@ -347,9 +350,6 @@ enum operand_parse {
  * a second -T, and one given lists of columns whose kept types differ.
  * The imports borrow from the column types, which must outlive them.
  *
- * export_operands_resolve() reports, as a usage error, an export to a path
- * another export, -o, an import or a program operand spells alike.
- *
  * import_operand_reads_stdin() is whether the import's path is `-`, the
  * spelling that claims standard input.
  */
@@ -362,9 +362,6 @@ int	import_operands_resolve(const char *program_name,
 	    const column_types_t *types, size_t type_count);
 enum operand_parse export_operand_parse(const char *program_name,
 	    const char *operand, export_operand_t *parsed);
-int	export_operands_resolve(const char *program_name,
-	    const export_operand_t *exports, size_t export_count,
-	    const command_paths_t *others);
 bool	import_operand_reads_stdin(const import_operand_t *parsed);
 void	import_operand_free(import_operand_t *parsed);
 void	column_types_free(column_types_t *parsed);
@@ -386,6 +383,42 @@ void	export_operand_free(export_operand_t *parsed);
 int	exports_prepare(invocation_t *invocation,
 	    const export_operand_t *operands, size_t count);
 int	exports_write(invocation_t *invocation, bool sorted);
+
+typedef struct command_files command_files_t;
+
+/*
+ * Every file a command line reads and writes, all borrowed: the
+ * `program_count` program operands at `programs`, the imports' tables,
+ * standard input when `reads_stdin`, standard output when `writes_stdout`,
+ * the -o file or NULL, and the exports' files.  Standard input is read when
+ * the program, an import or an interactive session reads it, and standard
+ * output written when the results or a session's replies go to it.
+ */
+struct command_files {
+	const char		*output_path;
+	const import_operand_t	*imports;
+	const export_operand_t	*exports;
+	char *const		*programs;
+	size_t			 import_count;
+	size_t			 export_count;
+	size_t			 program_count;
+	bool			 reads_stdin;
+	bool			 writes_stdout;
+};
+
+/*
+ * cmd/relic/files.c
+ *
+ * command_files_check() refuses a command line one of whose outputs -- the
+ * -o file, an export, or standard output -- is the same file as anything
+ * else it reads or writes, however each is spelled: the same regular file,
+ * by device and inode, or the same name in the same directory for a file
+ * that does not exist yet.  Returns RELIC_EXIT_OK, RELIC_EXIT_USAGE having
+ * reported the first output at fault and the file it is, or
+ * RELIC_EXIT_ERROR having reported that memory ran out.
+ */
+int	command_files_check(const char *program_name,
+	    const command_files_t *files);
 
 typedef struct line_reader line_reader_t;
 

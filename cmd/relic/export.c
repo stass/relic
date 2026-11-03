@@ -284,7 +284,7 @@ write_export(invocation_t *invocation, const prepared_export_t *export,
 	status = output_query(&output, export->query, &rows);
 	invocation->output = previous;
 
-	if (output_close(&output) != 0)
+	if (output_close(&output, status == 0) != 0)
 		status = -1;
 	if (status == 0)
 		report_rows(invocation, "export", number, rows);

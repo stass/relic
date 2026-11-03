@@ -83,6 +83,133 @@ if [ "$status" -ne 1 ]; then
 	fail "an unwritable -o exited $status, expected 1"
 fi
 
+# The -o file is created or truncated only once results reach it, so a run
+# whose evaluation fails at a limit leaves an existing file as it was.
+echo precious > "$work/keep.txt"
+status=0
+"$RELIC" -o "$work/keep.txt" -l tuples=2 "$work/graph.dl" 2>/dev/null ||
+    status=$?
+if [ "$status" -ne 1 ]; then
+	fail "a run over the tuple limit exited $status, expected 1"
+fi
+if [ "$(cat "$work/keep.txt")" != "precious" ]; then
+	fail "a run that failed in evaluation replaced the -o file"
+fi
+
+# A run that succeeds with no query to answer still leaves the -o file
+# holding exactly its results, which are none.
+printf 'edge(a, b).\n' > "$work/facts.dl"
+echo stale > "$work/out.txt"
+"$RELIC" -o "$work/out.txt" "$work/facts.dl"
+if [ -s "$work/out.txt" ]; then
+	fail "a run with no query left '$(cat "$work/out.txt")' in the -o file"
+fi
+
+# An empty -o is a usage error, as an empty -I or -O is.
+status=0
+"$RELIC" -o '' "$work/graph.dl" >/dev/null 2>&1 || status=$?
+if [ "$status" -ne 2 ]; then
+	fail "an empty -o exited $status, expected 2"
+fi
+
+# No output may be the same file as anything else the run reads or writes,
+# however the command line spells it: as written, through ./, a symbolic or
+# a hard link, standard input or output redirected to it, and a file that
+# does not exist yet named twice.  Each is a usage error that writes
+# nothing, and every file is left as it was.
+cp "$work/graph.dl" "$work/q.dl"
+ln -s q.dl "$work/q-symlink.dl"
+ln "$work/q.dl" "$work/q-hardlink.dl"
+printf 'a\tb\n' > "$work/edge.tsv"
+rm -f "$work/new.txt"
+for run in "-o $work/q.dl $work/q.dl" \
+    "-O dl:path=$work/./q.dl $work/q.dl" \
+    "-o $work/q-symlink.dl $work/q.dl" \
+    "-O dl:path=$work/q-hardlink.dl $work/q.dl" \
+    "-T edge:symbol,symbol -I $work/edge.tsv -o $work/./edge.tsv $work/q.dl" \
+    "-o $work/new.txt -O dl:path=$work/./new.txt $work/q.dl" \
+    "-O tsv:edge=$work/new.txt -O dl:path=$work/../${work##*/}/new.txt $work/q.dl"
+do
+	cp "$work/q.dl" "$work/q.kept"
+	cp "$work/edge.tsv" "$work/edge.kept"
+	status=0
+	# shellcheck disable=SC2086 # the run's options are separate words
+	"$RELIC" $run >/dev/null 2>&1 || status=$?
+	if [ "$status" -ne 2 ]; then
+		fail "an output that is another file of the run exited $status, expected 2: $run"
+	fi
+	if ! cmp -s "$work/q.dl" "$work/q.kept" ||
+	    ! cmp -s "$work/edge.tsv" "$work/edge.kept"; then
+		fail "an output replaced a file the run reads: $run"
+	fi
+	if [ -e "$work/new.txt" ]; then
+		fail "a refused run created an output: $run"
+	fi
+done
+
+# The program read from standard input is a file the run reads.
+cp "$work/q.dl" "$work/q.kept"
+status=0
+"$RELIC" -o "$work/q.dl" < "$work/q.dl" >/dev/null 2>&1 || status=$?
+if [ "$status" -ne 2 ] || ! cmp -s "$work/q.dl" "$work/q.kept"; then
+	fail "-o over the program on standard input exited $status, expected 2"
+fi
+
+# A path that names a descriptor is the file the descriptor holds, however
+# the system reports the path's own device.
+status=0
+"$RELIC" -o "$work/q.dl" /dev/stdin < "$work/q.dl" >/dev/null 2>&1 ||
+    status=$?
+if [ "$status" -ne 2 ] || ! cmp -s "$work/q.dl" "$work/q.kept"; then
+	fail "-o over the program read as /dev/stdin exited $status, expected 2"
+fi
+status=0
+"$RELIC" -o /dev/stdout -O "tsv:path=$work/stdout.tsv" "$work/q.dl" \
+    >"$work/stdout.tsv" 2>/dev/null || status=$?
+if [ "$status" -ne 2 ]; then
+	fail "-o /dev/stdout and an export to its file exited $status, expected 2"
+fi
+
+# -c writes nothing to standard output, so appending it to the program is
+# not an output over an input.
+"$RELIC" -c "$work/q.dl" >>"$work/q.dl" ||
+    fail "-c with standard output appended to the program was refused"
+if ! cmp -s "$work/q.dl" "$work/q.kept"; then
+	fail "-c changed the program its standard output is appended to"
+fi
+
+# Standard output redirected to a file is an output the results go to.
+status=0
+diagnostic=$(cd "$work" && "$RELIC" -O tsv:path=stdout.tsv q.dl 2>&1 \
+    >stdout.tsv) || status=$?
+if [ "$status" -ne 2 ]; then
+	fail "an export to the file standard output writes exited $status, expected 2"
+fi
+case "$diagnostic" in
+*"error: -O tsv:path=stdout.tsv and the standard output are the same file"*)
+	;;
+*)
+	fail "an export to standard output's file was reported as '$diagnostic'"
+	;;
+esac
+
+# The diagnostic names both spellings of the one file.
+status=0
+diagnostic=$(cd "$work" && "$RELIC" -o q-symlink.dl q.dl 2>&1 >/dev/null) ||
+    status=$?
+case "$diagnostic" in
+*"error: -o q-symlink.dl and the program file q.dl are the same file"*)
+	;;
+*)
+	fail "an -o over the program was reported as '$diagnostic'"
+	;;
+esac
+
+# A device is not a file an output replaces, so any number of them may
+# write to /dev/null.
+"$RELIC" -o /dev/null -O tsv:path=/dev/null -O dl:path=/dev/null \
+    "$work/q.dl" || fail "two outputs to /dev/null were refused"
+
 # A write that fails must not be reported as success.  Standard output is
 # open for reading only here, so every write to it fails.  A closed descriptor
 # would fail the same way, but the AddressSanitizer runtime on macOS reports a
@@ -750,6 +877,45 @@ case "$diagnostic" in
 	;;
 *)
 	fail "an unprintable option was reported as '$diagnostic'"
+	;;
+esac
+
+# An unknown option is an error like any other the tool reports.
+diagnostic=$("$RELIC" -Z "$work/graph.dl" 2>&1 >/dev/null) || true
+case "$diagnostic" in
+*": error: unknown option -- Z"*)
+	;;
+*)
+	fail "an unknown option was reported as '$diagnostic'"
+	;;
+esac
+
+# -V with anything else says why the command line is refused.
+status=0
+diagnostic=$("$RELIC" -V "$work/graph.dl" 2>&1 >/dev/null) || status=$?
+if [ "$status" -ne 2 ]; then
+	fail "-V with an operand exited $status, expected 2"
+fi
+case "$diagnostic" in
+*": error: -V takes no other option or operand"*)
+	;;
+*)
+	fail "-V with an operand was reported as '$diagnostic'"
+	;;
+esac
+
+# A version that cannot be written is a failure.  Standard output is open
+# for reading only, as for the failed write above.
+status=0
+diagnostic=$("$RELIC" -V 2>&1 1</dev/null) || status=$?
+if [ "$status" -ne 1 ]; then
+	fail "-V with standard output unwritable exited $status, expected 1"
+fi
+case "$diagnostic" in
+*"cannot write standard output"*)
+	;;
+*)
+	fail "a failed -V write was reported as '$diagnostic'"
 	;;
 esac
 

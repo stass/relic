@@ -50,18 +50,6 @@
  * created with.
  */
 
-/*
- * The tool reports exactly three outcomes: the requested work succeeded, the
- * program or query was rejected, or the command line was malformed.  Every
- * option maps onto this set rather than introducing a status of its own, so
- * that a caller in a shell script can branch on it.
- */
-enum {
-	RELIC_EXIT_OK = 0,
-	RELIC_EXIT_ERROR = 1,
-	RELIC_EXIT_USAGE = 2
-};
-
 /* A diagnostic of the tool's own is formatted into this many bytes. */
 #define	REPORT_TEXT_MAX	512
 
@@ -137,11 +125,13 @@ struct options {
 	bool			  version_alone;
 };
 
+static int		 attach_output(const options_t *options,
+			    output_t *output);
 static int		 claim_stdin(const char *program_name,
 			    options_t *options, int file_count);
-static void		 command_paths_of(const options_t *options,
-			    char *const *files, int file_count,
-			    command_paths_t *paths);
+static void		 command_files_of(const options_t *options,
+			    char *const *programs, int program_count,
+			    command_files_t *files);
 static void		*diag_context(const char *program_name);
 static int		 evaluate(invocation_t *invocation,
 			    const options_t *options);
@@ -157,8 +147,6 @@ static size_t		*limit_named(relic_config_t *config, const char *key,
 			    size_t key_length);
 static int		 load_operands(relic_t *ctx, const options_t *options,
 			    int argc, char *argv[]);
-static int		 open_output(const char *program_name,
-			    const options_t *options, output_t *output);
 static void		 options_free(options_t *options);
 static int		 parse_debug(const char *name, options_t *options);
 static int		 parse_limit(const char *program_name,
@@ -254,28 +242,19 @@ invoked_name(const char *argv0)
 }
 
 /*
- * Report an option the tool does not accept.
+ * Report an option the tool does not accept, as an error like any other.
  *
  * optopt holds a byte taken straight from the command line and may be any
- * value at all, so a byte outside printable ASCII is reported by its value
- * rather than echoed: a diagnostic must not carry a terminal escape sequence
- * out of the argument vector and into the reader's terminal.
+ * value at all.  report_error() writes a byte outside printable ASCII by its
+ * value rather than as itself, so the diagnostic cannot carry a terminal
+ * escape sequence out of the argument vector and into the reader's
+ * terminal.  getopt(3) never reports a NUL, which ends an argument.
  */
 static void
 report_unknown_option(const char *program_name, int option)
 {
-	unsigned int byte;
-
-	byte = (unsigned int)option & 0xffu;
-
-	if (byte >= '!' && byte <= '~')
-		fprintf(stderr, "%s: unknown option -- %c\n", program_name,
-		    (int)byte);
-	else
-		fprintf(stderr, "%s: unknown option -- \\x%02x\n",
-		    program_name, byte);
+	report_error(program_name, "unknown option -- %c", option & 0xff);
 }
-
 
 static void
 usage(const char *program_name)
@@ -508,16 +487,16 @@ validate(invocation_t *invocation, const options_t *options, int argc,
 }
 
 /*
- * Attach the output results are written to: the -o file, created or
- * truncated, or standard output.  Under -n nothing is attached, so the
- * output discards every row and no file is created.
+ * Attach the output results are written to: the -o file or standard output.
+ * The -o file is created or truncated only once a query has been answered,
+ * or once a run with no query succeeds, so a run that fails before then --
+ * in evaluating its first query, at a limit included -- leaves an existing
+ * file as it was.  Under -n nothing is attached, so the output discards
+ * every row and no file is created.
  */
 static int
-open_output(const char *program_name, const options_t *options,
-    output_t *output)
+attach_output(const options_t *options, output_t *output)
 {
-	FILE *stream;
-
 	if (options->discard_rows)
 		return (0);
 
@@ -525,20 +504,8 @@ open_output(const char *program_name, const options_t *options,
 		return (output_attach(output, stdout, "standard output",
 		    options->format, options->sorted));
 
-	stream = fopen(options->output_path, "w");
-	if (stream == NULL) {
-		report_error(program_name, "cannot open %s: %s",
-		    options->output_path, strerror(errno));
-		return (-1);
-	}
-
-	if (output_attach(output, stream, options->output_path,
-	    options->format, options->sorted) != 0) {
-		fclose(stream);
-		return (-1);
-	}
-
-	return (0);
+	return (output_attach_file(output, options->output_path,
+	    options->format, NULL, options->sorted));
 }
 
 /*
@@ -585,7 +552,7 @@ evaluate(invocation_t *invocation, const options_t *options)
 	}
 
 	output_init(&output, invocation->program_name, invocation->ctx);
-	if (open_output(invocation->program_name, options, &output) != 0)
+	if (attach_output(options, &output) != 0)
 		return (-1);
 	invocation->output = &output;
 
@@ -599,7 +566,7 @@ evaluate(invocation_t *invocation, const options_t *options)
 		    invocation->query_count + 1);
 
 	invocation->output = NULL;
-	if (output_close(&output) != 0)
+	if (output_close(&output, status == 0) != 0)
 		status = -1;
 
 	return (status);
@@ -1006,19 +973,28 @@ report_two_readers(const char *program_name, const options_t *options,
 }
 
 /*
- * Collect the paths a command line names besides its exports': the -o
- * file, the imports' tables and the `file_count` program operands at
- * `files`.
+ * Collect every file the command line reads and writes: the
+ * `program_count` program operands at `programs`, the imports' tables, the
+ * -o file and the exports', and standard input and output when the run
+ * reads or writes them.  Standard input's reader must be decided already.
+ * Standard output is written when the results go to it, or the replies of
+ * an interactive session; -c writes neither.
  */
 static void
-command_paths_of(const options_t *options, char *const *files,
-    int file_count, command_paths_t *paths)
+command_files_of(const options_t *options, char *const *programs,
+    int program_count, command_files_t *files)
 {
-	paths->output_path = options->output_path;
-	paths->imports = options->imports;
-	paths->import_count = options->import_count;
-	paths->files = files;
-	paths->file_count = file_count > 0 ? (size_t)file_count : 0;
+	bzero(files, sizeof(*files));
+	files->programs = programs;
+	files->program_count = program_count > 0 ? (size_t)program_count : 0;
+	files->imports = options->imports;
+	files->import_count = options->import_count;
+	files->reads_stdin = options->stdin_reader != STDIN_UNREAD;
+	files->writes_stdout = !options->check_only && (options->interactive ||
+	    (options->output_path == NULL && !options->discard_rows));
+	files->output_path = options->output_path;
+	files->exports = options->exports;
+	files->export_count = options->export_count;
 }
 
 /*
@@ -1034,8 +1010,9 @@ static int
 parse_options(const char *program_name, int argc, char *argv[],
     options_t *options)
 {
-	command_paths_t others;
+	command_files_t files;
 	int ch;
+	int status;
 
 	/*
 	 * getopt(3) reports an unknown option by printing argv[0], which is
@@ -1117,6 +1094,12 @@ parse_options(const char *program_name, int argc, char *argv[],
 			}
 			break;
 		case 'o':
+			if (optarg[0] == '\0') {
+				report_error(program_name,
+				    "invalid -o file: empty path");
+				usage(program_name);
+				return (RELIC_EXIT_USAGE);
+			}
 			options->output_path = optarg;
 			break;
 		case 'q':
@@ -1166,16 +1149,9 @@ parse_options(const char *program_name, int argc, char *argv[],
 		}
 	}
 
-	/*
-	 * An import's columns may come from a -T given after it, and every
-	 * path the command line names, which no export may write, is known
-	 * only once all of it is read.
-	 */
-	command_paths_of(options, argv + optind, argc - optind, &others);
+	/* An import's columns may come from a -T given after it. */
 	if (import_operands_resolve(program_name, options->imports,
-	    options->import_count, options->types, options->type_count) != 0 ||
-	    export_operands_resolve(program_name, options->exports,
-	    options->export_count, &others) != 0) {
+	    options->import_count, options->types, options->type_count) != 0) {
 		usage(program_name);
 		return (RELIC_EXIT_USAGE);
 	}
@@ -1206,7 +1182,20 @@ parse_options(const char *program_name, int argc, char *argv[],
 	if (options->print_version)
 		return (RELIC_EXIT_OK);
 
-	return (claim_stdin(program_name, options, argc - optind));
+	status = claim_stdin(program_name, options, argc - optind);
+	if (status != RELIC_EXIT_OK)
+		return (status);
+
+	/*
+	 * Which files the run reads and writes is known only once the whole
+	 * command line is, standard input's reader included.
+	 */
+	command_files_of(options, argv + optind, argc - optind, &files);
+	status = command_files_check(program_name, &files);
+	if (status == RELIC_EXIT_USAGE)
+		usage(program_name);
+
+	return (status);
 }
 
 static void
@@ -1266,6 +1255,8 @@ main(int argc, char *argv[])
 		options_free(&options);
 
 		if (!options.version_alone || argc != 0) {
+			report_error(program_name,
+			    "-V takes no other option or operand");
 			usage(program_name);
 			return (RELIC_EXIT_USAGE);
 		}
@@ -1277,7 +1268,18 @@ main(int argc, char *argv[])
 		 * argv[0] keeps the output the same whether the tool runs
 		 * from the build tree or from its installed location.
 		 */
-		printf("%s %s\n", PACKAGE_NAME, relic_version());
+		errno = 0;
+		(void)printf("%s %s\n", PACKAGE_NAME, relic_version());
+		if (fflush(stdout) != 0 || ferror(stdout)) {
+			if (errno != 0)
+				report_error(program_name,
+				    "cannot write standard output: %s",
+				    strerror(errno));
+			else
+				report_error(program_name,
+				    "cannot write standard output");
+			return (RELIC_EXIT_ERROR);
+		}
 
 		return (RELIC_EXIT_OK);
 	}

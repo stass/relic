@@ -1282,7 +1282,7 @@ output_flush(output_t *out)
 }
 
 int
-output_close(output_t *out)
+output_close(output_t *out, bool succeeded)
 {
 	FILE *stream;
 	bool failed;
@@ -1291,6 +1291,8 @@ output_close(output_t *out)
 		return (0);
 
 	failed = output_flush(out) != 0;
+	if (succeeded && !failed && !open_pending(out))
+		failed = true;
 	free(out->buffer);
 	out->buffer = NULL;
 	stream = out->stream;

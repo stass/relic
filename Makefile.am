@@ -63,8 +63,8 @@ noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
 	tests/unit/programs.h
 
 bin_PROGRAMS = relic
-relic_SOURCES = cmd/relic/export.c cmd/relic/input.c cmd/relic/main.c \
-	cmd/relic/operand.c cmd/relic/output.c cmd/relic/repl.c
+relic_SOURCES = cmd/relic/export.c cmd/relic/files.c cmd/relic/input.c \
+	cmd/relic/main.c cmd/relic/operand.c cmd/relic/output.c cmd/relic/repl.c
 
 # The tool links the compatibility objects itself.  Hidden visibility and the
 # export list together make them unreachable through librelic, so the first

@@ -108,9 +108,6 @@ static bool	 first_columns_given(const import_operand_t *imports,
 		    size_t *countp);
 static bool	 export_format_named(word_t name, enum output_format *formatp);
 static bool	 format_named(word_t name, enum relic_format *formatp);
-static const char *other_use_of(const char *path,
-		    const export_operand_t *exports, size_t export_count,
-		    const command_paths_t *others);
 static bool	 is_predicate_name(word_t name);
 static enum operand_parse malformed(operand_problem_t *why, const char *problem,
 		    const char *bytes, size_t length);
@@ -683,68 +680,6 @@ parse_arity(word_t digits, unsigned int *arityp, operand_problem_t *why)
 	*arityp = arity;
 
 	return (OPERAND_PARSED);
-}
-
-/*
- * Hold every export to a path nothing else on the command line spells:
- * another export, the -o file, an imported table or a program operand.  An
- * export truncates its file, so it would destroy what another writer wrote,
- * or replace an input with one of its relations -- a program with the facts
- * of its own predicate, when both are .dl.  Paths are compared as written,
- * which catches the mistakes a command line makes by naming one file twice
- * and no more: two spellings of one file are two paths here.  Returns 0, or
- * -1 having reported the first export at fault.
- */
-int
-export_operands_resolve(const char *program_name,
-    const export_operand_t *exports, size_t export_count,
-    const command_paths_t *others)
-{
-	cmd_quoted_t quoted;
-	const char *other;
-	size_t i;
-
-	for (i = 0; i < export_count; i++) {
-		other = other_use_of(exports[i].path, exports, i, others);
-		if (other == NULL)
-			continue;
-		report_error(program_name, "invalid export: %s is %s",
-		    cmd_quote(exports[i].path, strlen(exports[i].path),
-		    &quoted), other);
-		return (-1);
-	}
-
-	return (0);
-}
-
-/*
- * What else on the command line spells `path`, described for a message, or
- * NULL when nothing does: the first `export_count` exports, those before
- * the one asking, and the paths of `others`.
- */
-static const char *
-other_use_of(const char *path, const export_operand_t *exports,
-    size_t export_count, const command_paths_t *others)
-{
-	size_t i;
-
-	for (i = 0; i < export_count; i++) {
-		if (strcmp(path, exports[i].path) == 0)
-			return ("the path of an earlier export");
-	}
-	if (others->output_path != NULL &&
-	    strcmp(path, others->output_path) == 0)
-		return ("the -o file");
-	for (i = 0; i < others->import_count; i++) {
-		if (strcmp(path, others->imports[i].path) == 0)
-			return ("an imported table");
-	}
-	for (i = 0; i < others->file_count; i++) {
-		if (strcmp(path, others->files[i]) == 0)
-			return ("a program file");
-	}
-
-	return (NULL);
 }
 
 /*
