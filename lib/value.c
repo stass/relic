@@ -65,7 +65,8 @@ static int	 compare_integers(int64_t left, int64_t right);
 static const char *context_bytes(const void *source, uint32_t id,
 		    size_t *lengthp);
 static bool	 value_held(const relic_t *ctx, const relic_value_t *value);
-static void	 report_foreign(relic_t *ctx, const relic_value_t *foreign);
+static enum relic_call_error
+			 foreign_error(const relic_value_t *foreign);
 static void	 account_value_table(relic_t *ctx);
 static int	 cover_symbol_uses(relic_t *ctx, uint32_t symbol);
 static bool	 decode_integer(const relic_valtab_t *table, uint32_t position,
@@ -1686,51 +1687,47 @@ value_held(const relic_t *ctx, const relic_value_t *value)
 }
 
 /*
- * A comparison cannot fail, so a value the context does not hold compares
- * equal to everything, and is reported: a caller sorting with one hears of
- * it rather than getting an order that quietly means nothing.
+ * A value the context does not hold fails the comparison, and is reported:
+ * a caller sorting with one hears of it rather than getting an order that
+ * quietly means nothing.
  */
 int
 relic_value_compare(relic_t *ctx, const relic_value_t *a,
-    const relic_value_t *b)
+    const relic_value_t *b, int *orderp)
 {
 	const relic_value_t *foreign;
 
-	foreign = !value_held(ctx, a) ? a : !value_held(ctx, b) ? b : NULL;
-	if (foreign == NULL)
-		return (relic_value_order_totally(a, b, context_bytes, ctx));
+	if (a == NULL || b == NULL || orderp == NULL) {
+		relic_diag_call_error(ctx, RELIC_CALL_COMPARED_NOTHING);
+		return (-1);
+	}
 
-	report_foreign(ctx, foreign);
+	if (!value_held(ctx, a))
+		foreign = a;
+	else if (!value_held(ctx, b))
+		foreign = b;
+	else
+		foreign = NULL;
+	if (foreign != NULL) {
+		relic_diag_call_error(ctx, foreign_error(foreign));
+		return (-1);
+	}
+
+	*orderp = relic_value_order_totally(a, b, context_bytes, ctx);
 
 	return (0);
 }
 
 /*
- * Report a value compared that the context does not hold, naming a
- * collected result's value as one, since that is the commonest such
- * mistake.
- *
- * The report is an operation of its own: it enters the context, so the
- * diagnostic callback runs with the context busy, as every callback does,
- * and can neither call into the context nor compare its way back here.
- * Caller code the library is running is inside an operation already, whose
- * error the report must not displace, so a comparison made there reports
- * nothing.
+ * Why a value the context does not hold was refused, naming a collected
+ * result's value as one, since that is the commonest such mistake.
  */
-static void
-report_foreign(relic_t *ctx, const relic_value_t *foreign)
+static enum relic_call_error
+foreign_error(const relic_value_t *foreign)
 {
-	if (ctx->busy || relic_enter(ctx, NULL, NULL) != 0)
-		return;
-
-	if (foreign->type != RELIC_INTEGER &&
+	if ((foreign->type == RELIC_SYMBOL || foreign->type == RELIC_STRING) &&
 	    (foreign->v.id & RELIC_RESULT_ID_BIT) != 0)
-		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
-		    "a value compared belongs to a collected result; "
-		    "relic_result_compare() orders a result's values");
-	else
-		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
-		    "a value compared is not one this context holds");
+		return (RELIC_CALL_COMPARED_RESULTS);
 
-	relic_leave(ctx);
+	return (RELIC_CALL_COMPARED_FOREIGN);
 }

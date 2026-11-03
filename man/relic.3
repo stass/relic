@@ -52,11 +52,11 @@ relic library
 .Fn relic_create void
 .Ft relic_t *
 .Fn relic_create_config "const relic_config_t *config" "size_t size"
-.Ft void
+.Ft int
 .Fn relic_destroy "relic_t *ctx"
 .Ft const char *
 .Fn relic_version void
-.Ft void
+.Ft int
 .Fn relic_diag_set "relic_t *ctx" "relic_diag_cb callback" "void *callback_ctx"
 .Ft void
 .Fo relic_diag_stderr
@@ -120,7 +120,7 @@ relic library
 .Ft const char *
 .Fn relic_string "relic_t *ctx" "uint32_t id" "size_t *lenp"
 .Ft int
-.Fn relic_value_compare "relic_t *ctx" "const relic_value_t *a" "const relic_value_t *b"
+.Fn relic_value_compare "relic_t *ctx" "const relic_value_t *a" "const relic_value_t *b" "int *orderp"
 .Ft int
 .Fn relic_check "relic_t *ctx"
 .Ft int
@@ -142,7 +142,7 @@ relic library
 .Fc
 .Ft relic_result_t *
 .Fn relic_query_collect "relic_t *ctx" "relic_query_t *query"
-.Ft void
+.Ft int
 .Fn relic_query_destroy "relic_query_t *query"
 .Ft size_t
 .Fn relic_result_rows "const relic_result_t *result"
@@ -153,12 +153,12 @@ relic library
 .Ft const char *
 .Fn relic_result_string "const relic_result_t *result" "uint32_t id" "size_t *lenp"
 .Ft int
-.Fn relic_result_compare "const relic_result_t *result" "const relic_value_t *a" "const relic_value_t *b"
+.Fn relic_result_compare "const relic_result_t *result" "const relic_value_t *a" "const relic_value_t *b" "int *orderp"
 .Ft void
 .Fn relic_result_destroy "relic_result_t *result"
-.Ft void
+.Ft int
 .Fn relic_explain_set "relic_t *ctx" "relic_explain_cb callback" "void *callback_ctx"
-.Ft void
+.Ft int
 .Fn relic_stats "relic_t *ctx" "relic_stats_t *stats" "size_t size"
 .Sh DESCRIPTION
 The
@@ -168,7 +168,37 @@ A context,
 .Vt relic_t ,
 holds a program, the values it mentions and the relations derived from it.
 Contexts share nothing, so a program may use as many as it likes and use
-distinct ones from distinct threads, but one context is not thread-safe.
+distinct ones from distinct threads, but one context is not thread-safe:
+it is used by one thread at a time, and
+.Fn relic_interrupt
+is the one call another thread may make on it meanwhile.
+A query is part of its context, run, collected and destroyed on the thread
+using the context; once the context is destroyed a query can only be
+destroyed, on any thread.
+A collected result is immutable: any number of threads may read one at
+once, with each other and with calls on its context, as long as none
+destroys it meanwhile.
+.Pp
+The context a function takes must not be
+.Dv NULL ,
+except that
+.Fn relic_destroy
+and
+.Fn relic_interrupt
+do nothing with one; nor may the result a result's accessor takes, except
+that
+.Fn relic_result_destroy
+does nothing with one.
+.Fn relic_diag_stderr
+takes what a context hands its diagnostic callback.
+Every other pointer a function requires is checked, and a
+.Dv NULL
+one fails the call with an error of class
+.Dv RELIC_ERROR_ARGUMENT
+where there is a context to record it; a pointer a function's description
+says may be
+.Dv NULL
+is not required.
 .Pp
 A program is loaded as text with
 .Fn relic_load_string ,
@@ -272,7 +302,7 @@ A
 .Fa size
 smaller than the structure relic 1.0 declared fills nothing: the caller's
 .Fa size
-bytes are zeroed.
+bytes are zeroed and the call fails.
 Nothing is written past the caller's
 .Fa size .
 .Ss Contexts
@@ -526,7 +556,9 @@ its input not to do so.
 .Pp
 .Fn relic_destroy
 releases a context and everything it owns, and accepts
-.Dv NULL .
+.Dv NULL ;
+called from caller code the context is running, it is refused and
+releases nothing.
 .Fn relic_version
 returns the version of the library the caller is linked against, as
 .Qq major.minor.patch ,
@@ -593,11 +625,18 @@ The bytes of a value the program holds, one it states or one a caller
 built, stay valid until the context is destroyed; those of a value a query
 computed are valid while the row callback receiving it runs.
 .Fn relic_value_compare
-orders two values: every integer before every symbol before every string,
-then numerically or bytewise.
-A value the context does not hold compares equal to everything, and is
-reported as an error unless caller code the library is running made the
-call.
+orders two values, storing in
+.Fa *orderp
+a number less than, equal to or greater than zero: every integer before
+every symbol before every string, then numerically or bytewise.
+A value the context does not hold, or a
+.Dv NULL
+pointer, fails the comparison with an error of class
+.Dv RELIC_ERROR_ARGUMENT
+and leaves
+.Fa *orderp
+alone; from caller code the library is running it fails as a refused call
+does.
 .Ss Facts
 .Fn relic_fact_add
 adds the fact
@@ -898,8 +937,10 @@ for an identifier the result did not assign, and
 .Fn relic_result_compare
 orders two of the result's values as
 .Fn relic_value_compare
-orders the context's, a value whose identifier the result did not assign
-comparing equal to everything.
+orders the context's, failing, with nothing reported, for a value whose
+identifier the result did not assign or a
+.Dv NULL
+pointer.
 A result's symbol or string is not the context's:
 .Fn relic_string
 returns
@@ -934,7 +975,9 @@ when the program fails its check or holds no such query.
 Every query belongs to the caller, and
 .Fn relic_query_destroy
 releases one and accepts
-.Dv NULL .
+.Dv NULL ;
+destroying the query being answered, from caller code its answer runs, is
+refused and releases nothing.
 It may be called before or after
 .Fn relic_destroy ,
 but a query cannot be run once its context is gone.
@@ -1085,9 +1128,7 @@ A query answered through its rewrite shows the rewrite before its plan.
 fills the
 .Vt relic_stats_t
 .Fa stats
-points to, which must not be
-.Dv NULL
-and is
+points to, which is
 .Fa size
 bytes, with counters of the work done and of what the context holds:
 .Bd -literal -offset indent
@@ -1106,6 +1147,14 @@ struct relic_stats {
 };
 .Ed
 .Pp
+It fails, with an error of class
+.Dv RELIC_ERROR_ARGUMENT ,
+for a
+.Dv NULL
+.Fa stats
+or a
+.Fa size
+smaller than relic 1.0's structure.
 The first six count evaluation's work since the context was created, over
 the program's rules and every query's alike:
 .Fa iterations
@@ -1174,8 +1223,10 @@ and
 .Fn relic_interrupt
 on its context, and may destroy any query but one being answered.
 Any other call on the same context is refused: it returns \-1 or
-.Dv NULL ,
-or does nothing, and
+.Dv NULL
+and changes nothing,
+.Fn relic_destroy
+and the callback installations included, and
 .Fn relic_error
 describes the refusal, and
 .Fn relic_error_class
@@ -1183,6 +1234,8 @@ answers
 .Dv RELIC_ERROR_ARGUMENT ,
 until the next error or until the operation the caller code runs inside
 returns.
+A comparison of a value the context does not hold, or statistics asked for
+in too small a structure, fails from such code in the same way.
 The diagnostic callback is not called for a refusal, and a refused
 .Fn relic_destroy
 releases nothing, so a callback that destroys its own context leaks it.
@@ -1190,13 +1243,13 @@ A callback must return: one that leaves by
 .Xr longjmp 3
 or an exception leaves its context refusing every later call.
 .Sh RETURN VALUES
+The return value is the one sign of failure.
 Functions returning
 .Vt int
-return 0 on success and \-1 on failure, except
-.Fn relic_value_compare
-and
-.Fn relic_result_compare ,
-which return a value less than, equal to or greater than zero.
+return 0 on success and \-1 on failure.
+Functions returning
+.Vt void
+cannot fail.
 Functions returning a pointer return
 .Dv NULL
 on failure, and
@@ -1212,14 +1265,16 @@ Every failure is explained by an error diagnostic, whose text
 .Fn relic_error
 and whose class
 .Fn relic_error_class
-return, except a call refused while caller code runs, which those two
-alone describe, and that of
+return, except a call that fails while caller code runs, which those two
+alone describe, a failure of
+.Fn relic_result_compare ,
+which has no context to report through, and that of
 .Fn relic_create
 and
 .Fn relic_create_config ,
-which have no context to report through: they fail only with
+which have no context to report through: they set
 .Va errno
-set to
+instead, to
 .Er EINVAL
 when
 .Fa size
@@ -1227,21 +1282,25 @@ is smaller than relic 1.0's configuration or
 .Fa threads
 is more than
 .Dv RELIC_THREADS_MAX ,
-with
-.Va errno
-set to
+to
 .Er E2BIG
-when the configuration sets a field the library does not have,
-when memory is exhausted, or when
+when the configuration sets a field the library does not have, to
+.Er ENOMEM
+when memory is exhausted, and, when
 .Xr getentropy 2
-fails.
-.Fn relic_string ,
-.Fn relic_value_compare ,
-.Fn relic_query_count ,
-.Fn relic_error_class
-and
-.Fn relic_stats
-cannot fail.
+fails, to the error it set, or to
+.Er EIO
+for a source of nothing but zeros.
+.Pp
+The error text and class describe the most recent failure, as
+.Va errno
+does: a later success clears neither, so a caller reads them after a call
+that returned failure and before its next call.
+.Fn relic_string
+returns
+.Dv NULL
+for an identifier the context did not assign, which is an answer rather
+than a failure and reports nothing.
 .Pp
 No function terminates the process on a failure.
 A library built for release never calls

@@ -138,12 +138,11 @@ from holding a NaN, an infinity or a negative zero. `relic_fact_add()` and
 every other entry point that takes a value pass it through the function: a
 negative zero is stored as zero, and a value that is not finite is refused
 with an error of the argument class. `relic_value_compare()` passes a float
-through it too, so a negative zero compares as zero, but it has no failure
-return and cannot refuse a value. It places a non-finite float after every
-integer and every finite float, and orders two of them by their bit patterns
-read as unsigned 64-bit integers. Its order stays total, so a caller who
-sorts with it gets a meaningless position for a value relic never made, and
-never undefined behaviour.
+through it too, so a negative zero compares as zero, and refuses a value
+that is not finite as it refuses any value the context does not hold: it
+returns -1 with an argument error and leaves the order alone. Every float a
+context holds is finite, so the order over the floats it holds stays total
+and needs no rule for a NaN.
 
 ### The identifier
 

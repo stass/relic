@@ -83,10 +83,11 @@ struct relic_row_sink {
  *
  * `error_count` counts every error reported, which is how an operation that
  * failed learns whether anything said why.  `last_class` is the class of
- * the error `last_error` holds, recorded with it.  `refused` records that a
- * call was refused during the operation in progress, because the context
- * was busy; relic_error() and relic_error_class() then describe the refusal
- * in place of the last error until the operation returns.
+ * the error `last_error` holds, recorded with it.  `caller_code_error` says
+ * why the last call that caller code made during the operation in progress
+ * failed, RELIC_CALL_OK when none has; relic_error() returns its text, and
+ * relic_error_class() ARGUMENT, in place of the last error until the
+ * operation returns.
  *
  * `activity` says what the operation in progress is doing, for a refusal by
  * the memory limit to name.  It is written when an operation begins and
@@ -108,6 +109,22 @@ struct relic_activity {
 	char		 subject[RELIC_ACTIVITY_SUBJECT_MAX];
 };
 
+/*
+ * Why a call failed in C's terms where the failure may happen in caller code
+ * the library is running, and so is recorded beside the operation's error
+ * rather than in place of it: refused because its context was busy, or a
+ * reader's arguments refused.  Each has one fixed text, so the state that
+ * describes such a failure is a value of this enumeration, never a pointer.
+ */
+enum relic_call_error {
+	RELIC_CALL_OK,
+	RELIC_CALL_REFUSED,
+	RELIC_CALL_COMPARED_NOTHING,
+	RELIC_CALL_COMPARED_RESULTS,
+	RELIC_CALL_COMPARED_FOREIGN,
+	RELIC_CALL_STATS_STRUCTURE
+};
+
 struct relic_diag {
 	relic_diag_cb	 callback;
 	void		*callback_ctx;
@@ -115,8 +132,8 @@ struct relic_diag {
 	char		 last_error[512];
 	enum relic_error_class last_class;
 	relic_activity_t activity;
+	enum relic_call_error caller_code_error;
 	bool		 has_error;
-	bool		 refused;
 	bool		 memory_reported;
 };
 
@@ -594,13 +611,14 @@ _Static_assert(sizeof(relic_import_t) ==
  * failure `ours` is left as it was.
  *
  * relic_struct_copy_out() fills `theirs` from `ours`: the bytes both know
- * are copied and the rest of `theirs` zeroed.  When `their_size` is below
- * `oldest_size`, every byte of `theirs` is zeroed and nothing copied.
- * Neither ever touches a byte past `their_size`.
+ * are copied and the rest of `theirs` zeroed, and it returns 0.  When
+ * `their_size` is below `oldest_size`, every byte of `theirs` is zeroed,
+ * nothing copied, and it returns EINVAL.  Neither ever touches a byte past
+ * `their_size`.
  */
 int	 relic_struct_copy_in(const void *theirs, size_t their_size,
 	    void *ours, size_t our_size, size_t oldest_size);
-void	 relic_struct_copy_out(const void *ours, size_t our_size,
+int	 relic_struct_copy_out(const void *ours, size_t our_size,
 	    void *theirs, size_t their_size, size_t oldest_size);
 
 /*
@@ -739,6 +757,16 @@ void	 relic_diag_restore_activity(relic_t *ctx,
  * since the operation in progress has not failed.
  */
 void	 relic_diag_record_refusal(relic_t *ctx);
+
+/*
+ * Report that a reader -- a call a busy context does not refuse -- refused
+ * its arguments, as an ARGUMENT error.  With no operation in progress the
+ * report is an operation of its own, so the diagnostic callback runs with
+ * the context busy as every callback does.  During an operation it is
+ * recorded as a refusal is, beside the operation's error, which it must not
+ * displace.
+ */
+void	 relic_diag_call_error(relic_t *ctx, enum relic_call_error error);
 
 /*
  * Shorten a name for a message into a caller-owned buffer, marking the cut

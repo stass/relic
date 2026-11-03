@@ -1094,7 +1094,10 @@ write_fact(output_t *out, const relic_value_t *values, size_t count)
 
 /*
  * The order -s sorts by: column by column, each in the library's total order
- * over values, of the collected result the rows belong to.
+ * over values, of the collected result the rows belong to.  Every value
+ * compared is one of the result's own, which the comparison never refuses;
+ * were it to, the two values would count as equal, and the stable sort
+ * would keep their rows in the order they arrived.
  */
 static int
 compare_rows(const row_order_t *order, const relic_value_t *left,
@@ -1104,8 +1107,9 @@ compare_rows(const row_order_t *order, const relic_value_t *left,
 	int sign;
 
 	for (column = 0; column < order->width; column++) {
-		sign = relic_result_compare(order->result, &left[column],
-		    &right[column]);
+		if (relic_result_compare(order->result, &left[column],
+		    &right[column], &sign) != 0)
+			sign = 0;
 		if (sign != 0)
 			return (sign);
 	}

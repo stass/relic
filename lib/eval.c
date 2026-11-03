@@ -3997,10 +3997,19 @@ compute_answer(relic_t *ctx, const relic_query_t *query,
 	return (status);
 }
 
-void
+/*
+ * A structure too small to hold relic 1.0's counters is zeroed, by the rule
+ * for structures passed with their size, and refused.
+ */
+int
 relic_stats(relic_t *ctx, relic_stats_t *stats, size_t size)
 {
 	relic_stats_t ours;
+
+	if (stats == NULL) {
+		relic_diag_call_error(ctx, RELIC_CALL_STATS_STRUCTURE);
+		return (-1);
+	}
 
 	bzero(&ours, sizeof(ours));
 
@@ -4018,6 +4027,11 @@ relic_stats(relic_t *ctx, relic_stats_t *stats, size_t size)
 	ours.string_values = relic_value_count_of(ctx, RELIC_STRING);
 	ours.integer_values = relic_value_count_of(ctx, RELIC_INTEGER);
 
-	relic_struct_copy_out(&ours, sizeof(ours), stats, size,
-	    RELIC_STATS_SIZE_1_0);
+	if (relic_struct_copy_out(&ours, sizeof(ours), stats, size,
+	    RELIC_STATS_SIZE_1_0) != 0) {
+		relic_diag_call_error(ctx, RELIC_CALL_STATS_STRUCTURE);
+		return (-1);
+	}
+
+	return (0);
 }

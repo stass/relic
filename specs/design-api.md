@@ -39,9 +39,32 @@ the end without breaking it; [Versioning](#versioning) states the rule.
 
 Every entry point follows one return convention: an `int` is 0 on success
 and -1 on failure, a pointer is the object or NULL, and a `void` entry point
-either cannot fail or records its failure. A failure is always explained by
-at least one error diagnostic. `errno` never carries a semantic error; a
-failure to open or read a file carries the system's reason in its message.
+cannot fail. **The return value is the only signal of failure**, so an entry
+point that can fail in any way -- a refusal from a callback included --
+returns a status, and one that returns nothing has no failure to hide. A
+failure is explained by at least one error diagnostic ([Errors](#errors)),
+with three exceptions: the failures of calls caller code makes
+([Contexts and re-entry](#contexts-and-re-entry)), which the error state
+describes without a diagnostic; `relic_result_compare()`, which has no
+context and whose -1 is all it says; and the two constructors, which have
+no context yet and set `errno`. Otherwise `errno` never carries a semantic
+error; a failure to open or read a file carries the system's reason in its
+message. A NULL from `relic_string()`, `relic_result_string()`,
+`relic_result_row()` or `relic_error()` is an answer -- no such identifier,
+row or error -- not a failure.
+
+**Pointers.** The context passed to an entry point must not be NULL, except
+to `relic_destroy()` and `relic_interrupt()`, which do nothing with one; nor
+may the result passed to a result's accessor, except to
+`relic_result_destroy()`, which does nothing with one. Those are the objects
+a call acts on, and a call given none has no context to report through.
+`relic_diag_stderr()` is a diagnostic callback and takes what a context
+hands it. Every other pointer an entry point requires -- a query to run,
+text, a stream, a path, a name, a statistics structure, somewhere to store
+an answer, a value to compare -- is checked, and a NULL one fails the call,
+with an ARGUMENT error where there is a context to record it. A pointer the
+header says may be NULL, such as a source name or a length, is not
+required.
 
 ## Invariants
 
@@ -83,8 +106,8 @@ shell over a worker the others share.
 
 A refused call:
 
-* returns -1 or NULL; a refused destroy or callback installation does
-  nothing;
+* returns -1 or NULL, a refused destroy or callback installation as much as
+  a refused load, and changes nothing;
 * sets `relic_error()` to a fixed message saying the context was called
   from one of its own callbacks, and `relic_error_class()` to ARGUMENT,
   without calling the diagnostic callback, since the caller is inside one
@@ -92,16 +115,33 @@ A refused call:
 * is not counted among the operation's errors, and lasts only until the
   operation the caller code runs inside returns, after which the error
   state describes that operation again -- so a refusal never hides why an
-  operation failed or outlives one that succeeded;
+  operation failed;
 * touches nothing the operation in progress holds.
+
+A reader whose arguments are refused -- a comparison of a value the context
+does not hold, statistics asked for in too small a structure -- is recorded
+the same way when caller code makes the call, with its own text: it fails,
+the callback is not called, and the operation's error is back once the
+operation returns. The error state of a call made from caller code is one
+slot beside the operation's, which entering a busy context or a refused
+reader fills and leaving the operation empties. The slot holds a value of a
+closed enumeration of such failures, each with one fixed text, so it can
+never point at memory that is gone.
+
+**That every entry point that can fail returns a status is checked, not
+remembered.** `tests/reentry.sh` holds two closed lists: the entry points a
+busy context never refuses, and the `void` entry points, each with the
+reason it cannot fail (`relic_interrupt()`, `relic_result_destroy()`,
+`relic_diag_stderr()`). The script fails the build for a `void` entry point
+not on the second list, and for any entry point not on the first that the
+test calling each from a callback does not call.
 
 The readers, which a callback may call: the error text
 and class, a value's bytes, value comparison, the statistics, the count of
 the program's queries, the version, the stock stderr diagnostic callback,
-the result accessors, and `relic_interrupt()`. None of them enters the
-context, and nothing they read moves while an operation runs. Destroying a
-query that is not being answered enters nothing either
-([Destroy order](#destroy-order)).
+the result accessors, and `relic_interrupt()`. None of them is refused, and
+nothing they read moves while an operation runs. Destroying a query that is
+not being answered is allowed too ([Destroy order](#destroy-order)).
 
 **A callback must return to the library.** One that leaves by `longjmp(3)`
 or a C++ exception leaves its context busy for good, and every later call
@@ -124,14 +164,15 @@ does not choose stays correct.
   nothing in the context points into a query object except the query being
   answered, so freeing an idle query touches only its own memory. Destroying
   the query being answered -- from its row callback, or any caller code
-  that runs while its answer is computed -- is refused; its context is then
-  certainly alive to record the refusal. Destroying any other query from
-  caller code is allowed.
+  that runs while its answer is computed -- is refused and returns -1; its
+  context is then certainly alive to record the refusal. Destroying any
+  other query from caller code is allowed.
 * **A result reads nothing of its context at all**, ever, by construction
   (see [Results own their bytes](#results-own-their-bytes)).
-* **A refused context destroy leaks** what it would have released rather
+* **A refused context destroy returns -1 and releases nothing** rather
   than freeing memory the operation in progress is using. It happens only to
-  a caller that broke the contract, and a leak is the cheaper failure.
+  a caller that broke the contract, the status says so, and a leak is the
+  cheaper failure.
 
 ## Values
 
@@ -270,17 +311,34 @@ total order, and `relic_result_compare()` orders two values of one result.
 The second exists for callers that sort a collected answer, as the tool's
 `-s` does ([sorting](design-cli.md#sorting)).
 
-**The context's comparison reports a value it never assigned, and only when
-no operation is in progress.** It has no failure to return, yet an embedder
-sorting with a foreign value deserves to hear about it rather than receive a
-quietly unsorted answer, so it reports an ARGUMENT error and returns 0. The
-report is an operation of its own: it enters the context, so the diagnostic
-callback runs with the context busy as every callback does. Called from
-caller code the library is running -- a row callback sorting what it was
-given -- it reports nothing, so that it neither recurses into the diagnostic
-callback nor overwrites the error of the operation it runs inside. A result
-has nowhere to report, so its comparison treats a value it does not hold as
-equal to everything.
+**A comparison returns a status and puts the order in an out-parameter.**
+Each returns 0 with the order in `*orderp`, or -1 for a value its context or
+result does not hold, a NULL pointer among them, and leaves `*orderp`
+alone. A comparison that cannot fail would have to answer something for a
+foreign value, and a caller sorting with it would get a quietly wrong
+order. The mistake is a plausible one: a result's values
+and the context's look alike, and a caller sorting a collected answer reaches
+for the comparison it already knows. The namespace bit makes that confusion
+detectable every time ([Results own their bytes](#results-own-their-bytes)),
+so the comparison can say so. The two alternatives fall short: a total order
+that needs no context would order symbols and strings by identifier, not by
+bytes, which is not the order a sorted answer needs; and an assertion would
+leave a release build with the same silent answer. A sort comparator that
+cannot fail wraps the call. The tool's `-s` compares only a result's own
+values, which are never refused; were one to be, its rows would count as
+equal and keep the order they arrived in, since the sort is stable.
+
+**The context's comparison reports what it refused.** Outside an operation
+the report is an operation of its own: it enters the context, so the
+diagnostic callback runs with the context busy as every callback does, and
+the error is an ARGUMENT error that says whether the value is a collected
+result's. Called from caller code the library is running -- a row callback
+sorting what it was given -- it fills the caller-code slot instead
+([Contexts and re-entry](#contexts-and-re-entry)), so that it neither
+recurses into the diagnostic callback nor overwrites the error of the
+operation it runs inside. A result has nowhere to report, so its
+comparison's -1 is all it says, and a value it does not hold is the only
+reason it gives one.
 
 ## Configuration: limits, switches and threads
 
@@ -319,6 +377,18 @@ A context is not thread-safe and is used by one caller thread at a time.
 Distinct contexts share nothing -- the library holds no global mutable
 state ([threads](architecture.md#threads)) -- so distinct contexts may be
 used from distinct threads freely.
+
+* **A query is part of its context** for the thread rule: running,
+  collecting and destroying it are calls on the context, made by the thread
+  using the context, because the query holds the flag that says it is being
+  answered and the context writes it. Once the context is destroyed a query
+  can only be destroyed, which reads nothing of the context and so may
+  happen on any thread.
+* **A result is immutable once it is returned.** Its accessors read the
+  result's rows and byte pool and write nothing -- no cache, no counter --
+  so any number of threads may read one result at once, with each other and
+  with any call on the context it came from. Destroying it must not overlap
+  a read of it.
 
 ## Interruption
 
@@ -427,11 +497,19 @@ reported and no other error has it. An out-of-range class, which only a
 library bug can pass, is recorded as INTERNAL, so the class is NONE exactly
 when there is no error text.
 
-**Last-error semantics.** The class is recorded beside the text, by the one
-function that records the text, before the callback is called, so a
-callback may read it. Text and class have one lifetime: both are set when an
-error is recorded and stand until the next error, and a later success
-clears neither, so a caller reads both right after the call that failed.
+**Last-error semantics: the error state describes the most recent failure,
+and the return value says whether there was one.** This is `errno`'s rule. The
+class is recorded beside the text, by the one function that records the
+text, before the callback is called, so a callback may read it. Text and
+class have one lifetime: both are set when an error is recorded and stand
+until the next error, and a later success clears neither, so a caller reads
+both after a call that returned failure, before its next call. Clearing the
+state on success was the alternative: it would make the state alone answer
+"did the last call fail?", but only if every entry point remembered to clear
+it -- the readers too, and those may run inside an operation whose error they
+must not erase. The return convention already answers the question for
+every call by its signature ([Model](#model)), so nothing has to clear
+anything.
 When one call reports several errors, as the parser does after it
 resynchronizes, the last one's class is kept with the last one's text; the
 errors of one check are nearly always of one class, and where they are not,
@@ -548,8 +626,8 @@ removed or changed one `c+1:0:0`, and a change inside the library alone
   relic 1.0's: `relic_create_config()` with errno `EINVAL` for the size and
   `E2BIG` for the byte, as `openat2(2)` does, and an import as an argument
   error. The statistics are written for the bytes both know and zeroed
-  past them, and `relic_stats()`, which cannot fail, answers a size smaller
-  than 1.0's by zeroing the caller's bytes. `relic_struct_copy_in()` and
+  past them, and `relic_stats()` answers a size smaller than 1.0's by
+  zeroing the caller's bytes and failing with an argument error. `relic_struct_copy_in()` and
   `relic_struct_copy_out()` in `lib/api.c` are the one place the rule is
   enforced. A release that adds a field:
   * puts it at the end, with a default of zero, so that a zeroed structure

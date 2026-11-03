@@ -28,14 +28,12 @@
  * relic_error() and relic_error_class() and install no callback at all.
  */
 
-/* What relic_error() says of a call refused because its context was busy. */
-#define	RELIC_REFUSED_ERROR \
-	"the context was called from one of its own callbacks"
 
 /* What the text of every error of class RELIC_ERROR_INTERNAL begins with. */
 #define	RELIC_INTERNAL_PREFIX	"internal error: "
 
 static const char	*level_name(enum relic_diag_level level);
+static const char	*call_error_text(enum relic_call_error error);
 static enum relic_error_class
 			 class_or_internal(enum relic_error_class error_class);
 static void		 format_message(char *message, size_t size,
@@ -133,7 +131,7 @@ record_error(relic_t *ctx, enum relic_error_class error_class,
 	strlcpy(ctx->diag.last_error, message, sizeof(ctx->diag.last_error));
 	ctx->diag.last_class = error_class;
 	ctx->diag.has_error = true;
-	ctx->diag.refused = false;
+	ctx->diag.caller_code_error = RELIC_CALL_OK;
 	ctx->diag.error_count++;
 }
 
@@ -143,23 +141,25 @@ relic_diag_init(relic_diag_t *diag)
 	bzero(diag, sizeof(*diag));
 }
 
-void
+int
 relic_diag_set(relic_t *ctx, relic_diag_cb callback, void *callback_ctx)
 {
 	if (relic_enter(ctx, NULL, NULL) != 0)
-		return;
+		return (-1);
 
 	ctx->diag.callback = callback;
 	ctx->diag.callback_ctx = callback_ctx;
 
 	relic_leave(ctx);
+
+	return (0);
 }
 
 const char *
 relic_error(relic_t *ctx)
 {
-	if (ctx->diag.refused)
-		return (RELIC_REFUSED_ERROR);
+	if (ctx->diag.caller_code_error != RELIC_CALL_OK)
+		return (call_error_text(ctx->diag.caller_code_error));
 
 	if (!ctx->diag.has_error)
 		return (NULL);
@@ -170,7 +170,7 @@ relic_error(relic_t *ctx)
 enum relic_error_class
 relic_error_class(relic_t *ctx)
 {
-	if (ctx->diag.refused)
+	if (ctx->diag.caller_code_error != RELIC_CALL_OK)
 		return (RELIC_ERROR_ARGUMENT);
 
 	if (!ctx->diag.has_error)
@@ -263,10 +263,57 @@ relic_diag_internal(relic_t *ctx, const relic_location_t *where,
 	va_end(arguments);
 }
 
+/*
+ * The one text of each failure a call made from caller code can record.  A
+ * value past the enumeration, which only a library bug could store, reads
+ * as the refusal.
+ */
+static const char *
+call_error_text(enum relic_call_error error)
+{
+	switch (error) {
+	case RELIC_CALL_COMPARED_NOTHING:
+		return ("a comparison needs two values and somewhere to store "
+		    "their order");
+	case RELIC_CALL_COMPARED_RESULTS:
+		return ("a value compared belongs to a collected result; "
+		    "relic_result_compare() orders a result's values");
+	case RELIC_CALL_COMPARED_FOREIGN:
+		return ("a value compared is not one this context holds");
+	case RELIC_CALL_STATS_STRUCTURE:
+		return ("the statistics need a structure, at least as large as "
+		    "relic 1.0's, to fill");
+	case RELIC_CALL_OK:
+	case RELIC_CALL_REFUSED:
+		break;
+	}
+
+	return ("the context was called from one of its own callbacks");
+}
+
 void
 relic_diag_record_refusal(relic_t *ctx)
 {
-	ctx->diag.refused = true;
+	ctx->diag.caller_code_error = RELIC_CALL_REFUSED;
+}
+
+void
+relic_diag_call_error(relic_t *ctx, enum relic_call_error error)
+{
+	assert(error != RELIC_CALL_OK && error != RELIC_CALL_REFUSED);
+
+	if (ctx->busy) {
+		ctx->diag.caller_code_error = error;
+		return;
+	}
+
+	if (relic_enter(ctx, NULL, NULL) != 0)
+		return;
+
+	relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL, "%s",
+	    call_error_text(error));
+
+	relic_leave(ctx);
 }
 
 void

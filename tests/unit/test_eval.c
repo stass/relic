@@ -227,6 +227,8 @@ static int	 render_row(void *callback_ctx, const relic_value_t *values,
 static int	 run_query(relic_t *ctx, const char *text,
 		    rendering_t *rendering);
 static void	 sort_rows(char *text);
+static int	 value_order(relic_t *ctx, const relic_value_t *a,
+		    const relic_value_t *b);
 static void	 comparisons_follow_the_type_rules(void);
 static void	 counters_are(const char *scenario, const char *what,
 		    const relic_stats_t *stats, counters_t expected);
@@ -830,6 +832,23 @@ a_discard_gives_back_what_the_limits_count(void)
 }
 
 /*
+ * The order relic_value_compare() puts two values the context holds in, or
+ * zero, after recording a failure, when it refuses them.
+ */
+static int
+value_order(relic_t *ctx, const relic_value_t *a, const relic_value_t *b)
+{
+	int order;
+
+	if (relic_value_compare(ctx, a, b, &order) != 0) {
+		check(false, SCENARIO_ORDER, "two values the context holds compare");
+		return (0);
+	}
+
+	return (order);
+}
+
+/*
  * The order -s sorts by: every integer before every symbol before every
  * string, then numerically or bytewise, with a shorter byte string before a
  * longer one it begins.
@@ -842,6 +861,7 @@ the_total_order_sorts_across_types(void)
 	relic_value_t values[6];
 	uint32_t id;
 	size_t i;
+	int order;
 
 	ctx = relic_create();
 	if (ctx == NULL) {
@@ -868,31 +888,45 @@ the_total_order_sorts_across_types(void)
 	values[5].v.id = id;
 
 	for (i = 0; i + 1 < sizeof(values) / sizeof(values[0]); i++) {
-		checkf(relic_value_compare(ctx, &values[i],
-		    &values[i + 1]) < 0, SCENARIO_ORDER,
-		    "value %zu should sort before value %zu", i, i + 1);
-		checkf(relic_value_compare(ctx, &values[i + 1],
-		    &values[i]) > 0, SCENARIO_ORDER,
-		    "value %zu should sort after value %zu", i + 1, i);
-		checkf(relic_value_compare(ctx, &values[i], &values[i]) == 0,
+		checkf(value_order(ctx, &values[i], &values[i + 1]) < 0,
+		    SCENARIO_ORDER, "value %zu should sort before value %zu", i,
+		    i + 1);
+		checkf(value_order(ctx, &values[i + 1], &values[i]) > 0,
+		    SCENARIO_ORDER, "value %zu should sort after value %zu", i + 1,
+		    i);
+		checkf(value_order(ctx, &values[i], &values[i]) == 0,
 		    SCENARIO_ORDER, "value %zu should equal itself", i);
 	}
 
 	/*
-	 * A symbol the context never assigned is reported rather than read,
-	 * and compares equal to everything; a collected result's value is
-	 * named as one.
+	 * A symbol the context never assigned is refused rather than read, on
+	 * either side, and the order is left alone; a collected result's value
+	 * is named as one.  So is a missing value or order.
 	 */
 	unknown = values[2];
 	unknown.v.id = RELIC_DOM_INDEX_MASK;
-	check(relic_value_compare(ctx, &unknown, &values[2]) == 0 &&
-	    relic_value_compare(ctx, &values[2], &unknown) == 0 &&
+	order = 7;
+	check(relic_value_compare(ctx, &unknown, &values[2], &order) == -1 &&
+	    relic_value_compare(ctx, &values[2], &unknown, &order) == -1 &&
+	    order == 7 && relic_error_class(ctx) == RELIC_ERROR_ARGUMENT &&
 	    strstr(relic_error(ctx), "not one this context holds") != NULL,
-	    SCENARIO_ORDER, "an unknown symbol is reported and compares equal");
+	    SCENARIO_ORDER, "an unknown symbol fails the comparison, and says so");
 	unknown.v.id = RELIC_RESULT_ID_BIT | 1;
-	check(relic_value_compare(ctx, &values[2], &unknown) == 0 &&
+	check(relic_value_compare(ctx, &values[2], &unknown, &order) == -1 &&
 	    strstr(relic_error(ctx), "relic_result_compare()") != NULL,
-	    SCENARIO_ORDER, "a result's symbol is reported as a result's");
+	    SCENARIO_ORDER, "a result's symbol is refused as a result's");
+	check(relic_value_compare(ctx, NULL, &values[2], &order) == -1 &&
+	    relic_value_compare(ctx, &values[2], &values[2], NULL) == -1 &&
+	    relic_error_class(ctx) == RELIC_ERROR_ARGUMENT &&
+	    strstr(relic_error(ctx), "two values") != NULL, SCENARIO_ORDER,
+	    "a missing value or order fails the comparison");
+	unknown = values[1];
+	unknown.type = (enum relic_type)7;
+	unknown.v.id = RELIC_RESULT_ID_BIT | 1;
+	check(relic_value_compare(ctx, &values[1], &unknown, &order) == -1 &&
+	    order == 7 &&
+	    strstr(relic_error(ctx), "not one this context holds") != NULL,
+	    SCENARIO_ORDER, "a value of no type fails the comparison");
 
 	relic_destroy(ctx);
 }

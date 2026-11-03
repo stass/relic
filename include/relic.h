@@ -103,40 +103,64 @@ RELIC_EXPORT const char *relic_version(void);
  * both sides know, and the caller's bytes past the library's own structure
  * are zeroed, so a counter the library predates reads as zero.  A size
  * smaller than the structure relic 1.0 declared fills nothing: the caller's
- * `size` bytes are zeroed and no counter is reported.
+ * `size` bytes are zeroed, no counter is reported, and the call fails.
  */
 
 /*
  * A relic context: a loaded program, the values it mentions, and the
  * relations derived from it.  Contexts share nothing, so a program may hold
- * as many as it likes, but one context is not itself thread-safe:
- * relic_interrupt() is the one call another thread may make on it.
+ * as many as it likes, but one context is not itself thread-safe: it is used
+ * by one thread at a time, and relic_interrupt() is the one call another
+ * thread may make on it meanwhile.  A query is part of its context: running,
+ * collecting and destroying it are calls on the context, made on the thread
+ * using it, and once the context is destroyed the query can only be
+ * destroyed, on any thread.  A collected result is not: it is immutable once
+ * returned, so any number of threads may read one at once, with each other
+ * and with calls on its context, and only its destruction must not overlap
+ * a read of it.
  *
- * A function that takes a context and can fail returns -1 or NULL when it
- * does, and 0 or a pointer otherwise, and a failure is always explained by a
- * RELIC_ERROR diagnostic, the last of which relic_error() returns, and
- * relic_error_class() what kind of failure it was.  The functions that only
- * read -- relic_string(), relic_value_compare(), relic_query_count(),
- * relic_stats() -- cannot fail; relic_string() returns NULL for an
- * identifier it does not know, and relic_value_compare() alone reports an
- * error, for a value the context does not hold, when no caller code the
- * library is running made the call.
+ * The return value is the one sign of failure.  A function returning int
+ * returns -1 when it fails and 0 otherwise, one returning a pointer returns
+ * NULL when it fails, and one returning nothing cannot fail.  The failure
+ * of a call on a context is explained by an error, whose text relic_error()
+ * returns and whose class relic_error_class() returns: ordinarily a
+ * RELIC_ERROR diagnostic, which the diagnostic callback also receives, and
+ * for a call caller code makes, as set out below, an error the two describe
+ * alone.  relic_result_compare(), which has no context, fails with no error
+ * at all.  The text and the class describe the most recent failure, as errno
+ * does: a later success clears neither, so a caller reads them after a call
+ * that returned failure and before its next call.  relic_string() and
+ * relic_query_count() cannot fail.  A NULL from relic_string(),
+ * relic_result_string(), relic_result_row() or relic_error() is an answer
+ * -- no such identifier, row or error -- rather than a failure, and reports
+ * nothing; relic_version() never returns NULL.
+ *
+ * Pointers.  The context a function takes must not be NULL, except that
+ * relic_destroy() and relic_interrupt() do nothing with one.  The result a
+ * result's accessor takes must not be NULL, except that
+ * relic_result_destroy() does nothing with one.  relic_diag_stderr() takes
+ * what a context hands its diagnostic callback.  Every other pointer a
+ * function requires is checked, and a NULL one fails the call, with an error
+ * of class RELIC_ERROR_ARGUMENT where there is a context to record it; a
+ * pointer the description of a function says may be NULL is not required.
  *
  * Caller code runs while the context is part way through an operation in
  * four ways: the diagnostic, explain and row callbacks, and the read
  * function of a stream given to relic_load_file() or relic_import_file().
  * It may read through the context with the functions above,
- * relic_error() and relic_error_class(), and may call relic_interrupt(),
- * which a signal handler or another thread may call too.  Any other call
- * on the same context is refused: a call that returns a status fails with
- * -1 or NULL, one that returns nothing does nothing, and relic_error() and
- * relic_error_class() describe the refusal until the next
- * error or until the operation the caller code runs inside returns; the
- * diagnostic callback is not called for it.  A refused relic_destroy()
- * releases nothing, so a callback that tries to destroy its context leaks
- * it rather than freeing memory in use.  A callback must return: one that
- * leaves by longjmp() or an exception leaves its context refusing every
- * later call.
+ * relic_value_compare(), relic_stats(), relic_error() and
+ * relic_error_class(), and may call relic_interrupt(), which a signal
+ * handler or another thread may call too.  Any other call on the same
+ * context is refused: it fails with -1 or NULL and changes nothing,
+ * relic_destroy() and the callback installations included, and relic_error() and relic_error_class() describe the refusal
+ * until the next error or until the operation the caller code runs inside
+ * returns; the diagnostic callback is not called for it.  A comparison of a
+ * value the context does not hold, or statistics asked for in too small a
+ * structure, fails from such code in the same way.  A refused
+ * relic_destroy() releases nothing, so a callback that tries to destroy its
+ * context leaks it rather than freeing memory in use.  A callback must
+ * return: one that leaves by longjmp() or an exception leaves its context
+ * refusing every later call.
  */
 typedef struct relic relic_t;
 
@@ -403,11 +427,12 @@ struct relic_config {
  * EINVAL when `size` is smaller than relic 1.0's configuration or the
  * configuration asks for more than RELIC_THREADS_MAX threads, and with
  * errno E2BIG when the configuration sets a field this library does not
- * have.  It also returns NULL when memory is exhausted, or when
- * getentropy(2) cannot supply the random bytes the context keys its hash
- * tables with, as in a sandbox with no random device.  There is no other
- * way for it to fail, and no context yet to report through, so no failure
- * is reported to a diagnostic callback.
+ * have.  It also returns NULL, with errno ENOMEM, when memory is exhausted,
+ * and, with the errno getentropy(2) set or EIO for a source of nothing but
+ * zeros, when getentropy(2) cannot supply the random bytes the context keys
+ * its hash tables with, as in a sandbox with no random device.  There is no
+ * other way for it to fail, and no context yet to report through, so no
+ * failure is reported to a diagnostic callback.
  *
  *	relic_config_t config;
  *
@@ -416,12 +441,15 @@ struct relic_config {
  *	ctx = relic_create_config(&config, sizeof(config));
  *
  * relic_create() is relic_create_config() with every limit at its default.
- * relic_destroy() releases everything the context owns and accepts NULL.
+ * relic_destroy() releases everything the context owns and returns 0, and
+ * accepts NULL.  Called from caller code the context is running, it is
+ * refused like any other call that would change the context, and returns -1
+ * having released nothing.
  */
 RELIC_EXPORT relic_t *relic_create(void);
 RELIC_EXPORT relic_t *relic_create_config(const relic_config_t *config,
     size_t size);
-RELIC_EXPORT void relic_destroy(relic_t *ctx);
+RELIC_EXPORT int relic_destroy(relic_t *ctx);
 
 /*
  * The three value types.  They are distinct domains: the symbol foo and the
@@ -534,17 +562,18 @@ typedef void (*relic_diag_cb)(
     const char *);
 
 /*
- * Install a diagnostic callback, replacing any previous one.  Passing NULL
- * discards diagnostics, which is the default: a library must not write to
- * its caller's stderr uninvited, and an error remains recoverable through
- * relic_error() whether or not a callback saw it.
+ * Install a diagnostic callback, replacing any previous one, and return 0,
+ * or -1 when the call is refused.  Passing NULL discards diagnostics, which
+ * is the default: a library must not write to its caller's stderr
+ * uninvited, and an error remains recoverable through relic_error() whether
+ * or not a callback saw it.
  *
  * A diagnostic can arrive in the middle of loading, checking or evaluating,
  * when the context is part way through an operation and cannot be entered
  * again.  The callback may read through the context, and any other call it
  * makes is refused, as the description of relic_t sets out.
  */
-RELIC_EXPORT void relic_diag_set(relic_t *ctx, relic_diag_cb callback,
+RELIC_EXPORT int relic_diag_set(relic_t *ctx, relic_diag_cb callback,
     void *callback_ctx);
 
 /*
@@ -906,8 +935,8 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  *
  * Rows are distinct, because a query's answer is a set.  Their order is
  * unspecified by the language but is the same on every run over the same
- * input; relic_value_compare() orders them when a caller needs an order that
- * does not depend on that.
+ * input; relic_value_compare() and relic_result_compare() order them when a
+ * caller needs an order that does not depend on that.
  *
  * The answer is transient.  Once its rows have been delivered, or the
  * callback has stopped them, the context keeps nothing of it, so earlier
@@ -948,11 +977,12 @@ typedef struct relic_result relic_result_t;
  * a string's identifier, as relic_string() does for the context's, until
  * the result is destroyed, and returns NULL for an identifier the result
  * did not assign; relic_result_compare() orders two of its values as
- * relic_value_compare() orders the context's, and compares a value whose
- * identifier the result did not assign equal to everything.  A result's
- * symbol or string is not the context's: relic_string() returns NULL for
- * it, and relic_value_compare() and relic_fact_add() refuse it, so a caller
- * handing one back builds it again from its bytes.  An integer is its own
+ * relic_value_compare() orders the context's, and returns -1, with nothing
+ * reported, for a value whose identifier the result did not assign or a
+ * NULL pointer.  A result's symbol or string is not the context's:
+ * relic_string() returns NULL for it, and relic_value_compare() and
+ * relic_fact_add() refuse it, so a caller handing one back builds it again
+ * from its bytes.  An integer is its own
  * value in both.  relic_result_destroy() accepts NULL.
  */
 RELIC_EXPORT relic_result_t *relic_query_collect(relic_t *ctx,
@@ -964,20 +994,21 @@ RELIC_EXPORT const relic_value_t *relic_result_row(
 RELIC_EXPORT const char *relic_result_string(const relic_result_t *result,
     uint32_t id, size_t *lenp);
 RELIC_EXPORT int relic_result_compare(const relic_result_t *result,
-    const relic_value_t *a, const relic_value_t *b);
+    const relic_value_t *a, const relic_value_t *b, int *orderp);
 RELIC_EXPORT void relic_result_destroy(relic_result_t *result);
 
 /*
- * Release a query.  Accepts NULL.  It may be called before or after
- * relic_destroy(), and from caller code the library is running, except
- * while the query itself is being answered, when it does nothing.
+ * Release a query and return 0.  Accepts NULL.  It may be called before or
+ * after relic_destroy(), and from caller code the library is running,
+ * except while the query itself is being answered, when it is refused and
+ * returns -1 having released nothing.
  */
-RELIC_EXPORT void relic_query_destroy(relic_query_t *query);
+RELIC_EXPORT int relic_query_destroy(relic_query_t *query);
 
 /*
- * Compare two values in the total order used to sort results, returning a
- * negative number, zero or a positive number as `a` sorts before, with or
- * after `b`.
+ * Compare two values in the total order used to sort results, storing in
+ * *orderp a negative number, zero or a positive number as `a` sorts before,
+ * with or after `b`, and return 0.
  *
  * Every integer sorts before every symbol and every symbol before every
  * string; integers then compare numerically, and symbols and strings
@@ -985,14 +1016,15 @@ RELIC_EXPORT void relic_query_destroy(relic_query_t *query);
  * column holds more than one type, and it is not the order the language's
  * comparison operators use: those never order values of different types.
  * Both values must belong to `ctx`.  A symbol or string whose identifier
- * the context never assigned, a collected result's among them, compares
- * equal to everything, and is reported as an error, unless caller code the
- * library is running made the call: the report would displace the error of
- * the operation the code runs inside, so a comparison there reports
- * nothing.
+ * the context never assigned, a collected result's among them, or a NULL
+ * pointer fails the call: it returns -1, leaves *orderp alone, and reports
+ * an error of class RELIC_ERROR_ARGUMENT.  Made by caller code the library
+ * is running, the call may still compare, and fails as a refused call does,
+ * described by relic_error() until the operation the code runs inside
+ * returns and never reaching the diagnostic callback.
  */
 RELIC_EXPORT int relic_value_compare(relic_t *ctx, const relic_value_t *a,
-    const relic_value_t *b);
+    const relic_value_t *b, int *orderp);
 
 typedef struct relic_stats relic_stats_t;
 
@@ -1054,13 +1086,14 @@ struct relic_stats {
 };
 
 /*
- * Fill *stats, which must not be NULL and is `size` bytes, with the
- * context's counters, by the rule for structures passed with their size.
- * A `size` smaller than relic 1.0's statistics is a mistake the call cannot
- * report, since it cannot fail: the caller's `size` bytes are zeroed and
- * no counter is reported.
+ * Fill *stats, which is `size` bytes, with the context's counters, by the
+ * rule for structures passed with their size, and return 0.  A NULL `stats`
+ * or a `size` smaller than relic 1.0's statistics fails the call: it returns
+ * -1 with an error of class RELIC_ERROR_ARGUMENT, and the caller's `size`
+ * bytes, if any, are zeroed.  Caller code the library is running may call
+ * it, and its failure there is described as a refused call's is.
  */
-RELIC_EXPORT void relic_stats(relic_t *ctx, relic_stats_t *stats,
+RELIC_EXPORT int relic_stats(relic_t *ctx, relic_stats_t *stats,
     size_t size);
 
 /*
@@ -1089,15 +1122,18 @@ typedef void (*relic_explain_cb)(void *, const char *);
  * is cut and ends in "...".
  *
  * As with a diagnostic callback, the callback may read through the context
- * and any other call it makes is refused.
+ * and any other call it makes is refused.  Returns 0, or -1 when the call is
+ * refused.
  */
-RELIC_EXPORT void relic_explain_set(relic_t *ctx, relic_explain_cb callback,
+RELIC_EXPORT int relic_explain_set(relic_t *ctx, relic_explain_cb callback,
     void *callback_ctx);
 
 /*
  * The text of the most recent RELIC_ERROR diagnostic, or NULL if the context
- * has reported none.  The string belongs to the context and is replaced by
- * the next error, so a caller that needs to keep it copies it.
+ * has reported none.  Whether a call failed is told by its return value,
+ * not by this text, which a later success leaves in place.  The string
+ * belongs to the context and is replaced by the next error, so a caller
+ * that needs to keep it copies it.
  *
  * The text is raw.  A diagnostic may quote an identifier, a string literal
  * or a file name taken from whatever relic was asked to read, so it can
@@ -1132,11 +1168,13 @@ RELIC_EXPORT const char *relic_error(relic_t *ctx);
  *	IO		a file could not be opened, read or closed
  *	MEMORY		the allocator refused, and no limit was the cause
  *	INTERRUPTED	relic_interrupt() stopped the operation
- *	ARGUMENT	the call was malformed in C's terms: a NULL argument,
- *			an index, enumerator or flag the library does not
- *			know, a value whose type or identifier is not one the
- *			context made, a query of another context, or a call
- *			made from one of the context's own callbacks
+ *	ARGUMENT	the call was malformed in C's terms: a NULL pointer
+ *			where the call needs one, the context excepted, as the
+ *			description of relic_t sets out; an index, enumerator
+ *			or flag the library does not know, a value whose type
+ *			or identifier is not one the context made, a query of
+ *			another context, or a call made from one of the
+ *			context's own callbacks
  *	INTERNAL	an invariant the library checks was false, which is a
  *			bug in relic
  *
@@ -1161,10 +1199,10 @@ enum relic_error_class {
  * The class of the error relic_error() returns the text of, and
  * RELIC_ERROR_NONE when it returns NULL.  The two have one lifetime: both
  * are set when an error is reported and stand until the next one, and a
- * later success clears neither, so a caller reads them right after the
- * call that failed.  A call refused because the context was busy is
- * RELIC_ERROR_ARGUMENT.  Like relic_error(), it may be called from a
- * callback.
+ * later success clears neither, so a caller reads them after a call that
+ * returned failure and before its next call.  A call refused because the
+ * context was busy is RELIC_ERROR_ARGUMENT.  Like relic_error(), it may be
+ * called from a callback.
  */
 RELIC_EXPORT enum relic_error_class relic_error_class(relic_t *ctx);
 

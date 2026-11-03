@@ -63,7 +63,7 @@ relic_leave(relic_t *ctx)
 	assert(ctx->account.round_bytes == 0);
 
 	ctx->busy = false;
-	ctx->diag.refused = false;
+	ctx->diag.caller_code_error = RELIC_CALL_OK;
 }
 
 /*
@@ -82,13 +82,17 @@ relic_interrupt(relic_t *ctx)
 
 /*
  * A context is destroyed by entering it and never leaving: nothing is left
- * to leave.
+ * to leave.  Entering a busy context fails, so a destroy from the context's
+ * own caller code is refused and releases nothing.
  */
-void
+int
 relic_destroy(relic_t *ctx)
 {
-	if (ctx == NULL || relic_enter(ctx, NULL, NULL) != 0)
-		return;
+	if (ctx == NULL)
+		return (0);
+
+	if (relic_enter(ctx, NULL, NULL) != 0)
+		return (-1);
 
 	relic_pool_free(ctx->pool);
 	relic_store_reset(&ctx->store);
@@ -98,6 +102,8 @@ relic_destroy(relic_t *ctx)
 	relic_arena_reset(&ctx->eval_arena);
 	relic_arena_reset(&ctx->program_arena);
 	free(ctx);
+
+	return (0);
 }
 
 /*
@@ -175,8 +181,10 @@ relic_create_config(const relic_config_t *config, size_t size)
 		return (NULL);
 
 	ctx = malloc(sizeof(*ctx));
-	if (ctx == NULL)
+	if (ctx == NULL) {
+		errno = ENOMEM;
 		return (NULL);
+	}
 
 	bzero(ctx, sizeof(*ctx));
 	ctx->hash_seed = hash_seed;
@@ -226,7 +234,7 @@ relic_struct_copy_in(const void *theirs, size_t their_size, void *ours,
 	return (0);
 }
 
-void
+int
 relic_struct_copy_out(const void *ours, size_t our_size, void *theirs,
     size_t their_size, size_t oldest_size)
 {
@@ -234,10 +242,12 @@ relic_struct_copy_out(const void *ours, size_t our_size, void *theirs,
 
 	bzero(theirs, their_size);
 	if (their_size < oldest_size)
-		return;
+		return (EINVAL);
 
 	known = their_size < our_size ? their_size : our_size;
 	bcopy(ours, theirs, known);
+
+	return (0);
 }
 
 const char *

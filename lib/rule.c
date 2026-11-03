@@ -3055,23 +3055,26 @@ copy_loaded_query(relic_t *ctx, size_t index)
 
 /*
  * Only the query being answered is refused, from whatever caller code runs
- * while it is; any other is released without reading its context, which
- * may be gone.  Its answer relation is empty, since a query holds tuples
- * only while it is being answered, so freeing it gives nothing back to the
- * context's totals and needs nothing of the context.
+ * while it is, and its context is then alive to record the refusal; any
+ * other is released without reading its context, which may be gone.  Its
+ * answer relation is empty, since a query holds tuples only while it is
+ * being answered, so freeing it gives nothing back to the context's totals
+ * and needs nothing of the context.
  */
-void
+int
 relic_query_destroy(relic_query_t *query)
 {
 	if (query == NULL)
-		return;
+		return (0);
 
 	if (query->running) {
 		relic_diag_record_refusal(query->ctx);
-		return;
+		return (-1);
 	}
 
 	relic_relation_free(query->answer);
 	relic_arena_reset(&query->arena);
 	free(query);
+
+	return (0);
 }

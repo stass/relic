@@ -119,8 +119,9 @@ typedef struct comparing comparing_t;
 
 /*
  * What a diagnostic callback that compares a value the context does not
- * hold saw: how often and how deeply it was called, and what the load it
- * tries from inside each call returned.
+ * hold saw: how often and how deeply it was called, what its comparison
+ * returned and whether the error state then described the comparison, and
+ * what the load it tries from inside each call returned.
  */
 struct comparing {
 	relic_t		*ctx;
@@ -128,6 +129,8 @@ struct comparing {
 	size_t		 calls;
 	size_t		 depth;
 	size_t		 deepest;
+	int		 nested_compare;
+	bool		 compare_described;
 	int		 nested_load;
 };
 
@@ -248,6 +251,10 @@ static void	 a_value_compared_is_reported_as_an_operation(void);
 static void	 compare_from_callback(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
+static int	 compare_from_row(void *callback_ctx,
+		    const relic_value_t *values, size_t count);
+static int	 result_order(const relic_result_t *result,
+		    const relic_value_t *a, const relic_value_t *b);
 static bool	 result_reads(const relic_result_t *result,
 		    own_row_t rows[OWN_ROWS]);
 static bool	 rows_are(const own_row_t rows[OWN_ROWS],
@@ -390,10 +397,10 @@ refused_object(reentry_t *reentry, const void *object, const char *call)
 
 /*
  * Call every entry point that changes a context, from caller code the
- * context is running.  Each must be refused.  The calls that return nothing
- * are refused by doing nothing: the diagnostic callback stays installed and
- * the context stays alive, which reentry_end() confirms.  The calls that
- * only read are allowed.
+ * context is running.  Each must be refused, and say so by its status, the
+ * destroy and the callback installations among them: the diagnostic
+ * callback stays installed and the context stays alive, which reentry_end()
+ * confirms.  The calls that only read are allowed.
  */
 static void
 reenter_every_way(reentry_t *reentry)
@@ -459,14 +466,17 @@ reenter_every_way(reentry_t *reentry)
 	refused(reentry, relic_predicate_arities(reentry->ctx, "c", &arities),
 	    "relic_predicate_arities()");
 
-	relic_diag_set(reentry->ctx, NULL, NULL);
-	relic_explain_set(reentry->ctx, NULL, NULL);
-	relic_destroy(reentry->ctx);
+	refused(reentry, relic_diag_set(reentry->ctx, NULL, NULL),
+	    "relic_diag_set()");
+	refused(reentry, relic_explain_set(reentry->ctx, NULL, NULL),
+	    "relic_explain_set()");
+	refused(reentry, relic_destroy(reentry->ctx), "relic_destroy()");
 
-	relic_stats(reentry->ctx, &stats, sizeof(stats));
-	checkf(relic_string(reentry->ctx, reentry->value.v.id, NULL) != NULL &&
+	checkf(relic_stats(reentry->ctx, &stats, sizeof(stats)) == 0 &&
+	    relic_string(reentry->ctx, reentry->value.v.id, NULL) != NULL &&
 	    relic_query_count(reentry->ctx) == 1, SCENARIO_REENTRY,
-	    "%s can read strings and count queries", reentry->from);
+	    "%s can read statistics and strings and count queries",
+	    reentry->from);
 }
 
 /*
@@ -547,7 +557,8 @@ reenter_from_row(void *callback_ctx,
 		return (0);
 
 	reenter_every_way(reentry);
-	relic_query_destroy(reentry->query);
+	refused(reentry, relic_query_destroy(reentry->query),
+	    "relic_query_destroy()");
 
 	return (0);
 }
@@ -1173,6 +1184,24 @@ compare_lines(const void *left, const void *right)
 }
 
 /*
+ * The order relic_result_compare() puts two of a result's values in, or
+ * zero, after recording a failure, when it refuses them.
+ */
+static int
+result_order(const relic_result_t *result, const relic_value_t *a,
+    const relic_value_t *b)
+{
+	int order;
+
+	if (relic_result_compare(result, a, b, &order) != 0) {
+		check(false, SCENARIO_OWN_BYTES, "two of a result's values compare");
+		return (0);
+	}
+
+	return (order);
+}
+
+/*
  * The bytes of each row's one value, read through the result, and the rows
  * in the result's order, which a simple insertion sort by
  * relic_result_compare() finds.  Returns false when the result is not
@@ -1206,7 +1235,7 @@ result_reads(const relic_result_t *result, own_row_t rows[OWN_ROWS])
 
 	for (i = 1; i < OWN_ROWS; i++) {
 		held = rows[i];
-		for (j = i; j > 0 && relic_result_compare(result, &held.value,
+		for (j = i; j > 0 && result_order(result, &held.value,
 		    &rows[j - 1].value) < 0; j--)
 			rows[j] = rows[j - 1];
 		rows[j] = held;
@@ -1271,6 +1300,7 @@ a_result_holds_its_own_bytes(void)
 	relic_t *ctx;
 	char *answered;
 	size_t i;
+	int order;
 	bool read;
 
 	ctx = context_with(program, NULL, &log);
@@ -1297,16 +1327,21 @@ a_result_holds_its_own_bytes(void)
 	    SCENARIO_OWN_BYTES, "the context reads no result's identifier");
 	check(relic_value_symbol(ctx, "ab", 2, &mine) == 0, SCENARIO_OWN_BYTES,
 	    "the context's ab is made");
-	check(relic_value_compare(ctx, &theirs, &mine) == 0 &&
+	order = 7;
+	check(relic_value_compare(ctx, &theirs, &mine, &order) == -1 &&
+	    order == 7 && relic_error_class(ctx) == RELIC_ERROR_ARGUMENT &&
 	    strstr(relic_error(ctx), "collected result") != NULL,
-	    SCENARIO_OWN_BYTES, "a result's value compared is reported");
+	    SCENARIO_OWN_BYTES, "a result's value compared fails, and says so");
 	check(relic_fact_add(ctx, "kept", 1, &theirs) != 0 &&
 	    strstr(relic_error(ctx), "collected result") != NULL,
 	    SCENARIO_OWN_BYTES, "a result's value is refused as a fact's");
-	check(relic_result_compare(result, &theirs, &mine) == 0 &&
-	    relic_result_string(result, mine.v.id, NULL) == NULL,
+	check(relic_result_compare(result, &theirs, &mine, &order) == -1 &&
+	    relic_result_compare(result, &mine, &theirs, &order) == -1 &&
+	    relic_result_compare(result, &theirs, &theirs, NULL) == -1 &&
+	    relic_result_compare(result, NULL, &theirs, &order) == -1 &&
+	    order == 7 && relic_result_string(result, mine.v.id, NULL) == NULL,
 	    SCENARIO_OWN_BYTES, "the result reads and orders no value of the "
-	    "context's");
+	    "context's, nor a missing one");
 	for (i = 0; i < sizeof(malformed) / sizeof(malformed[0]); i++)
 		checkf(relic_result_string(result, malformed[i], NULL) == NULL,
 		    SCENARIO_OWN_BYTES, "identifier %#x should read as none",
@@ -1392,6 +1427,8 @@ compare_from_callback(void *callback_ctx, enum relic_diag_level level,
     const char *message RELIC_TEST_UNUSED)
 {
 	comparing_t *comparing;
+	const char *error;
+	int order;
 
 	comparing = callback_ctx;
 	if (level != RELIC_ERROR)
@@ -1401,25 +1438,57 @@ compare_from_callback(void *callback_ctx, enum relic_diag_level level,
 	comparing->depth++;
 	if (comparing->depth > comparing->deepest)
 		comparing->deepest = comparing->depth;
-	(void)relic_value_compare(comparing->ctx, &comparing->foreign,
-	    &comparing->foreign);
+	comparing->nested_compare = relic_value_compare(comparing->ctx,
+	    &comparing->foreign, &comparing->foreign, &order);
+	error = relic_error(comparing->ctx);
+	comparing->compare_described = error != NULL &&
+	    strstr(error, "not one this context holds") != NULL &&
+	    relic_error_class(comparing->ctx) == RELIC_ERROR_ARGUMENT;
 	comparing->nested_load = relic_load_string(comparing->ctx, "nested.dl",
 	    "nested(1).\n");
 	comparing->depth--;
 }
 
 /*
- * A comparison of a value the context does not hold reports it as an
- * operation of its own: the diagnostic callback runs once, with the context
- * busy, so its own comparison reports nothing and its load is refused.  A
- * comparison made by caller code inside an operation reports nothing
- * either, and the operation's error stands.
+ * A row callback that compares a value the context does not hold, recording
+ * what the comparison returned and whether the error state described it.
+ */
+static int
+compare_from_row(void *callback_ctx,
+    const relic_value_t *values RELIC_TEST_UNUSED,
+    size_t count RELIC_TEST_UNUSED)
+{
+	comparing_t *comparing;
+	const char *error;
+	int order;
+
+	comparing = callback_ctx;
+	comparing->calls++;
+	comparing->nested_compare = relic_value_compare(comparing->ctx,
+	    &comparing->foreign, &comparing->foreign, &order);
+	error = relic_error(comparing->ctx);
+	comparing->compare_described = error != NULL &&
+	    strstr(error, "not one this context holds") != NULL;
+
+	return (0);
+}
+
+/*
+ * A comparison of a value the context does not hold fails, and reports it
+ * as an operation of its own: the diagnostic callback runs once, with the
+ * context busy, so its own comparison fails without reaching the callback
+ * again, and its load is refused.  A comparison made by caller code inside
+ * an operation fails the same way and is described until the operation
+ * returns, when the operation's error stands again, whether the operation
+ * failed or succeeded.
  */
 static void
 a_value_compared_is_reported_as_an_operation(void)
 {
 	comparing_t comparing;
+	relic_query_t *query;
 	relic_t *ctx;
+	int order;
 
 	ctx = relic_create();
 	check(ctx != NULL, SCENARIO_COMPARED, "a context is created");
@@ -1433,13 +1502,16 @@ a_value_compared_is_reported_as_an_operation(void)
 	relic_diag_set(ctx, compare_from_callback, &comparing);
 
 	check(relic_value_compare(ctx, &comparing.foreign,
-	    &comparing.foreign) == 0, SCENARIO_COMPARED,
-	    "a value the context does not hold compares equal");
+	    &comparing.foreign, &order) == -1, SCENARIO_COMPARED,
+	    "a value the context does not hold fails the comparison");
 	checkf(comparing.calls == 1 && comparing.deepest == 1,
 	    SCENARIO_COMPARED, "the report should reach the callback once, "
 	    "not %zu times %zu deep", comparing.calls, comparing.deepest);
 	check(comparing.nested_load != 0, SCENARIO_COMPARED,
 	    "a load from the report's callback is refused");
+	check(comparing.nested_compare == -1 && comparing.compare_described,
+	    SCENARIO_COMPARED, "a comparison from the report's callback fails "
+	    "and is described there");
 	check(relic_error_class(ctx) == RELIC_ERROR_ARGUMENT &&
 	    strstr(relic_error(ctx), "not one this context holds") != NULL,
 	    SCENARIO_COMPARED, "the comparison is the last error");
@@ -1447,6 +1519,8 @@ a_value_compared_is_reported_as_an_operation(void)
 	comparing.calls = 0;
 	comparing.depth = 0;
 	comparing.deepest = 0;
+	comparing.nested_compare = 0;
+	comparing.compare_described = false;
 	comparing.nested_load = 0;
 	check(relic_load_string(ctx, "broken.dl", "p(.\n") != 0,
 	    SCENARIO_COMPARED, "a load of broken text fails");
@@ -1454,9 +1528,29 @@ a_value_compared_is_reported_as_an_operation(void)
 	    SCENARIO_COMPARED, "the load's error should reach the callback "
 	    "once, not %zu times %zu deep", comparing.calls,
 	    comparing.deepest);
+	check(comparing.nested_compare == -1 && comparing.compare_described,
+	    SCENARIO_COMPARED, "a comparison from the load's callback fails and "
+	    "is described there");
 	checkf(relic_error_class(ctx) == RELIC_ERROR_REJECTED,
 	    SCENARIO_COMPARED, "the load's error should stand, not \"%s\"",
 	    relic_error(ctx));
+
+	comparing.calls = 0;
+	comparing.nested_compare = 0;
+	comparing.compare_described = false;
+	query = NULL;
+	if (relic_load_string(ctx, "rows.dl", "q(1).\n") == 0)
+		query = relic_query_prepare(ctx, NULL, "q(X)?");
+	check(query != NULL && relic_query_run(ctx, query, compare_from_row,
+	    &comparing) == 0 && comparing.calls == 1, SCENARIO_COMPARED,
+	    "a query whose row callback compares succeeds");
+	check(comparing.nested_compare == -1 && comparing.compare_described,
+	    SCENARIO_COMPARED, "a comparison from the row callback fails and "
+	    "is described there");
+	checkf(relic_error_class(ctx) == RELIC_ERROR_REJECTED,
+	    SCENARIO_COMPARED, "the last failure, the load's, should stand "
+	    "after the query succeeds, not \"%s\"", relic_error(ctx));
+	relic_query_destroy(query);
 
 	relic_destroy(ctx);
 }
@@ -1846,9 +1940,9 @@ a_query_and_its_rewrite_share_one_note(void)
  * A collected result holds what the stream delivers, in its order, and
  * reports its width even with no rows; a query with no output columns
  * collects rows of no values; a failed query collects nothing; and a result
- * outlives later loads and the context itself.  So may a query, which is
- * destroyed here after its context, where only AddressSanitizer would see a
- * destroy that read the context.
+ * outlives later loads and the context itself.  So may a query, prepared
+ * or stated in the program, which is destroyed here after its context,
+ * where only AddressSanitizer would see a destroy that read the context.
  */
 static void
 a_collected_result_is_the_stream_kept(void)
@@ -1916,7 +2010,21 @@ a_collected_result_is_the_stream_kept(void)
 	    "a query over the tuple limit collects nothing, with one error");
 	relic_query_destroy(query);
 	relic_destroy(ctx);
+
+	ctx = context_with("n(1).\nn(X)?\n", NULL, &log);
+	if (ctx == NULL)
+		return;
+	query = relic_query_loaded(ctx, 0);
+	result = query != NULL ? relic_query_collect(ctx, query) : NULL;
+	check(result != NULL && relic_result_rows(result) == 1,
+	    SCENARIO_COLLECT, "a query the program states collects its row");
+	check(relic_destroy(ctx) == 0 && relic_query_destroy(query) == 0,
+	    SCENARIO_COLLECT, "a query the program states is destroyed after "
+	    "its context");
+	relic_result_destroy(result);
 	relic_result_destroy(NULL);
+	check(relic_query_destroy(NULL) == 0 && relic_destroy(NULL) == 0,
+	    SCENARIO_COLLECT, "a NULL query or context is destroyed");
 }
 
 /*
@@ -2392,12 +2500,13 @@ statistics_are_written_to_the_size_given(void)
 	}
 
 	memset(&stats, 0xa5, sizeof(stats));
-	relic_stats(ctx, &stats, sizeof(stats));
-	check(stats.tuples == 5 && stats.derivations > 0,
+	check(relic_stats(ctx, &stats, sizeof(stats)) == 0 &&
+	    stats.tuples == 5 && stats.derivations > 0,
 	    SCENARIO_SIZED_STATS, "the structure's own size is filled");
 
 	memset(&larger, 0xa5, sizeof(larger));
-	relic_stats(ctx, &larger.stats, sizeof(larger));
+	check(relic_stats(ctx, &larger.stats, sizeof(larger)) == 0,
+	    SCENARIO_SIZED_STATS, "a larger buffer is filled");
 	check(memcmp(&larger.stats, &stats, sizeof(stats)) == 0,
 	    SCENARIO_SIZED_STATS,
 	    "a larger buffer gets the same counters");
@@ -2406,16 +2515,24 @@ statistics_are_written_to_the_size_given(void)
 	    "and zeros past the structure this library knows");
 
 	memset(&small, 0xa5, sizeof(small));
-	relic_stats(ctx, &small, STATS_SIZE_1_0 - 1);
+	check(relic_stats(ctx, &small, STATS_SIZE_1_0 - 1) == -1 &&
+	    relic_error_class(ctx) == RELIC_ERROR_ARGUMENT,
+	    SCENARIO_SIZED_STATS, "a buffer smaller than relic 1.0's structure "
+	    "fails the call");
 	check(bytes_are(&small, STATS_SIZE_1_0 - 1, 0), SCENARIO_SIZED_STATS,
 	    "a buffer smaller than relic 1.0's structure is zeroed");
 	check(((unsigned char *)&small)[STATS_SIZE_1_0 - 1] == 0xa5,
 	    SCENARIO_SIZED_STATS, "and nothing is written past it");
 
 	memset(&small, 0xa5, sizeof(small));
-	relic_stats(ctx, &small, 0);
+	check(relic_stats(ctx, &small, 0) == -1, SCENARIO_SIZED_STATS,
+	    "a buffer of no bytes fails the call");
 	check(bytes_are(&small, sizeof(small), 0xa5), SCENARIO_SIZED_STATS,
 	    "a buffer of no bytes is not written");
+	check(relic_stats(ctx, NULL, sizeof(stats)) == -1 &&
+	    relic_error_class(ctx) == RELIC_ERROR_ARGUMENT &&
+	    strstr(relic_error(ctx), "statistics need a structure") != NULL,
+	    SCENARIO_SIZED_STATS, "no buffer fails the call");
 
 	relic_destroy(ctx);
 }

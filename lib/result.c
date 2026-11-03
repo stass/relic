@@ -347,18 +347,20 @@ result_holds(const relic_result_t *result, const relic_value_t *value)
 }
 
 /*
- * A result has nowhere to report, so a value it does not hold compares
- * equal to everything, as relic_value_compare() has it compare after
- * reporting it.
+ * A result has nowhere to report, so a value it does not hold, or a missing
+ * one, fails the comparison with nothing more said.
  */
 int
 relic_result_compare(const relic_result_t *result, const relic_value_t *a,
-    const relic_value_t *b)
+    const relic_value_t *b, int *orderp)
 {
-	if (!result_holds(result, a) || !result_holds(result, b))
-		return (0);
+	if (a == NULL || b == NULL || orderp == NULL ||
+	    !result_holds(result, a) || !result_holds(result, b))
+		return (-1);
 
-	return (relic_value_order_totally(a, b, result_bytes, result));
+	*orderp = relic_value_order_totally(a, b, result_bytes, result);
+
+	return (0);
 }
 
 void

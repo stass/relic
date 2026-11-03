@@ -154,16 +154,18 @@ static void	 put_view(relic_explain_line_t *line, enum relic_view view);
 static bool	 reads_as_negation(const relic_t *ctx,
 		    const relic_expr_t *left);
 
-void
+int
 relic_explain_set(relic_t *ctx, relic_explain_cb callback, void *callback_ctx)
 {
 	if (relic_enter(ctx, NULL, NULL) != 0)
-		return;
+		return (-1);
 
 	ctx->explain = callback;
 	ctx->explain_ctx = callback_ctx;
 
 	relic_leave(ctx);
+
+	return (0);
 }
 
 bool
