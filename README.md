@@ -7,13 +7,13 @@ application with `librelic`. No program compilation step, no server, and no
 third-party runtime dependencies. Import CSV or TSV, explore interactively,
 and send the answers back into your pipeline.
 
+You can also use the optional [WASM](wasm/README.md) module to run relic directly in the browser.
+
 It's designed to be friendly enough for everyday work and fast enough to be a part of code analysis pipelines or binary analysis frameworks.
 
 The [project website](https://stass.github.io/relic/) includes a quickstart,
 language tutorial, C API overview and a
 [browser playground](https://stass.github.io/relic/playground.html).
-The optional [WebAssembly module](wasm/README.md) embeds the same engine in
-browser and Node.js applications, with typed results and worker cancellation.
 
 * **High performance.** In our
   [benchmark suite](#performance), relic beats leading Datalog engines on
