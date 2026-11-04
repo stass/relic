@@ -63,6 +63,12 @@ error, but undercharges acquisition until then.
 
 ## Benchmarks
 
+**Preserve the editorial README when publishing benchmark reports.**
+[Medium, component: `bench/compare/tools/render-mac-results.py`]
+The report publisher replaces the whole README Performance section with its
+own template, removing the curated table and chart embeds. Give generated
+results a bounded destination that preserves the surrounding prose and charts.
+
 **Refresh published comparisons with consistent output and host coverage.**
 [Medium, component: `bench/compare/`]
 The M3 Max composition check of the accepted changes together uses

@@ -90,6 +90,8 @@ EXTRA_DIST = autogen.sh EXAMPLES.md LICENSE README.md BENCHMARKS.md bench/baseli
 	TODO.md docs specs \
 	bench/datasets.sh bench/run.sh \
 	bench/compare/results.tsv bench/compare/suite-summary.tsv \
+	bench/compare/tools/plot-performance.py \
+	bench/compare/tools/test_plot_performance.py \
 	bench/compare/run.sh bench/compare/sweep.sh bench/compare/timing.awk bench/compare/pairset.c \
 	tests/fixtures/bench \
 	compat/README.md examples/embed.c tests/coverage-report.sh \

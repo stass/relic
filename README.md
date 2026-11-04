@@ -1,23 +1,28 @@
 # relic
 
-relic is a small Datalog engine for C: a library, `librelic`, and a
-command-line tool, `relic`. You state facts and rules, ask queries, and
-relic derives the answers, including recursive ones such as transitive
-dependencies and reachability. It can evaluate on multiple cores, derives
-only what a query can reach, and has no third-party runtime dependencies.
-The tool loads and evaluates programs directly, with no compilation step or
-server, and supports batch queries, an interactive mode and CSV or TSV
-import and export. The library provides the same engine through a C API.
+relic is an ultra-fast embeddable Datalog engine for dependency analysis, graph queries and reasoning over tables. Describe your data as facts and the relationships you want as rules: relic follows dependency chains, computes reachability and derives answers across any number of steps.
 
-Datalog expresses computations as facts and rules. Its recursive rules
-are useful for relationships of arbitrary depth, such as transitive
-dependencies and reachability. relic evaluates those rules and answers
-queries over the resulting relations.
+Run queries directly from your shell or embed the same engine in your C
+application with `librelic`. No program compilation step, no server, and no
+third-party runtime dependencies. Import CSV or TSV, explore interactively,
+and send the answers back into your pipeline.
 
-## Example
+It's designed to be friendly enough for everyday work and fast enough to be a part of code analysis pipelines or binary analysis frameworks.
 
-The following program defines three direct dependencies and derives their
-transitive closure. Save it as `impact.dl`:
+* **High performance.** In our
+  [benchmark suite](#performance), relic beats leading Datalog engines on
+  most workloads, often by a wide margin, including compiled Soufflé.
+* **Query-aware execution.** Query-directed evaluation and indexed joins
+  avoid unnecessary work; recursive evaluation reuses earlier results.
+  Multi-core execution shares large rounds across available processors.
+* **Fits into the tools you use.** A command-line tool for scripts, a REPL for exploration, and a C API for applications. Text, CSV, TSV and JSON output make results easy to consume.
+* **Portable.** C11, BSD 2-Clause licensing, and no required
+  third-party runtime libraries. Optional `libedit` adds REPL line editing.
+
+## Find what a change affects
+
+Which applications depend on a database, even through other services?
+These two rules follow the entire dependency chain. Save this as `impact.dl`:
 
 ```prolog impact.dl
 depends(web, api).
@@ -112,7 +117,7 @@ names.
   The [family tree](EXAMPLES.md#a-family-tree) covers ancestry, cousins,
   negation and descendant counts.
 
-## Features
+## How relic keeps queries fast
 
 * **Recursive evaluation.** Semi-naive evaluation avoids repeating
   work from earlier rounds. Indexed joins and automatic join ordering keep
@@ -122,12 +127,8 @@ names.
   threads; `-j 16` requests sixteen. Large evaluation rounds share their
   work, while small rounds stay on one thread. Answers, their order and
   diagnostics stay the same at every thread count.
-* **Minimal dependencies.** C11, no third-party runtime dependencies, and BSD
-  2-Clause licensing. The only optional dependency is `libedit` for REPL
-  line editing. A release tarball needs a compiler, `make` and a POSIX shell.
-* **Data exchange and diagnostics.** Import CSV or TSV, write answers as
-  text, CSV, TSV or JSON, and export derived relations for another run.
-  `-e` explains the query plan; `-X stats` reports the work the engine does.
+* **Inspect the work.** `-e` explains the query plan; `-X stats` reports
+  the work the engine does, so you can understand how a query is evaluated.
 
 ## Install
 
@@ -251,9 +252,7 @@ RELIC_STRICT_CHECK=yes RELIC_ALLOWED_SKIPS=symbols.sh make distcheck
 
 relic supports macOS, Linux with glibc or musl, FreeBSD, OpenBSD and
 NetBSD. Continuous integration builds and tests a release tarball on Linux
-with glibc and musl and on FreeBSD for every change. macOS is the
-development platform. OpenBSD and NetBSD are built and tested by hand before
-each release.
+with glibc and musl and on FreeBSD for every change.
 
 ## Use from C
 
@@ -361,57 +360,68 @@ builds `embed.c` against the installed library.
 
 ## Performance
 
-On an Apple M3 Max with **16 cores and 128 GiB RAM**, the comparison covers
-**31 workloads at scale 1** and **28 generated workloads at scales 2, 4 and 8**.
-Scale 1 uses ten timed runs; larger scales use three. Answers are checked
-before timing. These observations describe this Mac; small differences can
-overlap timing spread, and not every competitor completes every workload.
+relic records the **lowest median wall time on 26 of 31 workloads with
+16 threads**, and **22 of 31 with one thread**, against completed rival runs.
+At the largest tested scale, it leads on **19 of 28 workloads with 16 threads**.
+The suite compares compiled Soufflé (with and without Magic Sets), Nemo,
+SWI-Prolog, clingo, DuckDB and SQLite.
 
-| Scale | Threads | Repetitions | relic lowest median / comparable workloads | Rival cells without a completed time |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 1 | 10 | 22 / 31 | 14 |
-| 1 | 16 | 10 | 26 / 31 | 4 |
-| 2 | 1 | 3 | 18 / 28 | 13 |
-| 2 | 16 | 3 | 23 / 28 | 2 |
-| 4 | 1 | 3 | 14 / 28 | 24 |
-| 4 | 16 | 3 | 21 / 28 | 5 |
-| 8 | 1 | 3 | 13 / 27 | 56 |
-| 8 | 16 | 3 | 19 / 28 | 11 |
+Selected workloads show recursive queries, points-to analyses and table
+processing. Taller bars mean faster execution, with relic fixed at 1×;
+missing results are labeled rather than plotted as zero.
 
-Selected workloads below show median wall time with explicit units (`us` = microseconds).
-The rival column picks the fastest completed competitor in that scenario.
+![Relative speed on six recursive-query benchmarks, comparing relic with Soufflé Magic, compiled Soufflé, interpreted Soufflé and DuckDB.](docs/images/performance-recursive.svg)
 
-| Workload (scale 1) | relic, 1 thread | Fastest rival, 1 thread | relic, 16 threads | Fastest rival, 16 threads |
-| --- | ---: | --- | ---: | --- |
-| `startup` | **1.38 ms** | Soufflé Magic: 1.53 ms | **1.32 ms** | Soufflé Magic: 2.83 ms |
-| `andersen` | **80.4 ms** | Soufflé compiled: 120 ms | **33 ms** | Soufflé compiled: 61.5 ms |
-| `chain-closure` | **245 ms** | Soufflé compiled: 492 ms | **245 ms** | DuckDB: 690 ms |
-| `chain-left` | 2.43 ms | **Soufflé Magic: 2.38 ms** | **2.51 ms** | Soufflé Magic: 200 ms |
-| `cspa` | **128 ms** | Soufflé compiled: 275 ms | **32.8 ms** | Soufflé compiled: 93.7 ms |
-| `cspa-httpd` | **71.1 s** | Soufflé compiled: 75 s | **11.3 s** | Soufflé compiled: 18.6 s |
-| `cspa-linux` | **19.8 s** | Soufflé compiled: 28.2 s | 6.91 s | **Soufflé compiled: 6.35 s** |
-| `cspa-postgresql` | **70.3 s** | Soufflé compiled: 90.9 s | **12.5 s** | Soufflé compiled: 22.3 s |
-| `files-grouped` | 149 ms | **DuckDB: 67.3 ms** | 94.4 ms | **DuckDB: 52.6 ms** |
-| `graph-left` | **29.7 ms** | Soufflé Magic: 33.8 ms | **31.6 ms** | Soufflé Magic: 42.6 ms |
-| `grid-reach` | 15.7 ms | **Soufflé compiled: 12.9 ms** | **15.7 ms** | Soufflé compiled: 52.1 ms |
-| `tree-sg-all` | **23.6 ms** | Soufflé Magic: 23.7 ms | **13.9 ms** | Soufflé compiled: 29.2 ms |
-| `tree-sg-bound` | 4.22 ms | **Soufflé Magic: 3.36 ms** | **4.54 ms** | Soufflé Magic: 7.46 ms |
+![Relative speed on points-to analyses and table processing, including workloads where Soufflé and DuckDB are faster than relic.](docs/images/performance-analysis.svg)
 
-relic does not lead every test: Magic Sets helps Souffle on bound queries,
-and DuckDB wins some joins and aggregations. In the scale-8 parallel full-tree
-case, relic takes **191 s** versus compiled Souffle's **287 s**, while using
-**109 GiB** versus **42.5 GiB** peak memory. The bounded tree favors Souffle
-Magic: **364 ms** versus relic's **407 ms**. Large-answer comparisons include
-file exports for Souffle/Nemo and discarded stdout for the other engines.
-The benchmark harness uses discarded stdout for every engine; results from
-that output policy belong in a separate cohort.
+Charts are generated from the recorded timings with
+[plot-performance.py](bench/compare/tools/plot-performance.py).
 
-The [full benchmark report](BENCHMARKS.md) contains every workload and scale,
-separate CPU and memory tables, build conditions and diagnosed limits.
-It also describes the retries with raised memory limits and their outcomes.
-[Methodology](specs/design-bench.md) explains measurement and reproduction.
+All 31 workloads below show relic, compiled Soufflé with Magic Sets,
+and standard compiled Soufflé. The fastest rival column names the fastest
+completed rival at this scale and thread count. Speedup compares relic with
+that rival. relic runs Datalog directly, without a program compilation step.
 
-FreeBSD results are excluded from these tables.
+| Workload | relic | Soufflé Magic | Soufflé compiled | Fastest rival | relic speedup |
+| --- | ---: | ---: | ---: | --- | ---: |
+| `chain-left` | **2.51 ms** | 200 ms | 791 ms | Soufflé Magic: 200 ms | 79.7× 🟢 |
+| `grid-reach` | **15.7 ms** | 53.2 ms | 52.1 ms | Soufflé compiled: 52.1 ms | 3.3× 🟢 |
+| `dist-bounded` | **96.5 ms** | 374 ms | 290 ms | Soufflé compiled: 290 ms | 3.0× 🟢 |
+| `cspa` | **32.8 ms** | 21.5 s | 93.7 ms | Soufflé compiled: 93.7 ms | 2.9× 🟢 |
+| `chain-closure` | **245 ms** | 1.01 s | 898 ms | DuckDB: 690 ms | 2.8× 🟢 |
+| `tc-sparse-acyclic` | **13.3 ms** | 36.2 ms | 32.2 ms | Soufflé compiled: 32.2 ms | 2.4× 🟢 |
+| `tc-sparse-cyclic` | **64.3 ms** | 195 ms | 150 ms | Soufflé compiled: 150 ms | 2.3× 🟢 |
+| `sg-acyclic` | **50.7 ms** | 151 ms | 117 ms | Soufflé compiled: 117 ms | 2.3× 🟢 |
+| `tc-acyclic-fb` | **9.41 ms** | 20.5 ms | 137 ms | Soufflé Magic: 20.5 ms | 2.2× 🟢 |
+| `sg-acyclic-bf` | **2.64 ms** | 5.75 ms | 73.2 ms | Soufflé Magic: 5.75 ms | 2.2× 🟢 |
+| `startup` | **1.32 ms** | 2.83 ms | 2.87 ms | Soufflé Magic: 2.83 ms | 2.1× 🟢 |
+| `tree-sg-all` | **13.9 ms** | 30.5 ms | 29.2 ms | Soufflé compiled: 29.2 ms | 2.1× 🟢 |
+| `tc-cyclic-fb` | **10.5 ms** | 21.3 ms | 352 ms | Soufflé Magic: 21.3 ms | 2.0× 🟢 |
+| `andersen` | **33 ms** | timeout | 61.5 ms | Soufflé compiled: 61.5 ms | 1.9× 🟢 |
+| `sg-cyclic` | **151 ms** | 406 ms | 272 ms | Soufflé compiled: 272 ms | 1.8× 🟢 |
+| `cspa-postgresql` | **12.5 s** | timeout | 22.3 s | Soufflé compiled: 22.3 s | 1.8× 🟢 |
+| `tc-nonlinear` | **22.1 ms** | 59.9 ms | 39.2 ms | Soufflé compiled: 39.2 ms | 1.8× 🟢 |
+| `chain-right` | **249 ms** | 989 ms | 773 ms | DuckDB: 427 ms | 1.7× 🟢 |
+| `cspa-httpd` | **11.3 s** | timeout | 18.6 s | Soufflé compiled: 18.6 s | 1.6× 🟢 |
+| `tree-sg-bound` | **4.54 ms** | 7.46 ms | 353 ms | Soufflé Magic: 7.46 ms | 1.6× 🟢 |
+| `degree-count` | **30.9 ms** | 49.9 ms | 50 ms | Soufflé Magic: 49.9 ms | 1.6× 🟢 |
+| `tc-acyclic` | **72.5 ms** | 156 ms | 101 ms | Soufflé compiled: 101 ms | 1.4× 🟢 |
+| `graph-left` | **31.6 ms** | 42.6 ms | 34.4 s | Soufflé Magic: 42.6 ms | 1.3× 🟢 |
+| `graph-reach` | **26.7 ms** | 35 ms | 34.7 ms | Soufflé compiled: 34.7 ms | 1.3× 🟢 |
+| `tasks-ready` | **34.6 ms** | 46.3 ms | 43.4 ms | Soufflé compiled: 43.4 ms | 1.3× 🟢 |
+| `tc-cyclic` | **190 ms** | 366 ms | 205 ms | Soufflé compiled: 205 ms | 1.1× 🟢 |
+| `cspa-linux` | 6.91 s | timeout | 6.35 s | Soufflé compiled: **6.35 s** | 0.9× 🔴 |
+| `tc-acyclic-bf` | 25.4 ms | 22.7 ms | 61.3 ms | Soufflé Magic: **22.7 ms** | 0.9× 🔴 |
+| `facts-join` | 91.2 ms | 124 ms | 126 ms | DuckDB: **72.4 ms** | 0.8× 🔴 |
+| `files-grouped` | 94.4 ms | 338 ms | 254 ms | DuckDB: **52.6 ms** | 0.6× 🔴 |
+| `tc-cyclic-bf` | 255 ms | 121 ms | 124 ms | Soufflé Magic: **121 ms** | 0.5× 🔴 |
+
+These are scale-1 medians with 16 threads on an Apple M3 Max with 128 GiB RAM.
+Times include startup, loading, evaluation and output; compilation is excluded.
+Soufflé and Nemo export files; other engines write to discarded stdout.
+
+See the [full results](BENCHMARKS.md) for all workloads, timing spread and
+memory use, and [methodology](specs/design-bench.md) to reproduce the comparison.
 
 ## Reliability and testing
 
@@ -431,11 +441,7 @@ as successful queries.
 * **Regression and sanitizer suites.** The fuzz corpora are replayed by
   `make check`. Dedicated suites run under address, undefined-behavior,
   thread, memory and leak sanitizers where supported.
-* **Resource limits and file access.** Tuple and evaluation-memory limits stop
-  runaway derivations with diagnostics, and an input limit bounds the size of
-  one program file or one field of an imported table. Programs express
-  computation; the runner chooses which data files they can read and write.
-  The memory limit covers evaluation storage, not total process memory.
+* **Resource limits and file access.** Tuple and evaluation-memory limits stop runaway derivations with diagnostics, and an input limit bounds the size of one program file or one field of an imported table. Programs express computation; the runner chooses which data files they can read and write. The memory limit covers evaluation storage, not total process memory.
 
 The [testing design](specs/design-testing.md) explains the reference
 checks, randomized testing and fuzzing. Run them locally with:

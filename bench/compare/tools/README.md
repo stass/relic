@@ -3,6 +3,30 @@
 For native ports and source builds on FreeBSD, see the
 [FreeBSD build instructions](README-freebsd.md).
 
+## README charts
+
+`plot-performance.py` reads `bench/compare/results.tsv` and writes the two
+SVG charts embedded in the README. It selects twelve scale-1, 16-thread
+workloads covering recursive queries, points-to analysis and table processing,
+including cases where rivals win. Each bar is relic's median wall time divided
+by that engine's median: relic is 1, and higher means faster. Timeouts and
+unavailable results have labels, not zero-valued bars.
+
+Matplotlib is a development dependency for generating these images. On macOS:
+
+```sh
+brew install python-matplotlib
+python3.15 bench/compare/tools/plot-performance.py
+python3.15 -m unittest discover -s bench/compare/tools -p 'test_plot_performance.py'
+```
+
+Use the Python interpreter provided by your Matplotlib installation.
+`--results FILE` selects an input matrix; `--output-dir DIR` selects an output
+directory. The script uses a headless renderer and omits SVG timestamps for
+reproducible output with the same Matplotlib version and fonts.
+
+## Engine builds
+
 The M3 Max comparison uses pinned native executables: Soufflé 2.5,
 clingo 5.8.0, Nemo 0.10.1, SWI-Prolog 9.2.9, DuckDB 1.5.5 and SQLite 3.51.2.
 The benchmark driver uses hyperfine 2.0.0. relic is built with Apple clang,
