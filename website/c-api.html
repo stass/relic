@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C API overview — relic</title>
+<meta name="description" content="Embed librelic in C: contexts, queries, results, diagnostics and ownership.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header>
+<nav aria-label="Main navigation"><a href="index.html">relic</a>
+<a href="quickstart.html">Quickstart</a>
+<a href="tutorial.html">Language tutorial</a>
+<a href="c-api.html" aria-current="page">C API</a>
+<a href="https://github.com/stass/relic">GitHub ↗</a>
+</nav>
+</header>
+<main id="main">
+<p class="eyebrow">librelic</p>
+<h1>The engine, in your process.</h1>
+<p class="lead">Load Datalog rules, supply facts, and consume answers through a
+C11 interface. Include <code>&lt;relic.h&gt;</code> and link against <code>librelic</code>.</p>
+<h2 id="example">A complete program</h2>
+<p>Save this as <code>query.c</code>.
+It prints the symbols reachable from <code>a</code>, one per line.</p>
+<pre><code class="language-c">#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+
+#include &lt;relic.h&gt;
+
+static int
+print_row(void *ctx, const relic_value_t *values, size_t count)
+{
+	if (count &gt; 0 &amp;&amp; values[0].type == RELIC_SYMBOL)
+		puts(relic_string(ctx, values[0].v.id, NULL));
+
+	return (0);
+}
+
+int
+main(void)
+{
+	static char name[] = &quot;query&quot;;
+	relic_query_t *query;
+	relic_t *ctx;
+	int status;
+
+	ctx = relic_create();
+	if (ctx == NULL) {
+		perror(&quot;relic_create&quot;);
+		return (EXIT_FAILURE);
+	}
+	relic_diag_set(ctx, relic_diag_stderr, name);
+
+	query = NULL;
+	status = relic_load_string(ctx, &quot;graph&quot;,
+	    &quot;edge(a, b). edge(b, c).\n&quot;
+	    &quot;path(X, Y) :- edge(X, Y).\n&quot;
+	    &quot;path(X, Z) :- edge(X, Y), path(Y, Z).\n&quot;);
+	if (status == 0)
+		query = relic_query_prepare(ctx, NULL, &quot;path(a, X)?&quot;);
+	if (query == NULL)
+		status = -1;
+	else
+		status = relic_query_run(ctx, query, print_row, ctx);
+
+	relic_query_destroy(query);
+	relic_destroy(ctx);
+
+	if (fflush(stdout) == EOF || ferror(stdout))
+		status = -1;
+
+	return (status == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
+}</code>
+</pre>
+<p>After installing relic and the development tool <code>pkg-config</code>, compile and run:</p>
+<pre><code class="language-sh">cc -o query query.c $(pkg-config --cflags --libs librelic)
+./query</code>
+</pre>
+<p>The answers are <code>b</code> and <code>c</code>. If you installed under
+<code>$HOME/.local</code>, set <code>PKG_CONFIG_PATH</code> to include
+<code>$HOME/.local/lib/pkgconfig</code>. Your platform's dynamic loader must
+also be able to find the installed shared library. Static-only installations
+use <code>pkg-config --static --libs librelic</code>.</p>
+<h2 id="lifecycle">The lifecycle</h2>
+<dl class="api-list">
+<dt><code>relic_create()</code>
+</dt>
+<dd>Creates an independent context.
+<code>relic_create_config()</code> accepts limits and worker settings.</dd>
+<dt><code>relic_load_string()</code>
+</dt>
+<dd>Loads facts and rules from text.
+Use <code>relic_fact_add()</code> for typed facts supplied by C, or
+<code>relic_import_file()</code> for a table.</dd>
+<dt><code>relic_query_prepare()</code>
+</dt>
+<dd>Prepares exactly one query ending
+in <code>?</code>. Queries check and evaluate what they need; you do not have
+to call <code>relic_materialize()</code> first.</dd>
+<dt><code>relic_query_run()</code>
+</dt>
+<dd>Passes each answer row to a callback.
+Return zero to continue or nonzero to stop successfully.</dd>
+<dt><code>relic_query_destroy()</code> / <code>relic_destroy()</code>
+</dt>
+<dd>Release the query and context. Both accept <code>NULL</code>.</dd>
+</dl>
+<h2 id="ownership">Rows and ownership</h2>
+<p>A row has one column for each named query variable in first-occurrence order.
+Values passed to the row callback are borrowed for that call. Symbol and string
+bytes read with <code>relic_string()</code> are borrowed too; copy the bytes
+if you retain a row.</p>
+<p>Use <code>relic_query_collect()</code> for an owned result. Iterate with
+<code>relic_result_rows()</code> and <code>relic_result_row()</code>; read its
+symbols and strings with <code>relic_result_string()</code>. A collected result
+owns its data and can outlive the context. Release it with
+<code>relic_result_destroy()</code>. Result identifiers belong to that result
+and cannot be passed back to the context.</p>
+<h2 id="failures">Errors and limits</h2>
+<p>Check return values: operations returning <code>int</code> use zero for
+success and −1 for failure; constructors return <code>NULL</code> on failure.
+Install <code>relic_diag_stderr</code> for escaped terminal diagnostics, or
+provide a diagnostic callback. Without one, the library writes nothing.</p>
+<p>After a failed call, <code>relic_error()</code> supplies human-readable text
+and <code>relic_error_class()</code> supplies a machine-readable category.
+A successful call does not clear an earlier error. Context creation failures
+set <code>errno</code> instead.</p>
+<p>Configure <code>max_tuples</code>, <code>max_memory</code> and
+<code>max_input</code> when handling untrusted workloads. Zero selects the
+default, unbounded value for these limits. The memory limit accounts for
+engine storage; it is not a cap on total process memory or peak allocation.
+<code>relic_interrupt()</code> requests cancellation of evaluation.</p>
+<h2 id="callbacks">Callbacks and threads</h2>
+<p>Use a context from one calling thread at a time. Separate contexts are
+independent. Internal evaluation workers do not make the public context safe
+for concurrent calls. The documented exception is <code>relic_interrupt()</code>
+with a build that supports C11 atomics.</p>
+<p>During callbacks, restrict calls on the active context to the read operations
+and interrupt operation permitted by the reference. Mutating or destroying that
+context is refused. Callbacks must return normally.</p>
+<h2 id="reference">Reference and further examples</h2>
+<p><code>man 3 relic</code> documents the full API. Browse the
+<a href="https://github.com/stass/relic/blob/master/include/relic.h">public header</a>,
+<a href="https://github.com/stass/relic/blob/master/man/relic.3">library manual source</a>, or
+<a href="https://github.com/stass/relic/blob/master/examples/embed.c">embedding example</a>
+for typed facts, configuration and collected results.</p>
+</main>
+<footer><span>relic · Datalog for the shell and C</span><a href="https://github.com/stass/relic/blob/master/LICENSE">BSD 2-Clause</a>
+<a href="https://github.com/stass/relic/issues">Report an issue</a>
+</footer>
+</body>
+</html>

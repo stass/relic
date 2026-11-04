@@ -87,7 +87,7 @@ pkgconfig_DATA = librelic.pc
 # specs/ and docs/ are named whole, as tests/lang is, so that a new design
 # document cannot be left out of the tarball.
 EXTRA_DIST = autogen.sh EXAMPLES.md LICENSE README.md BENCHMARKS.md bench/baseline.txt \
-	TODO.md docs specs \
+	TODO.md docs specs website tests/check-website.py \
 	bench/datasets.sh bench/run.sh \
 	bench/compare/results.tsv bench/compare/suite-summary.tsv \
 	bench/compare/tools/plot-performance.py \

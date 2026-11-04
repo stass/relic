@@ -88,6 +88,9 @@ runtime use from proposals and related work.
 
 **Interfaces**
 
+* [Project website](design-website.md) -- public guides, static pages and
+  GitHub Pages deployment.
+
 * [Library interface](design-api.md) -- `<relic.h>`: contexts, ownership,
   callbacks, error classes, diagnostics and versioning.
 * [Command line](design-cli.md) -- the tool's phases, output formats, exit

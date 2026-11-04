@@ -60,6 +60,8 @@ jobs:
         run: make -j"$(nproc)"
       - name: Test
         run: make -j"$(nproc)" check || { cat test-suite.log; exit 1; }
+      - name: Check website examples
+        run: python3 tests/check-website.py --relic ./relic
 
   sanitizers:
     name: linux clang asan+ubsan

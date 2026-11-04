@@ -12,6 +12,9 @@ specifies it.
 Related: [specs index](README.md), [language](language.md),
 [code style](style.md), relic(1), relic(3).
 
+The [project website](design-website.md) introduces the language and its
+command-line and C interfaces through static pages hosted on GitHub Pages.
+
 ## Summary
 
 relic is meant to occupy the space between tiny educational interpreters

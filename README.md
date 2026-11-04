@@ -9,6 +9,9 @@ and send the answers back into your pipeline.
 
 It's designed to be friendly enough for everyday work and fast enough to be a part of code analysis pipelines or binary analysis frameworks.
 
+The [project website](https://stass.github.io/relic/) includes a quickstart,
+language tutorial and C API overview.
+
 * **High performance.** In our
   [benchmark suite](#performance), relic beats leading Datalog engines on
   most workloads, often by a wide margin, including compiled Soufflé.

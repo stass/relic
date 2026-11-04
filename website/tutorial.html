@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Language tutorial — relic</title>
+<meta name="description" content="Learn Datalog through runnable examples of facts, rules, joins, recursion, negation and aggregation.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header>
+<nav aria-label="Main navigation"><a href="index.html">relic</a>
+<a href="quickstart.html">Quickstart</a>
+<a href="tutorial.html" aria-current="page">Language tutorial</a>
+<a href="c-api.html">C API</a>
+<a href="https://github.com/stass/relic">GitHub ↗</a>
+</nav>
+</header>
+<main id="main">
+<p class="eyebrow">The language</p>
+<h1>Facts. Rules. Questions.</h1>
+<p class="lead">Datalog describes relationships and what follows from them.
+You write the logic; relic works out the evaluation order.</p>
+<p>Each example below is a complete program. Save one as <code>example.dl</code>
+and run <code>relic -s example.dl</code>.</p>
+<nav class="contents" aria-label="On this page"><a href="#facts">Facts</a>
+<a href="#joins">Joins</a>
+<a href="#recursion">Recursion</a>
+<a href="#negation">Negation</a>
+<a href="#values">Values</a>
+<a href="#aggregates">Aggregates</a>
+</nav>
+<h2 id="facts">1. State facts and ask questions</h2>
+<p>A fact ends in a period. Lowercase names are symbols; uppercase names are
+variables. A predicate is identified by its name and number of arguments.</p>
+<pre><code class="language-datalog" data-answer="web
+worker
+">depends(web, api).
+depends(api, database).
+depends(worker, api).
+
+depends(App, api)?</code>
+</pre>
+<p>The answer is <code>web</code> and <code>worker</code>. A query returns the
+named variables in order of first occurrence. Use <code>_</code> for a value you
+do not need; each <code>_</code> is independent. <code>depends(web, _)?</code>
+is a yes-or-no question with no output columns.</p>
+<h2 id="joins">2. Join relations with rules</h2>
+<p><code>:-</code> reads “if”, and commas mean “and”. Repeating a variable
+joins matching values. A head is derived whenever its body holds.</p>
+<pre><code class="language-datalog" data-answer="web
+worker
+">depends(web, api).
+depends(api, database).
+depends(worker, api).
+
+two_steps(App, Target) :-
+    depends(App, Middle), depends(Middle, Target).
+
+two_steps(App, database)?</code>
+</pre>
+<p>Several rules with the same head contribute to the same relation. Relations
+are sets: stating or deriving the same fact twice adds no duplicate.</p>
+<h2 id="recursion">3. Follow an arbitrary number of steps</h2>
+<p>A base rule includes direct dependencies. A recursive rule extends an
+existing chain by one edge. Evaluation stops when no new facts can be derived.</p>
+<pre><code class="language-datalog" data-answer="api
+web
+worker
+">depends(web, api).
+depends(api, database).
+depends(worker, api).
+
+affected(App, Changed) :- depends(App, Changed).
+affected(App, Changed) :-
+    depends(App, Middle), affected(Middle, Changed).
+
+affected(App, database)?</code>
+</pre>
+<p>Cycles do not keep this program running forever: there are only finitely
+many pairs of these symbols. Recursion that generates new integers can still
+grow without bound; use limits for workloads you do not control, for example
+<code>-l tuples=100000 -l memory=67108864</code>. The memory limit bounds
+accounted engine storage, not total process memory.</p>
+<h2 id="negation">4. Ask what is absent</h2>
+<p><code>not</code> tests for absence. First establish the possible values with
+a positive relation; then exclude the values you do not want.</p>
+<pre><code class="language-datalog" data-answer="database
+">depends(web, api).
+depends(api, database).
+depends(worker, api).
+
+service(S) :- depends(S, _).
+service(S) :- depends(_, S).
+leaf(S) :- service(S), not depends(S, _).
+
+leaf(S)?</code>
+</pre>
+<p><code>database</code> has no outgoing dependency. A variable in a negated
+literal must already be bound by the rule's positive facts or assignments.
+Negation is stratified: a relation cannot depend on itself through negation.
+relic rejects such a program.</p>
+<h2 id="values">5. Compute with values</h2>
+<p>Values are symbols, double-quoted byte strings, or signed 64-bit integers.
+The symbol <code>api</code> and the string <code>"api"</code> are different values.
+Arithmetic belongs in body comparisons; <code>=</code> can bind a computed value.</p>
+<pre><code class="language-datalog" data-answer="api 12288
+">size(api, 12).
+size(web, 7).
+
+larger(Service, Bytes) :- size(Service, N), Bytes = N * 1024,
+    Bytes &gt; 10000.
+
+larger(Service, Bytes)?</code>
+</pre>
+<p>Operators include <code>+</code>, <code>-</code>, <code>*</code>, <code>/</code>
+and <code>mod</code>. Overflow and division by zero fail evaluation.
+String functions include <code>length</code>, <code>cat</code>,
+<code>substr</code>, <code>index</code>, <code>match</code> and <code>str</code>.</p>
+<h2 id="aggregates">6. Count a group</h2>
+<p>An aggregate folds the distinct rows inside its braces. A variable shared
+with the outer rule selects the group; bind it both outside and inside the braces.</p>
+<pre><code class="language-datalog" data-answer="api 1
+database 0
+web 1
+worker 1
+">depends(web, api).
+depends(api, database).
+depends(worker, api).
+
+service(S) :- depends(S, _).
+service(S) :- depends(_, S).
+dependency_count(S, N) :- service(S),
+    N = count { depends(S, Target) }.
+
+dependency_count(S, N)?</code>
+</pre>
+<p>The result includes <code>database 0</code>: an empty group has a count of
+zero. <code>sum(Value)</code>, <code>min(Value)</code> and <code>max(Value)</code>
+select the value to fold. Aggregates read complete relations and cannot recurse
+through themselves.</p>
+<p>Keep the variables you want to count: <code>count { depends(S, _) }</code>
+counts distinct rows with no local columns, so it returns at most one.
+Using <code>Target</code> preserves each different dependency.</p>
+<h2 id="reference">The full language</h2>
+<p>See the <a href="https://github.com/stass/relic/blob/master/specs/language.md">language reference</a>
+for safety, ordering, string functions, aggregate semantics and limits. The
+<a href="https://github.com/stass/relic/blob/master/EXAMPLES.md">example collection</a> works through larger programs.</p>
+</main>
+<footer><span>relic · Datalog for the shell and C</span><a href="https://github.com/stass/relic/blob/master/LICENSE">BSD 2-Clause</a>
+<a href="https://github.com/stass/relic/issues">Report an issue</a>
+</footer>
+</body>
+</html>

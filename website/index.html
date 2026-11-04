@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>relic — Datalog for the shell and C</title>
+<meta name="description" content="A small, fast Datalog engine for dependency analysis, graph queries and reasoning over tables.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header>
+<nav aria-label="Main navigation"><a href="index.html" aria-current="page">relic</a>
+<a href="quickstart.html">Quickstart</a>
+<a href="tutorial.html">Language tutorial</a>
+<a href="c-api.html">C API</a>
+<a href="https://github.com/stass/relic">GitHub ↗</a>
+</nav>
+</header>
+<main id="main">
+<p class="eyebrow">C11 / BSD 2-Clause / No required runtime dependencies</p>
+<h1>Follow the relationships.<br>Find the answers.</h1>
+<p class="lead">relic is a small, fast Datalog engine for the shell and C.
+Describe facts and rules. Ask questions that follow dependencies, traverse
+graphs, and reason over tables.</p>
+<p class="intro-links"><a href="quickstart.html">Get started →</a> <a href="tutorial.html">Learn the language →</a>
+</p>
+<section aria-labelledby="example">
+<div class="section-label">A small program</div>
+<h2 id="example">What depends on the database?</h2>
+<p>Two rules follow the whole dependency chain, however many steps it takes.</p>
+<pre><code class="language-datalog" data-answer="api
+web
+worker
+">depends(web, api).
+depends(api, database).
+depends(worker, api).
+
+affected(App, Changed) :- depends(App, Changed).
+affected(App, Changed) :-
+    depends(App, Middle), affected(Middle, Changed).
+
+affected(App, database)?</code>
+</pre>
+<pre><code class="language-sh">$ relic -s impact.dl
+api
+web
+worker</code>
+</pre>
+<p><code>:-</code> means “if”. Uppercase names are variables. A query ends in
+<code>?</code>. These rules also handle cycles.</p>
+</section>
+<div class="features">
+<section>
+<h2>At home in a pipeline</h2>
+<p>Import CSV or TSV. Print text, CSV, TSV
+or JSON. Run a file, ask a query from the command line, or explore in the REPL.</p>
+</section>
+<section>
+<h2>The same engine in C</h2>
+<p>Load rules, add facts, and stream or collect
+answers through <code>librelic</code>. No server or language runtime to bring along.</p>
+</section>
+<section>
+<h2>Built for recursive questions</h2>
+<p>Indexed joins, semi-naive evaluation
+and query-directed planning keep work focused. Large evaluation rounds can use multiple cores.</p>
+</section>
+</div>
+<section>
+<h2>A few places to begin</h2>
+<dl class="reading">
+<dt><a href="quickstart.html">Quickstart</a>
+</dt>
+<dd>Build relic and run your first query.</dd>
+<dt><a href="tutorial.html">Language tutorial</a>
+</dt>
+<dd>Facts, joins, recursion, negation and aggregates.</dd>
+<dt><a href="c-api.html">C API overview</a>
+</dt>
+<dd>Embed the engine with explicit ownership and error handling.</dd>
+<dt><a href="https://github.com/stass/relic/blob/master/EXAMPLES.md">More examples</a>
+</dt>
+<dd>Dependency planning, family trees, graph queries and table processing.</dd>
+</dl>
+</section>
+</main>
+<footer><span>relic · Datalog for the shell and C</span><a href="https://github.com/stass/relic/blob/master/LICENSE">BSD 2-Clause</a>
+<a href="https://github.com/stass/relic/issues">Report an issue</a>
+</footer>
+</body>
+</html>

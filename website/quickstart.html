@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quickstart — relic</title>
+<meta name="description" content="Build relic, run a recursive query, and bring CSV or TSV data into a shell pipeline.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header>
+<nav aria-label="Main navigation"><a href="index.html">relic</a>
+<a href="quickstart.html" aria-current="page">Quickstart</a>
+<a href="tutorial.html">Language tutorial</a>
+<a href="c-api.html">C API</a>
+<a href="https://github.com/stass/relic">GitHub ↗</a>
+</nav>
+</header>
+<main id="main">
+<p class="eyebrow">Start here</p>
+<h1>From source to answers.</h1>
+<p class="lead">Build the tool, save a short program, and ask your first recursive question.</p>
+<h2 id="install">1. Build and install</h2>
+<p>A release tarball needs a C11 compiler, <code>make</code> and a POSIX shell.
+Download and unpack a source tarball from <a href="https://github.com/stass/relic/releases">GitHub Releases</a>, then run these commands inside it.
+This installs under your home directory without root access.</p>
+<pre><code class="language-sh">./configure --prefix=&quot;$HOME/.local&quot;
+make
+make check
+make install
+export PATH=&quot;$HOME/.local/bin:$PATH&quot;</code>
+</pre>
+<details>
+<summary>Building from a Git checkout</summary>
+<p>Install Git, autoconf 2.69+, automake 1.13+ and libtool 2.4.2+ first.
+These extra build tools are needed only for the checkout.</p>
+<pre><code class="language-sh">git clone https://github.com/stass/relic.git
+cd relic
+./autogen.sh
+./configure --prefix=&quot;$HOME/.local&quot;
+make
+make check
+make install
+export PATH=&quot;$HOME/.local/bin:$PATH&quot;</code>
+</pre>
+</details>
+<p>The only optional library is <code>libedit</code>, for REPL line editing.
+Use <code>--with-libedit=no</code> to build without it.</p>
+<h2 id="program">2. Save a program</h2>
+<p>Save the following as <code>impact.dl</code>.
+Facts describe direct dependencies; rules derive indirect ones.</p>
+<pre><code class="language-datalog" data-answer="api
+web
+worker
+">depends(web, api).
+depends(api, database).
+depends(worker, api).
+
+affected(App, Changed) :- depends(App, Changed).
+affected(App, Changed) :-
+    depends(App, Middle), affected(Middle, Changed).
+
+affected(App, database)?</code>
+</pre>
+<h2 id="query">3. Run it</h2>
+<pre><code class="language-sh">$ relic -s impact.dl
+api
+web
+worker</code>
+</pre>
+<p><code>-s</code> sorts the output. The query prints one column for each named variable.
+Use <code>-q</code> to ask a different question instead of the queries in the file:</p>
+<pre><code class="language-sh">$ relic -s -q &#x27;affected(App, api)?&#x27; impact.dl
+web
+worker</code>
+</pre>
+<p>For interactive exploration, run <code>relic -i impact.dl</code> and enter
+queries such as <code>affected(web, What)?</code>. Leave with Ctrl-D.</p>
+<h2 id="tables">4. Read a table</h2>
+<p>Create <code>edge.tsv</code> with two tab-separated columns:</p>
+<pre><code class="language-text">a	b
+b	c</code>
+</pre>
+<p>Save these rules as <code>reach.dl</code>:</p>
+<pre><code class="language-datalog">path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+path(a, X)?</code>
+</pre>
+<p><code>-T</code> sets column types; <code>-I</code> imports the table.
+The filename supplies the predicate name and the format.</p>
+<pre><code class="language-sh">$ relic -s -T edge:symbol,symbol -I edge.tsv reach.dl
+b
+c</code>
+</pre>
+<p>Use <code>-F csv</code>, <code>-F tsv</code> or <code>-F json</code> for
+machine-readable answers. <code>-o answers.tsv</code> writes query output to a file;
+<code>-O path.tsv</code> exports the whole <code>path</code> relation.</p>
+<h2 id="next">Keep going</h2>
+<p>Continue with the <a href="tutorial.html">language tutorial</a>,
+read the <a href="c-api.html">C API overview</a>, or run <code>man 1 relic</code>
+for the command-line reference.</p>
+</main>
+<footer><span>relic · Datalog for the shell and C</span><a href="https://github.com/stass/relic/blob/master/LICENSE">BSD 2-Clause</a>
+<a href="https://github.com/stass/relic/issues">Report an issue</a>
+</footer>
+</body>
+</html>
