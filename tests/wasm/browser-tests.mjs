@@ -132,7 +132,7 @@ try {
 	await client.call("Page.navigate", { url: origin + "/website/playground.html" });
 	await wait_until(() => client.evaluate("document.getElementById('run')?.disabled === false"), "playground startup");
 	const layout = () => client.evaluate(`(() => {
-		const editor = document.getElementById('program').getBoundingClientRect();
+		const editor = document.querySelector('.playground-editor').getBoundingClientRect();
 		const output = document.querySelector('.playground-output').getBoundingClientRect();
 		const row = document.querySelector('.playground-output-row').getBoundingClientRect();
 		const run = document.getElementById('run').getBoundingClientRect();
@@ -158,6 +158,22 @@ try {
 	assert(desktop.output.height < desktop.editor.height, "output window is compact");
 	assert(desktop.fits, "desktop content fits viewport");
 	assert.equal(await client.evaluate("document.getElementById('result-placeholder').hidden"), false);
+	await client.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+	await client.call("Emulation.setEmulatedMedia", {
+		features: [{ name: "forced-colors", value: "active" }]
+	});
+	const focus = await client.evaluate(`(() => {
+		const program = document.getElementById('program');
+		program.focus();
+		const style = getComputedStyle(program);
+		return { outline: style.outlineStyle, width: style.outlineWidth,
+			focused: program.matches(':focus'), visible: program.matches(':focus-visible') };
+	})()`);
+	assert(focus.outline !== "none" && parseFloat(focus.width) >= 2,
+	    "keyboard focus remains visible in forced-colors mode: " + JSON.stringify(focus));
+	await client.call("Emulation.setEmulatedMedia", { features: [] });
+	await client.evaluate("document.getElementById('program').blur()");
+	await client.call("Emulation.setFocusEmulationEnabled", { enabled: false });
 	await client.call("Emulation.setDeviceMetricsOverride", {
 		width: 390, height: 844, deviceScaleFactor: 1, mobile: false
 	});

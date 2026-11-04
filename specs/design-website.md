@@ -2,7 +2,7 @@
 
 The public website introduces relic and teaches its command-line, C and
 browser interfaces. GitHub Pages serves the contents of `website/` at
-`https://stass.github.io/relic/`. Hand-written HTML pages share one stylesheet:
+`https://stass.github.io/relic/`. Hand-written HTML pages share a base stylesheet:
 the landing page, quickstart, language tutorial, C API overview and playground.
 Relative links work both under the project path and in a local preview.
 
@@ -45,6 +45,10 @@ A compact output panel follows the editor directly, before explanatory text,
 with Run and Stop beside it on the right. The panel shows its empty, running
 or failed state and scrolls long answers within the panel, keeping the results
 close to the code.
+The playground has its own stylesheet for the workspace frame, dark editor
+and light output console. It uses system fonts and a plain textarea; visible
+labels and focus indicators accompany the compact controls.
+Workspace panels and controls have square corners, matching the guides.
 The renderer prints integers in exact decimal, symbols as identifiers and byte
 strings with relic-compatible escaping, including NUL and non-UTF-8 bytes.
 It does not substitute lossy string decoding for the library's typed values.

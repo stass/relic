@@ -1,7 +1,8 @@
 # Website maintenance
 
-The public site consists of five HTML files, `assets/style.css` and the
-playground's JavaScript modules. Edit these sources directly. The repository's manual pages and language
+The public site consists of five HTML files, the shared `assets/style.css`,
+and the playground's stylesheet and JavaScript modules. Edit these sources
+directly. The repository's manual pages and language
 specification define the contracts explained by the site.
 
 Build the optional Wasm assets, then preview from the repository root:
