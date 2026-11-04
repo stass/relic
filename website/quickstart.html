@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Quickstart — relic</title>
-<meta name="description" content="Build relic, run a recursive query, and bring CSV or TSV data into a shell pipeline.">
+<meta name="description" content="Install relic with Homebrew or from source, run a query, and import table data.">
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
@@ -18,10 +18,17 @@
 </nav>
 </header>
 <main id="main">
-<p class="eyebrow">Start here</p>
-<h1>From source to answers.</h1>
-<p class="lead">Build the tool, save a short program, and ask your first recursive question.</p>
-<h2 id="install">1. Build and install</h2>
+<h1>Quickstart</h1>
+<p class="lead">Install relic, run a Datalog program, and import a table.</p>
+<h2 id="install">1. Install relic</h2>
+<h3>Homebrew</h3>
+<p>With <a href="https://brew.sh/">Homebrew</a> installed, use the
+<a href="https://github.com/stass/homebrew-tap/blob/master/Formula/relic.rb">relic formula</a>:</p>
+<pre><code class="language-sh">brew install stass/tap/relic</code>
+</pre>
+<p>This installs the <code>relic</code> command, <code>librelic</code>, the
+<code>relic.h</code> header and manual pages.</p>
+<h3>Build from source</h3>
 <p>A release tarball needs a C11 compiler, <code>make</code> and a POSIX shell.
 Download and unpack a source tarball from <a href="https://github.com/stass/relic/releases">GitHub Releases</a>, then run these commands inside it.
 This installs under your home directory without root access.</p>
@@ -96,7 +103,7 @@ c</code>
 <p>Use <code>-F csv</code>, <code>-F tsv</code> or <code>-F json</code> for
 machine-readable answers. <code>-o answers.tsv</code> writes query output to a file;
 <code>-O path.tsv</code> exports the whole <code>path</code> relation.</p>
-<h2 id="next">Keep going</h2>
+<h2 id="next">Further documentation</h2>
 <p>Continue with the <a href="tutorial.html">language tutorial</a>,
 read the <a href="c-api.html">C API overview</a>, or run <code>man 1 relic</code>
 for the command-line reference.</p>

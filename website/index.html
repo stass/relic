@@ -19,16 +19,22 @@
 </header>
 <main id="main">
 <p class="eyebrow">C11 / BSD 2-Clause / No required runtime dependencies</p>
-<h1>Follow the relationships.<br>Find the answers.</h1>
+<h1>relic</h1>
 <p class="lead">relic is a small, fast Datalog engine for the shell and C.
-Describe facts and rules. Ask questions that follow dependencies, traverse
-graphs, and reason over tables.</p>
-<p class="intro-links"><a href="quickstart.html">Get started →</a> <a href="tutorial.html">Learn the language →</a>
+It supports dependency analysis, graph queries and reasoning over tables.</p>
+<p class="intro-links"><a href="quickstart.html">Quickstart</a> <a href="tutorial.html">Language tutorial</a>
 </p>
+<section aria-labelledby="install">
+<h2 id="install">Installation</h2>
+<p>With <a href="https://brew.sh/">Homebrew</a> installed:</p>
+<pre><code class="language-sh">brew install stass/tap/relic</code>
+</pre>
+<p>The <a href="quickstart.html#install">quickstart</a> also covers building from source.</p>
+</section>
 <section aria-labelledby="example">
 <div class="section-label">A small program</div>
 <h2 id="example">What depends on the database?</h2>
-<p>Two rules follow the whole dependency chain, however many steps it takes.</p>
+<p>Save this as <code>impact.dl</code>. The rules derive direct and indirect dependencies.</p>
 <pre><code class="language-datalog" data-answer="api
 web
 worker
@@ -52,27 +58,27 @@ worker</code>
 </section>
 <div class="features">
 <section>
-<h2>At home in a pipeline</h2>
+<h2>Command-line interface</h2>
 <p>Import CSV or TSV. Print text, CSV, TSV
 or JSON. Run a file, ask a query from the command line, or explore in the REPL.</p>
 </section>
 <section>
-<h2>The same engine in C</h2>
+<h2>C library</h2>
 <p>Load rules, add facts, and stream or collect
-answers through <code>librelic</code>. No server or language runtime to bring along.</p>
+answers through <code>librelic</code>.</p>
 </section>
 <section>
-<h2>Built for recursive questions</h2>
+<h2>Evaluation</h2>
 <p>Indexed joins, semi-naive evaluation
 and query-directed planning keep work focused. Large evaluation rounds can use multiple cores.</p>
 </section>
 </div>
 <section>
-<h2>A few places to begin</h2>
+<h2>Documentation</h2>
 <dl class="reading">
 <dt><a href="quickstart.html">Quickstart</a>
 </dt>
-<dd>Build relic and run your first query.</dd>
+<dd>Install relic and run a query.</dd>
 <dt><a href="tutorial.html">Language tutorial</a>
 </dt>
 <dd>Facts, joins, recursion, negation and aggregates.</dd>

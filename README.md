@@ -135,6 +135,15 @@ names.
 
 ## Install
 
+With [Homebrew](https://brew.sh/) installed:
+
+```sh
+brew install stass/tap/relic
+```
+
+The [relic formula](https://github.com/stass/homebrew-tap/blob/master/Formula/relic.rb)
+installs the command-line tool, library, header and manual pages.
+
 From a release tarball, a C11 compiler, `make` and a POSIX shell are enough.
 Installing into `/usr/local` usually needs root; choose another `--prefix` to
 install as yourself:
