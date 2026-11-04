@@ -5,14 +5,14 @@ For an eligible recursive predicate, it replaces the propagation of complete
 answer tuples through recursive calls with propagation of requested states.
 Base rules turn the reached states into answers. The original requested
 binding accompanies every state, so calls from different origins remain
-separate. The output is ordinary compiled rules for the existing analysis,
+separate. The output is ordinary compiled rules for the analysis,
 planner, evaluator and storage engine.
 
 Related: [architecture](architecture.md#magic-sets),
 [Magic Sets](design-magic.md), [planning](design-planning.md),
 [evaluation](design-eval.md#the-semi-naive-fixed-point),
 [storage](design-storage.md), [testing](design-testing.md),
-[validation rules](../docs/todo-performance-measurements.md#review-and-deliver).
+[benchmarking](design-bench.md#measurement-and-reporting).
 
 ## Model
 
@@ -174,8 +174,9 @@ slots. The language's arity and slot limits are not increased.
 ## Generated rules
 
 The caller's ordinary Magic prefix emits `magic$p$alpha(A)` and reads
-`p$alpha` as before. For a factored adornment, the recursive source calls
-are represented by transitions and do not generate more requests for `p`.
+the adorned answer predicate `p$alpha`. For a factored adornment, the
+recursive source calls are represented by transitions and do not generate
+more requests for `p`.
 
 One seed rule starts a walk for every requested origin:
 
@@ -482,10 +483,9 @@ materialized context also uses its established direct query path.
 `-X naive -X no-magic` remains the whole-program semantic reference on
 small inputs. Other strategy flags govern the generated rules normally.
 
-The public flag occupies an available configuration bit and does not add
-a field to `relic_config_t`. CLI help, manuals, flag validation and strategy
-tests describe the same control. The implementation plan tracks those
-changes together with the rewrite.
+The reference control is a configuration flag shared by the CLI and library.
+Flag validation and strategy tests cover its combinations with the other
+rewrite controls.
 
 Explain marks a retained factored adornment as
 `adorn path/2 bf, factored`; the line grammar belongs to
@@ -532,20 +532,17 @@ for constant seeds, multiple seeds and requests discovered during recursion.
 No origin dictionary, surrogate identifiers or per-seed generated program
 is needed.
 
-## Validation and acceptance
+## Validation
 
-Write a failing work-counter regression before implementing the rewrite.
-A chain of `N = 1000` edges with right-recursive `path` and a query from
-its first node gives `N` answers. Require the default query to derive at
-most `8N + 64` tuples, a generous bound for requests, walks, answers and
-query output. The unfactored demanded closure contains `N(N + 1) / 2`
-path tuples, so the existing path fails the bound for the intended reason.
-Also inspect that the final rewrite actually contains a factored adornment.
-After the reference flag exists, require the same answer set under
-`no-factor` while keeping its larger work as a negative control.
+A work-counter regression uses a chain of `N = 1000` edges with
+right-recursive `path` and a query from its first node. It requires `N`
+answers, a factored adornment in the rewrite, and at most `8N + 64`
+derivations for requests, walks, answers and query output. The `no-factor`
+reference must give the same answer set; its `N(N + 1) / 2` demanded path
+tuples provide a negative control for the work bound.
 
-Use the existing graph equivalence and rewrite inspection infrastructure
-in `tests/unit/test_magic.c`, language/explain cases, `tests/perf.sh`, and
+Coverage spans graph equivalence and rewrite inspection in
+`tests/unit/test_magic.c`, language/explain cases, `tests/perf.sh`, and
 the allocation-failure harness in `tests/unit/test_exhaustion.c`.
 
 | Concern | Required evidence |
@@ -564,29 +561,25 @@ the allocation-failure harness in `tests/unit/test_exhaustion.c`.
 | Determinism | Repeated runs, hash seeds and 1, 2, 4 and 16 workers agree on the strategy's plans and unsorted rows; forced serial and deferred execution agree |
 | Performance scope | Chain and bound acyclic/cyclic closure avoid unrequested suffix answers; unsupported and already efficient left-recursive controls remain competitive |
 
-Extend the strategy matrix with `no-factor` so the reference remains
-independently exercised after default explain goldens change. Compare sorted
-sets between strategies and unsorted streams within a strategy. A flag
-combination must not accidentally make both sides use the same rewrite.
-Tests specifically about ordinary SIPS, supplementary cuts or their exact
-work charges select `no-factor`; factoring has its own structural and
-charging tests. Updating default goldens does not replace either check.
+The strategy matrix includes `no-factor` as an independent reference.
+Tests compare sorted sets between strategies and unsorted streams within a
+strategy; flag combinations must not make both sides use the same rewrite.
+Tests of ordinary SIPS, supplementary cuts and their exact work charges
+select `no-factor`. Factoring has separate structural and charging tests.
 
-Run the required code, security and readability review before implementation
-tests, then the full suite and ASan/UBSan for arena ownership, slot masks
-and size arithmetic. Exercise threaded evaluation, and run TSan for any
-changes to shared execution paths. LSan and MSan run where supported.
+Sanitizer checks cover arena ownership, slot masks, size arithmetic and
+shared execution paths under the [testing contract](design-testing.md#sanitizers).
 
 Benchmark `chain-right`, `tc-acyclic-bf` and `tc-cyclic-bf` at scales 1, 2,
 4 and 8 with one and sixteen threads under the
-[measurement rules](../docs/todo-performance-measurements.md).
+[measurement rules](design-bench.md#measurement-and-reporting).
 Record derivations, generated relation sizes, persistent index storage,
 rewrite/planning time, evaluation time, wall time and peak RSS. Include
 different `R` and `B`, multiple origins and ineligible programs as controls.
-The mechanism is accepted when requested-origin work replaces suffix
-closure materialization, exact sets agree, and the counter regression
-passes. A repeatable unexplained regression on the controls blocks default
-enablement; exploratory reachability timings are not a promised speedup.
+The mechanism's work bound requires requested-origin propagation rather
+than suffix closure materialization, with exact answer-set equivalence.
+Controls expose rewrite overhead on ineligible or already efficient programs;
+reachability timings alone do not establish a general speedup.
 
 ## Alternatives not taken
 

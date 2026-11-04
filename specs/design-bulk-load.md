@@ -13,7 +13,7 @@ Related: [architecture](architecture.md#facts), [facts](design-facts.md),
 [storage](design-storage.md), [memory](design-memory.md#the-memory-limit),
 [parallel loading](design-parallel.md#loading-in-parallel),
 [pending values](design-pending-values.md), [testing](design-testing.md),
-[measurement rules](../docs/todo-performance-measurements.md).
+[benchmarking](design-bench.md#measurement-and-reporting).
 
 ## Model
 
@@ -60,7 +60,7 @@ an all-or-nothing transaction for the entire input.
 
 Program text, CSV/TSV imports and `relic_fact_add()` share the private
 builder and final commit. The bounded window pipeline applies to CSV and
-TSV, whose schema is fixed before reading. Program text keeps the existing
+TSV, whose schema is fixed before reading. Program text uses a
 serial parser: it can mix rules, queries and facts, has statement recovery,
 and interns names and constants at its own semantic boundaries. A period
 or newline is not a general program-text partition boundary.
@@ -68,9 +68,8 @@ or newline is not a general program-text partition boundary.
 `RELIC_UNSTABLE_NO_BATCH_IMPORT`, exposed as `-X no-batch-import`, selects the
 scalar field-event importer at every worker count while retaining the same
 builders and commit. This provides an independent reference for decoding,
-interning and refusal order. Existing public function signatures and
-configuration layout remain unchanged; the reference control uses an
-available flag bit.
+interning and refusal order. The reference control is a configuration flag;
+public function signatures and configuration fields are shared by both paths.
 
 Execution policy chooses between the two paths; it adds no parser or
 publication mechanism of its own. A window's analysis costs more than the
@@ -336,14 +335,11 @@ cap a window of records of one byte and a line feed, a million of them,
 would take some 32 MiB of scratch for its 2 MiB of input, none of it in
 the memory account. The cap is the horizon's bytes over eight, 256 Ki
 records for the 2 MiB horizon. A window is cut by it only when its
-records average fewer than eight bytes, which no measured benchmark
-table's do over the whole table (they average nine to twenty-three), and
-a window it cuts takes about the 8 MiB of scratch a window of eight-byte
-records already takes. A lower cap would cut the windows of the measured tables,
-and with them the pieces a window shares among workers; whether that
-would repay is a measurement, not a bound. The tuple words of wider
-records are bounded by the horizon in any case: each column costs at
-least a delimiter byte of input.
+records average fewer than eight bytes. Such a window takes about the
+8 MiB of scratch a window of eight-byte records takes. The cap trades
+bounded per-record scratch against the number of pieces available to
+workers; the byte horizon independently bounds wider tuple storage,
+since each column costs at least a delimiter byte of input.
 
 **The end of input at the horizon.** The bytes before the horizon are
 fed to the reader as the table's last only when the stream has ended
@@ -478,7 +474,7 @@ therefore decide boundaries in exactly one place. TSV escapes and incomplete
 escapes use those same transition rules for the TSV format. Counting quotes
 or searching for newline in an independent splitter is not a parser.
 Both passes have linear byte cost; measuring that repeated state-machine
-work is part of the serial import acceptance test.
+work is part of serial import performance validation.
 
 Each piece begins at a certified record boundary with the corresponding
 source location. Diagnostic locations retain byte-based line and column
@@ -498,7 +494,7 @@ existing longest-field behavior.
 
 ### Read errors and read-ahead
 
-Use the existing `RELIC_IMPORT_READ_CHUNK` transport unit and retain its
+Read-ahead uses the `RELIC_IMPORT_READ_CHUNK` transport unit and its
 read outcomes while bytes are speculative. One input adapter reads the
 stream for both batch and scalar processing: a short read with `ferror()`
 drops the bytes that failed read returned and records the failure, which
@@ -582,9 +578,9 @@ resolved pool identifier; a byte representative shared by symbol and
 string fields does not collapse their domain values. These maps are
 scoped to the window. The value layer remains the authority
 for equality, type-use bits, growth projection, reservation and publication.
-Extend its batch facilities used by `relic_pending_measure()` to cover
-validated symbol values as well as integers and strings; do not create
-another persistent interner in the importer. The
+Its batch facilities, used by `relic_pending_measure()`, handle validated
+symbols, integers and strings. The importer has no separate persistent
+interner. The
 [pending-value compaction](design-pending-values.md) path keeps its ordinary
 integer/string inputs and shares those value-layer rules.
 
@@ -730,7 +726,7 @@ and then fail while growing its type-use record; that pool entry survives
 just as it does in scalar import. A tuple-limit refusal retains the values
 of the refused record but interns no later record.
 
-Previously accepted windows remain staged and their values remain interned.
+Earlier accepted windows remain staged and their values remain interned.
 The replay starts after them, so it cannot renumber or double-apply them,
 and the windows that resume after a replay start after its records, which
 it has staged. If replay fails, the load discards all private rows and
@@ -883,38 +879,31 @@ semantic prefix. Allocator failure schedules need not coincide; they must
 leave consistent contents, live pointers and exact accounting of retained
 capacity. Private workspace and process RSS can differ by execution mode.
 
-Loading still contributes no evaluation derivations, insertions, iterations
-or parallel rounds. The existing base totals and value-use counts describe
-the successful result. Timing and workspace instrumentation for this work
-belongs in tests and benchmark tooling, not new public statistics solely
-to demonstrate that jobs ran.
+Loading contributes no evaluation derivations, insertions, iterations or
+parallel rounds. Base totals and value-use counts describe the successful
+result. Timing and workspace instrumentation belongs in tests and benchmark
+tooling rather than public statistics.
 
 ### Comparing identifier designs
 
 | Choice | Benefit | Cost or constraint |
 | --- | --- | --- |
 | Fixed stripe bits and per-stripe numbering | Independent persistent interning per stripe | Changes identifiers and decoding, partitions the identifier space, and replaces global first appearance with per-stripe order |
-| Private partitioned dictionaries and ordered publication | Preserves identifier encoding, existing lookup tables and all scalar identities | Number assignment and global table publication remain serial and must be measured |
-| Partitioned persistent lookup indexes with global numbering | Allows parallel placement after global IDs are assigned, without stripe bits in those IDs | Changes permanent table layout, growth accounting and every interning path; needs evidence that publication is the remaining bottleneck |
+| Private partitioned dictionaries and ordered publication | Preserves global first-appearance identifiers and scalar identities | Number assignment and global table publication are serial phases |
+| Partitioned persistent lookup indexes with global numbering | Allows parallel placement after global IDs are assigned, without stripe bits in those IDs | Lookup routing and growth accounting must handle stripes on every interning path |
 
-The target uses private dictionaries and ordered publication because
-identifiers are observable and independent work does not require changing
-their encoding. It also partitions the pool's lookup index, the third
-row, by the unkeyed stripe of each byte string's wide hash: sampled at
-eight threads on 52 MB of distinct symbols, placing new entries in the
-pool's single index was a fifth of the calling thread, the largest
-publication step. Striping keeps global first-appearance numbering and
-moves no identifier; it changes the pool's table layout, its growth
-accounting and the hash every pool lookup is given, under the rules the
-other striped tables already follow. The comparison is architectural; throughput is established
-by phase measurements. Parallel import's acceptance records the cost of
-ordered numbering, entry placement and reservation separately from worker
-work on all-distinct as well as repetitive inputs, and a parallel loading
-gain is claimed only where those serial phases do not dominate.
-Changing identifier encoding requires a separate cross-subsystem
-decision, not an implementation shortcut.
-Persistent lookup partitioning can retain global identifiers; it is a
-storage-layout alternative, distinct from partitioning the identifier space.
+Private dictionaries and ordered publication preserve observable identifiers
+while allowing independent decoding and equality checks. The pool's persistent
+lookup index is also partitioned by the unkeyed stripe of each byte string's
+wide hash. After ordered numbering, workers place entries into disjoint
+stripes. Striping follows the routing and growth-accounting rules of the
+other striped tables; it partitions lookup storage, not the identifier space.
+
+Ordered numbering, entry placement and reservation have separate costs.
+Measurements distinguish them from worker analysis on all-distinct and
+repetitive inputs, since serial publication can bound parallel speedup.
+Identifier encoding follows the cross-subsystem
+[value-identity contract](architecture.md#contracts).
 
 ## Internal boundaries
 
@@ -933,22 +922,20 @@ Immutable piece and reservation descriptions make data ownership visible
 at job boundaries. The importer does not duplicate growth formulas or
 directly install pointers into context relations or symbol tables.
 
-## Validation and acceptance
+## Validation
 
-Write the ownership regression before changing staging. Instrument the
-storage allocation/transfer boundary for a large first load and require
-that its destination takes the builder's columns and canonical storage
-without a second full allocation. A test that merely compares answers
-cannot detect the memory duplication. Cover an absent base header and an
+Ownership tests instrument the storage allocation/transfer boundary for a
+large first load. The destination must take the builder's columns and
+canonical storage without a second full allocation. A test that merely
+compares answers cannot detect the memory duplication. Cover an absent base header and an
 existing empty one, and verify that ordinary cleanup leaves the adopted
 storage readable and frees it exactly once at context destruction.
 
-Use the scalar import switch as the reference for batch processing, and
-retain existing fact/import failure tests. The bounded-import tests in
-`tests/unit/test_import.c` already verify that the refused row's values
-are interned and a later row's values are not; extend them across window
-and piece boundaries. Keep value validation and parser unit tests as
-independent checks rather than comparing two uses of the same new helper.
+The scalar import switch is the reference for batch processing. Bounded-import
+tests in `tests/unit/test_import.c` check that the refused row's values are
+interned and a later row's values are not, including refusals across window
+and piece boundaries. Value validation and parser unit tests provide
+independent checks of the shared helpers.
 
 | Concern | Required evidence |
 | --- | --- |
@@ -969,38 +956,28 @@ independent checks rather than comparing two uses of the same new helper.
 | Streaming inputs | A producer that writes one transport chunk holding a malformed record and keeps its pipe open sees the error reported without a window's worth of input or EOF, with the scalar diagnostic order, retained values and no facts added; a FIFO named by path, a stream without a descriptor and forced batching are all read by the scalar consumer; a test build that takes a failing stream for a regular file shows windows staged before the failed read, so the batch path's read errors stay covered |
 | Small-input cost | Tiny, empty, header-only, duplicate-heavy and one-fact inputs avoid unnecessary dispatch and keep their established behavior |
 
-Extend `test_facts`, `test_import`, `test_value`, `test_symbol`, relation
-tests and the allocation-failure suite. Review code, security and readability
-before implementation tests. Run the full suite, ASan and UBSan for payload
-ownership, offsets and capacity arithmetic; run TSan for the new shared
-jobs and barriers. LSan and MSan run where supported. Repeated context use
-and retained pointer validity are required alongside leak checks.
+Coverage spans `test_facts`, `test_import`, `test_value`, `test_symbol`,
+relation tests and the allocation-failure suite. Sanitizer checks cover
+payload ownership, offsets, capacity arithmetic, shared jobs and barriers
+under the [testing contract](design-testing.md#sanitizers). Repeated context
+use and retained pointer validity are required alongside leak checks.
 
-Benchmark serial ownership transfer first, then serial batching, then
-multiple workers. Target `facts-join`, `files-grouped`, `cspa-linux`, grid
-and tree inputs under the
-[measurement rules](../docs/todo-performance-measurements.md).
-Separate input/framing, decoding, dictionary lookup, ordered numbering,
-value reservation/publication, tuple construction and final commit. Record
-wall time, user CPU, peak RSS, live staging and final accounted capacity.
-Use new and populated contexts, repetitive and all-distinct values, and
-vary worker count through 1, 4, 8, 12 and 16 on the M3 and through 1 to
-64 on the p620. The default is judged against the importer before this
-design, and forced batching at each worker count against the scalar
-importer, with serial time, parallel time and peak memory reported
-separately. `RELIC_IMPORT_BATCH_WORKERS` is the least worker count at
-which forced batching beats the scalar importer on most large tables on
-both machines. A table may still lose at that count.
+Benchmarks compare scalar import and forced batching at each worker count
+under the [measurement rules](design-bench.md#measurement-and-reporting).
+Workloads include `facts-join`, `files-grouped`, `cspa-linux`, grid and tree
+inputs, empty and populated contexts, and repetitive and all-distinct values.
+Measurements separate input/framing, decoding, dictionary lookup, ordered
+numbering, value reservation/publication, tuple construction and final commit.
+They report wall time, user CPU, peak RSS, live staging and final accounted
+capacity across scales and worker counts on different hosts.
 
-Acceptance requires lower first-load peak memory and serial load time,
-then a substantial measured parallel gain on large imports without a
-repeatable unexplained small-import regression. Peak instrumentation must
-show one final tuple payload at an empty-store commit. End-to-end
-`facts-join` acceptance also includes indexed-driver work from the ordered
-plan; faster loading alone does not close that workload's query gap.
-Pool-entry packing and other representation changes need their own
-measurements; ownership transfer alone is not a promise that every total
-RSS target is met.
+`RELIC_IMPORT_BATCH_WORKERS` is a measured scheduling threshold: batching
+must repay its preparation on most large tables across the measured hosts.
+It does not guarantee a gain for every table. Small-import controls expose
+unnecessary setup. Peak instrumentation must show one final tuple payload
+at an empty-store commit; process RSS also includes allocator retention and
+other storage. End-to-end `facts-join` measurements include indexed-driver
+query work as well as loading.
 
 ## Alternatives not taken
 
@@ -1023,7 +1000,7 @@ RSS target is met.
 * **Parallel writes into one open-addressed global dictionary.** They need
   synchronization and publication rules beyond assigning deterministic IDs.
   Private reconciliation parallelizes the expensive read/compare work first.
-* **Charge staging beside the derived relations it will replace.** This
+* **Charge staging beside the derived relations awaiting discard.** This
   would refuse loads that fit after discard and silently redefine the
   configured memory limit.
 * **Split source programs by newline or period.** Statements, strings,

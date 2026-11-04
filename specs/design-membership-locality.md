@@ -1,7 +1,7 @@
 # Canonical membership locality
 
 A relation's canonical index maps its complete tuple to an insertion-order
-identifier. Derived relations use the identifier table's existing one-byte
+identifier. Derived relations use the identifier table's one-byte
 hash tags to avoid comparing unrelated tuples along a probe sequence. Base
 stores and query-answer collectors keep compact slots. The choice is made
 when an empty payload is constructed and persists through growth and clear.
@@ -70,11 +70,11 @@ preserving the table's kind for a later refill.
 
 Frozen readers do not overlap placement or growth. During a parallel append,
 one part owns an entire stripe and the pool barrier publishes completed work.
-No per-slot atomic, concurrent insertion protocol or new lifetime is added.
+Slots require no atomics: stripe ownership and the barrier order their writes.
 Pending markers are resolved to final domain IDs before candidate tuples are
 staged and their hashes enter a persistent relation.
 
-Batch lookup retains its existing bounded prefetch hints. A hint saves no
+Batch lookup uses bounded prefetch hints. A hint saves no
 slot or tuple pointer across insertion or growth. The real probe always uses
 the current table and exact comparison. Tags introduce no candidate cache or
 additional relation-sized buffer.
@@ -92,7 +92,7 @@ Canonical sizes, capacity multiplication and growth use the identifier table's
 checked arithmetic. Failed allocation leaves the source searchable; any
 retained reservation capacity stays charged. Refused deferred preparation
 releases its private allocations and uses ordinary serial retry. Publication
-and interrupt boundaries remain those of the existing insertion/append.
+and interrupt boundaries follow the insertion and append contracts.
 
 A fixed memory budget can admit fewer derived tuples than compact slots
 would. Within the selected owner policy, unkeyed stripes and count-based
@@ -115,33 +115,30 @@ binaries contain no reporter. Closure, same-generation, sparse, wide-tuple,
 large-storage and import/startup controls make both the saved work and the
 unconditional storage cost visible.
 
-## Adoption rule
+## Representation tradeoffs
 
-A further representation change must identify material work that the existing
-tags leave, demonstrate its removal, and improve complete commands beyond
-measurement and code-placement uncertainty. Report extra capacity, growth
-peaks, memory-limit admission and ownership complexity together. Preserve
-exact answers and failure behavior; an unexplained reproducible control
-regression blocks adoption. The
-[measurement protocol](../docs/todo-performance-measurements.md) defines the
-comparison; the [performance direction](../docs/todo-benchmark-performance.md)
-sets the boundary for further proposals.
+Tags trade unconditional slot storage for fewer unrelated tuple reads.
+Evaluation of that tradeoff includes construction, growth, memory-limit
+admission and complete-command timings under the
+[measurement rules](design-bench.md#measurement-and-reporting). Comparison
+counts alone do not establish a runtime benefit: cache behavior, tuple width
+and successful-probe frequency also matter. Ownership complexity and exact
+failure behavior are part of the comparison.
 
 ## Alternatives not taken
 
 ### Grouped tags
 
 Grouped control bytes require another probe sequence, group-termination proof
-and layout-specific growth/bounds rules. Existing linear tags supply useful
-filtering without that mechanism. A grouped design needs a demonstrated
-complete-workload benefit beyond the current table before it earns an
-implementation.
+and layout-specific growth/bounds rules. Linear tags filter unrelated
+entries using the same probe sequence as compact tables. This keeps one
+lookup and growth mechanism for both layouts.
 
 ### Cached hashes
 
 A full keyed hash beside every tuple ID doubles the compact slot array and
 can avoid rehashing columns during growth. Growth still scans and places
-entries and initializes replacement storage. The measured closure cost does
-not justify that width when existing tags already remove unrelated equality
-work. High-arity or different growth evidence can reopen the question without
-adding an unused container to the engine.
+entries and initializes replacement storage. One-byte tags filter unrelated
+equality checks at a quarter of the per-slot metadata cost of a full cached
+hash. The design favors that smaller unconditional footprint over avoiding
+column reads during rehashing.

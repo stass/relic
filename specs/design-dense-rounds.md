@@ -19,10 +19,10 @@ This is a property of the output schema, not an allowlist of body operations.
 Body expressions retain ordinary scratch. No candidate value needs interning
 after the round starts.
 
-Assigned heads do not imply expression-free bodies. Preserve the ordinary
-`relic_round_first_call()`, `begin_worker_texts()` and `end_worker_texts()`
-path, including the serial text-capacity projection passed to common memory
-admission. Skipping candidate-buffer reservation does not skip that charge.
+Assigned heads do not imply expression-free bodies. Dense execution uses
+`relic_round_first_call()`, `begin_worker_texts()` and `end_worker_texts()`,
+including the serial text-capacity projection passed to common memory
+admission. The text charge applies even without candidate-buffer reservation.
 
 Let `I` be the frozen integer-table length and `S` the symbol-pool length.
 Map assigned identifiers to three concatenated ranges: integers `[0, I)`,
@@ -184,9 +184,10 @@ violated private invariant abandons the round; it never indexes unchecked
 memory. Test malformed input directly so fallback cannot hide a collector bug.
 
 Allocation, admission, rank-bound, interrupt or executor failure discards the
-rank array, ordering arrays, unfinished append and private counters. Existing
-serial retry reports the actual evaluation outcome. Existing behavior governs
-interrupts during callbacks after publication. No task publishes separately.
+rank array, ordering arrays, unfinished append and private counters. The
+[serial retry](design-parallel.md#failure-paths-and-limits) reports the actual
+evaluation outcome. Interrupts during callbacks after publication follow the
+[delivery contract](design-eval.md#interruption). No task publishes separately.
 
 Charge the rank array before initialization and ordering room before allocation;
 release both at the stated phase boundaries. Replacement tables and array

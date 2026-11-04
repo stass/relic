@@ -11,7 +11,7 @@ Related: [query modes](architecture.md#query-modes),
 [aggregates](design-aggregates.md), [planning](design-planning.md),
 [executor](design-eval.md), [parallel evaluation](design-parallel.md),
 [values](design-values.md#interning-computed-values),
-[performance direction](../docs/todo-benchmark-performance.md).
+[benchmarking](design-bench.md#measurement-and-reporting).
 
 ## Model and boundary
 
@@ -181,8 +181,8 @@ selected through the same destination contract.
 
 Counted construction admits exactly one complete producer round into an
 empty destination. The set screen's rule that drops a tuple already held by
-a target is therefore never used to discard a counted contribution. Support
-for accumulating into an existing destination requires a different contract.
+a target is therefore never used to discard a counted contribution.
+Accumulation into a populated destination is outside this contract.
 
 There are no counted-specific occurrence ranks, sorted partial lists, byte
 allowances or parallel windows. Existing task order determines first key
@@ -273,16 +273,14 @@ materialization or fold-index work as executed when it is skipped. Original
 predicates remain available to later queries, without source substitution or
 a claim that the program's fixed point is current.
 
-## Validation and complexity boundary
+## Validation
 
 The counted destination owns keys and counts; ordinary evaluation owns
-publication and serial/deferred failure handling. Apply the
-[complexity guidance](style.md#architectural-complexity) to that division across
-the system. Reuse must remove the separate typed-key storage, value publication,
-capacity policy and query-replay obligations, not conceal them behind another
-interface. A general source-replacement framework or another expression
-interpreter requires a separate design. Source size is a review signal, not
-an acceptance limit.
+publication and serial/deferred failure handling. This division gives set and
+counted consumers one typed-key representation, value-publication boundary
+and capacity policy. The query selects its strategy before execution and
+needs no replay protocol after publication. These ownership boundaries are
+part of the [complexity contract](style.md#architectural-complexity).
 
 Tests compare complete ordered answers and value IDs with ordinary execution,
 and compare counted counters across worker counts. They exercise duplicate
@@ -301,8 +299,7 @@ and repeated keys spanning several tasks must combine every contribution.
 Performance validation proves that workers retain keys and their distinct
 pending values, not one candidate per P row. It measures long computed keys
 and high-cardinality keys as well as files, with ordinary joins and recursion
-as controls for the common evaluator changes. Comparisons follow the
-[measurement protocol](../docs/todo-performance-measurements.md), with
-declared adoption gates.
-Expression interpretation and input interning remain real costs; this design
-makes no claim that query fusion alone closes the import gap.
+as controls for the shared evaluator paths. Comparisons follow the
+[measurement rules](design-bench.md#measurement-and-reporting).
+Expression interpretation and input interning are measured separately from
+the intermediate storage and fold work avoided by counted execution.

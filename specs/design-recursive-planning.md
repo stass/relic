@@ -11,7 +11,7 @@ Related: [architecture](architecture.md#planning),
 [evaluation](design-eval.md#the-semi-naive-fixed-point),
 [storage](design-storage.md), [parallel evaluation](design-parallel.md),
 [testing](design-testing.md),
-[measurement rules](../docs/todo-performance-measurements.md).
+[benchmarking](design-bench.md#measurement-and-reporting).
 
 ## Model
 
@@ -163,7 +163,7 @@ Estimated costs do not prune candidates. Estimates are approximate, and
 recursive cardinalities change. In particular, an estimate of zero or a
 saturated estimate is not a proof that a plan can be omitted. This keeps
 the retention rule independent of the statistics used for selection and
-removes the threshold and `NEVER` selection states.
+makes every valid candidate available at every round boundary.
 
 ### Reference configurations
 
@@ -175,8 +175,7 @@ existing planner, and the recipes reflect the emitted operations.
 Naive evaluation has no delta variants and uses ordinary plans.
 
 A one-plan family is prepared at component start, bypasses estimation and
-needs no recipe of its own. These are the existing reference modes, not
-additional public configuration flags.
+needs no recipe of its own. Reference modes use the ordinary strategy flags.
 
 ## Statistics at a round boundary
 
@@ -481,9 +480,8 @@ ordinary failure/discard rules, and no answer is delivered.
 
 Retention charges plan metadata; acquisition charges actual index storage
 through the existing storage account. Indexes acquired for alternatives
-can increase later storage and insertion cost, which performance acceptance
-measures. Requirement counts and allocation byte sizes use checked
-arithmetic; numeric cost saturation never substitutes for a storage-size
+can increase later storage and insertion cost; benchmarks measure both.
+Requirement counts and allocation byte sizes use checked arithmetic; numeric cost saturation never substitutes for a storage-size
 check.
 
 Round selection is total and infallible over a valid family and published
@@ -537,35 +535,34 @@ line-buffer contracts.
 
 The independent references are textual-order semi-naive evaluation,
 no-index execution, and naive whole-program evaluation on small inputs.
-The regression suite first exercises the missing-candidate path on the
-unfixed implementation. Validation follows the
-[review and sanitizer gates](../docs/todo-performance-measurements.md#review-and-deliver).
+Candidate-availability tests check retention independently of round-time
+estimation. Sanitizer checks follow the
+[testing contract](design-testing.md#sanitizers).
 
 | Concern | Required evidence |
 | --- | --- |
 | Candidate availability | Guards below, at and above the unknown-cardinality boundary retain a distinct input-first plan when the bound ranks permit it; predicate names and literal permutations do not confer eligibility |
-| Independent reproducer | An explicitly guarded recursive program queried through whole-program evaluation, so bound-query factoring cannot hide a planning regression |
-| Missing-candidate cost | For the guarded scale-4/8 reproducer, scanned-plus-looked-up tuples stay within twice the textual-order control, with identical answers; the counter bound fails on the unfixed planner |
+| Independent planning coverage | An explicitly guarded recursive program queried through whole-program evaluation, so bound-query factoring cannot hide a planning regression |
+| Candidate-selection cost | Guarded recursive closure at scales 4 and 8 scans and looks up no more than twice the tuples of the textual-order control, with identical answers |
 | Both selection directions | The same family chooses delta-first for a small delta and input-first for a large delta; the worked example fixes the exact expected costs |
 | Empty inputs | Work before a late empty relation is counted; a first empty scan costs zero; positive probes and negation have their specified different flow rules |
 | Arithmetic | Zero and maximum counts, exact division, remainders, overflow before a representable quotient, saturated sums, and deterministic saturated ties |
 | Direct statistics | Pure repeated reads leave the store untouched, reflect growth immediately, and use the whole index with each operation's own old/current/delta cardinality; derived and base relations stay distinct |
 | Unused alternatives | Chain distances retains the input-first candidate but never materializes its extra index; stored index masks and charged storage match the delta-first control apart from plan metadata |
 | First acquisition | Missing indexes use provisional counts and include whole-relation build work once per mask; all choices precede builds; the selected plan's result agrees with references |
-| Acquired-index cost | Guarded closure retains its work-counter improvement; skew and brief-use-then-growth controls measure the risk of provisional statistics and future maintenance |
+| Acquired-index cost | Guarded closure satisfies its work-counter bound; skew and brief-use-then-growth controls measure the risk of provisional statistics and future maintenance |
 | Lifetimes | A later index build can relocate its array without invalidating a recipe or prepared plan; a newly built index starts at the member's current delta; discard and query reuse retain no access positions |
 | Semantic coverage | Nonlinear and mutually recursive rules, repeated variables, wildcards, constants, assignments, aggregates and existence checks agree with references |
 | Failure behavior | Planning and first-use index allocation failures publish no partial family or index and expose no unprepared round; memory limits charge both candidates and actual builds; parallel refusal retries the already prepared selected plan |
 | Determinism | Repeated runs, hash seeds and thread counts agree on explain output and unsorted results; thread counts agree on execution counters other than parallel-round count |
-| Complexity | Existing long-body, many-variant and many-round performance tests remain bounded; planning time, selection time and index memory are measured separately |
+| Complexity | Long-body, many-variant and many-round performance tests enforce work bounds; planning time, selection time and index memory are measured separately |
 
-Extend planner/cost unit tests and explain goldens, then the evaluator,
-equivalence and random-program suites. Performance counter bounds belong
-in tests; wall-clock and peak-memory comparisons belong in the benchmark
-artifacts. Profile the targeted M3 rows across scales and thread counts
-and use nonlinear analyses and small workloads as controls. A repeatable
-regression due to estimator overhead, skew or retained-index cost must be
-resolved before enabling this policy by default.
+Coverage spans planner/cost unit tests, explain goldens, evaluator tests,
+equivalence tests and random-program suites. Performance counter bounds
+belong in tests; wall-clock and peak-memory comparisons belong in benchmark
+artifacts. Scale and thread-count sweeps include guarded closure, nonlinear
+analyses and small workloads. Controls measure estimator overhead, skew and
+retained-index cost separately from the join work saved.
 
 ## Alternatives not taken
 

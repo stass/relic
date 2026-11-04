@@ -743,8 +743,9 @@ appends with one writer per canonical stripe, run on the context's
 existing pool when they are large. Source program parsing and individual fact additions retain
 their scalar semantic boundaries and share these builders. Parallel
 import neither changes the domain encoding nor contributes evaluation
-parallel-round counters. Numbering and entry append remain serial phases
-whose measured cost is part of parallel-loading acceptance.
+parallel-round counters. Numbering and entry append are serial phases whose
+cost bounds parallel-loading speedup and is measured separately from worker
+analysis.
 
 ## Components side by side
 

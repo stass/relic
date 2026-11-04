@@ -197,7 +197,7 @@ The data sets of `bench/run.sh`, queried as a user would query them:
 
 The sizes are those at a `BENCH_SCALE` of one, which multiplies every one.
 
-### Set B: workloads others will recognize
+### Set B: established workloads
 
 * The transitive-closure and same-generation programs of OpenRuleBench
   (Liang, Fodor, Wan and Kifer, 2009), with bound and free queries, on
@@ -422,6 +422,17 @@ are published only from a run that meets all of these:
 * the scale sweep, not a single scale;
 * a second machine of a different operating system and processor, to show
   the ranking is not an artifact of one platform.
+
+Mechanism comparisons use independent reference strategies and include
+workloads outside the optimized case. Work counters establish which work is
+avoided; phase timings distinguish that work from parsing, planning and
+publication. Charged capacity, temporary allocation peaks and process RSS are
+reported separately. Ownership transfer is checked at the allocation boundary,
+since equal answers alone cannot establish that a copy is avoided. Scale and
+worker-count sweeps include small inputs, repetitive and all-distinct values,
+and skew where applicable. Timing reports and measurement conditions live
+with benchmark artifacts; subsystem specifications state the mechanism and
+its validation requirements.
 
 ## External data sets
 

@@ -156,8 +156,8 @@ delta variants, existence checks, the Magic rewrite, streaming, sharing a
 round among threads) changes what the planner emits or how a round's
 results are stored, never what the executor means by a plan. Each can be
 switched off to compare against -- through `-X`, or for [shared
-rounds](#parallel-evaluation) with `-j 1` -- which is what lets each optimization arrive without
-rewriting the executor and what lets the differential tests check it.
+rounds](#parallel-evaluation) with `-j 1` -- so differential tests compare
+strategies under one executor contract.
 This is the decision the others rest on.
 
 **No feature without a clear Datalog use.** Do not add a language feature

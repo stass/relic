@@ -99,11 +99,10 @@ rules.dl:4:12: error: a floating-point literal needs a period: 1e5
 
 A float is a `double`, `RELIC_FLOAT` in the public type enumeration, with a
 `real` arm in the value union of `relic_value_t`. It is as distinct from an
-integer as a string is from a symbol. `RELIC_FLOAT` is an added enumerator,
-an interface addition by the versioning rules (see [C library and
-ABI](architecture.md#c-library-and-abi)): a caller that switches on the type
-and does not know it sees a value it did not expect, as with any added
-enumerator.
+integer as a string is from a symbol. The `RELIC_FLOAT` enumerator is an
+interface addition under the [versioning rules](architecture.md#c-library-and-abi).
+As with any enumeration extension, a caller unfamiliar with this type can
+encounter a value outside the types it recognizes.
 
 ### Interning
 

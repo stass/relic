@@ -116,7 +116,12 @@ runtime use from proposals and related work.
 designed, in the present tense. It records no history: no "was", "now", "no
 longer", campaign names or dates. A document changes when the design
 changes, not when code lands, and is never trimmed to match a partial
-implementation, since that would erase the record of intent.
+implementation, since that would erase the record of intent. Mechanisms,
+constraints and alternatives are explained on their own terms, without
+requiring knowledge of an earlier design. Validation sections state lasting
+correctness and performance requirements, not implementation sequences or
+one-time adoption reports. Measurements and implementation status belong
+outside the design.
 
 **What goes elsewhere.** Work not yet done, including any part of a design
 that is not built, belongs in [TODO.md](../TODO.md). What changed in a

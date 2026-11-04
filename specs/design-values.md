@@ -118,9 +118,9 @@ owner chooses once, at creation:
 Derived relations pay one byte per canonical slot because comparison
 filtering improves their repeated evaluation work. Base stores stay compact,
 and adoption drops a builder's staging tags without moving entries. The
-[adoption rule](design-membership-locality.md#adoption-rule) requires further
-metadata or probing changes to earn their cost on complete workloads,
-including construction, growth and memory.
+[representation tradeoffs](design-membership-locality.md#representation-tradeoffs)
+include complete workloads, construction, growth and memory, rather than
+comparison counts alone.
 
 **The probe sequence exists in one place.** Slots are probed linearly from the
 hash's low bits. A probe cursor hands each candidate identifier to the caller,

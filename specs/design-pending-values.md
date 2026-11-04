@@ -11,7 +11,7 @@ Related: [architecture](architecture.md#parallel-evaluation),
 [ordered merge](design-parallel.md#admission-and-the-ordered-merge),
 [memory](design-memory.md#round-scoped-buffers),
 [testing](design-testing.md),
-[measurement rules](../docs/todo-performance-measurements.md).
+[benchmarking](design-bench.md#measurement-and-reporting).
 
 ## Model
 
@@ -390,18 +390,18 @@ descriptors and hashes their referenced payloads, with `R <= U`, rather
 than receiving `P` descriptors. Worker-side expression evaluation and
 local value hashing are separate costs and retain their existing behavior.
 
-For the scale-8 `files-grouped` fixture, 1,799,657 `kind` tuples contain
-roughly 3.6 million pending directory and extension columns. The 206
-distinct string values give at most `16 * 206 = 3296` worker-local
-descriptors at sixteen workers. This is a descriptor bound, not a promise
-of the same factor of end-to-end speedup.
+For example, one million tuples with two pending string columns contain
+two million pending occurrences. If those columns use only 200 distinct
+strings, sixteen workers need at most `16 * 200 = 3200` worker-local
+descriptors. This is a descriptor bound, not a promise of the same factor
+of end-to-end speedup.
 
 When values are all distinct, `R = U = P` and compaction saves no
 descriptors. The additional local maps cost four bytes per local value
 plus alignment/control storage. Releasing the temporary block before the
 later merge allocations limits its overlap, but this does not by itself
-guarantee a lower peak. All-distinct computed values are an acceptance
-control for both memory and runtime.
+guarantee a lower peak. All-distinct computed values are a control for both
+memory and runtime.
 
 ## Failure paths and limits
 
@@ -447,10 +447,10 @@ identifiers cannot vary: the sequence preserves each semantic value's
 first logical occurrence. Tests compare identifiers and persistent state,
 not the scheduling-dependent private descriptor numbers.
 
-The regression is written first and fails on the uncompacted merge. Use
-the existing forced-deferred, one-worker path in `tests/unit/test_round.c`
-to make candidate allocation deterministic. A program emits many distinct
-tuples containing a few computed strings absent from the loaded context.
+A resource regression uses the forced-deferred, one-worker path in
+`tests/unit/test_round.c` to make candidate allocation deterministic. A
+program emits many distinct tuples containing a few computed strings absent
+from the loaded context.
 Choose a documented accounted-memory budget that accommodates candidate
 and ordinary merge storage plus compact value resolution, but cannot
 accommodate occurrence-sized resolution. Require that the computing round
@@ -475,7 +475,7 @@ and charged capacities, not RSS or elapsed time.
 | Reuse | A failed query followed by a successful query on the same context and pool leaves no old maps, reservations, leaked charges or string-use bits |
 | All-distinct control | Actual workspace and phase time include the added local maps and show the tradeoff when no occurrence compacts |
 
-Extend round tests, value tests, the allocation-failure suite in
+Coverage spans round tests, value tests, the allocation-failure suite in
 `tests/unit/test_exhaustion.c`, and string/aggregate equivalence cases.
 Real rounds always reference every worker-local value and let the pool
 assign tasks to workers, so `tests/unit/test_merge.c` builds rounds by hand
@@ -485,20 +485,18 @@ tests do; comparing printed strings alone would miss renumbering. Verify
 that computed fixture values are absent using read-only lookup rather than
 interning the expected result before the test.
 
-Run the required code/security/readability review before implementation
-tests, then the full suite and ASan, UBSan and TSan for the ownership,
-size-arithmetic and shared-worker changes. LSan and MSan run on supported
-Linux configurations. Review every payload `bcopy(src, dst, n)` for its
-source-first argument order.
+Sanitizer checks cover ownership, size arithmetic and shared-worker access
+under the [testing contract](design-testing.md#sanitizers). Payload copies
+use the source-first argument order of `bcopy(src, dst, n)`.
 
 Measure `files-grouped` after loading is isolated, alongside end-to-end
 comparisons, low-cardinality integers and all-distinct computed strings.
 Record descriptor counts, charged peak workspace, collection/measurement/
 rewrite time and process peak RSS separately. Production counters and
-public ABI do not need new fields for test or benchmark instrumentation.
-The optimization meets its mechanism goal when resolution storage and
-measurement follow `U` and `R`, first-occurrence identity is preserved,
-and the targeted merge improves without an unexplained control regression.
+public ABI carry no fields solely for test or benchmark instrumentation.
+Resolution storage and measurement must follow `U` and `R` while preserving
+first-occurrence identity. All-distinct controls measure the maps' overhead
+when compaction saves no descriptors.
 
 ## Alternatives not taken
 
