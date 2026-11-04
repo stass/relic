@@ -37,6 +37,7 @@
 
 # Disposable trees made by the sanitizer and coverage suites.
 /disposable/
+/website/assets/wasm/
 
 # A fuzzing run's working corpus and the inputs it found.
 /fuzz-artifacts/

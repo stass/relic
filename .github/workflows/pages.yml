@@ -5,11 +5,35 @@ on:
     branches: [master]
     paths:
       - 'website/**'
+      - 'wasm/**'
+      - 'lib/**'
+      - 'include/**'
+      - 'compat/**'
+      - 'cmd/**'
+      - 'm4/**'
+      - 'configure.ac'
+      - 'Makefile.am'
+      - 'autogen.sh'
+      - 'LICENSE'
+      - 'tests/unit/**'
+      - 'tests/wasm/**'
       - 'tests/check-website.py'
       - '.github/workflows/pages.yml'
   pull_request:
     paths:
       - 'website/**'
+      - 'wasm/**'
+      - 'lib/**'
+      - 'include/**'
+      - 'compat/**'
+      - 'cmd/**'
+      - 'm4/**'
+      - 'configure.ac'
+      - 'Makefile.am'
+      - 'autogen.sh'
+      - 'LICENSE'
+      - 'tests/unit/**'
+      - 'tests/wasm/**'
       - 'tests/check-website.py'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
@@ -24,13 +48,36 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Check pages and local links
-        run: python3 tests/check-website.py
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: emscripten-core/emsdk
+          ref: 35659964bc2762fffec0d257997fb61475f765b7 # Emscripten 6.0.13
+          path: disposable/emsdk
+          persist-credentials: false
+      - name: Install native build tools and pinned SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends autoconf automake libtool
+          disposable/emsdk/emsdk install 6.0.13
+          disposable/emsdk/emsdk activate 6.0.13
+      - name: Build and check native examples, Wasm API and playground
+        run: |
+          source disposable/emsdk/emsdk_env.sh
+          ./autogen.sh
+          ./configure --with-libedit=no
+          make -j2
+          make wasm-check WASM_OUTPUT="$PWD/website/assets/wasm"
+          npm install --prefix "$RUNNER_TEMP/relic-types" --ignore-scripts --no-audit --no-fund typescript@5.8.3
+          sed 's|"../../wasm/relic.mjs"|"./relic.mjs"|' tests/wasm/types.mts > website/assets/wasm/typecheck.mts
+          "$RUNNER_TEMP/relic-types/node_modules/.bin/tsc" --noEmit --strict --module NodeNext --target ES2022 website/assets/wasm/typecheck.mts
+          rm website/assets/wasm/typecheck.mts
+          python3 tests/check-website.py --relic ./relic
+          node tests/wasm/browser-tests.mjs "$(command -v google-chrome)"
       - name: Upload website only
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4

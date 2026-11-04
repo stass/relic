@@ -67,6 +67,17 @@ footer { display: flex; flex-wrap: wrap; gap: 12px 24px; padding-block: 24px; bo
 footer span { margin-right: auto; }
 .skip { position: absolute; left: 16px; top: -100px; background: var(--paper); padding: 8px 16px; }
 .skip:focus { top: 8px; }
+.muted { color: var(--muted); }
+.playground-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-block: 16px; }
+button, select, textarea { font: inherit; color: var(--ink); border: 1px solid var(--line); border-radius: 3px; }
+button, select { padding: 8px 14px; background: var(--paper); }
+button { cursor: pointer; }
+button[type="submit"] { background: var(--accent); color: white; }
+button:disabled, select:disabled { opacity: .55; cursor: default; }
+button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+textarea { display: block; width: 100%; margin-block: 8px 16px; padding: 18px; background: var(--code); resize: vertical; font-family: ui-monospace, monospace; font-size: .87rem; line-height: 1.65; }
+#status { font-size: .87rem; }
+#example { max-width: 100%; }
 @media (max-width: 640px) {
   header, main, footer { padding-inline: 20px; }
   header nav { gap: 12px 20px; }

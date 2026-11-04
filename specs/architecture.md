@@ -997,8 +997,8 @@ source is committed and the grammar lives where its diagnostics do.
 
 Emscripten is an optional build tool for the WebAssembly interface, whose
 generated JavaScript support and toolchain libc are shipped with its artifact.
-That target requires a browser with WebAssembly, ES modules, workers and
-BigInt, but adds no native dependency. The reusable facade and playground use
+That target requires WebAssembly, ES modules, workers and BigInt, supplied by
+a browser or Node.js, but adds no native dependency. The reusable facade and playground use
 standard browser APIs without a framework, CDN or npm runtime package.
 
 ### C library and ABI

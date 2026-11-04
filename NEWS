@@ -1,5 +1,15 @@
 relic NEWS -- changes a user or an embedder of relic would notice, by release
 
+Unreleased
+
+  * The website includes a browser playground that evaluates programs locally
+    with WebAssembly, examples, diagnostics and cancellable runs.
+  * An optional Emscripten build produces a reusable JavaScript module for
+    browsers and Node.js. Its asynchronous evaluate() interface preserves
+    signed 64-bit integers and arbitrary string bytes, enforces resource
+    limits, and returns owned results. Native builds require no new runtime
+    dependency. Generated artifacts are built during website deployment.
+
 relic 1.0.0 (2026-11-04)
 
   The first release: a Datalog engine for C, as a library, librelic, and a

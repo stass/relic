@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>relic browser tests</title>
+<pre id="output">Running browser tests...</pre>
+<script type="module">
+import * as api from "../../website/assets/wasm/relic.mjs";
+import { run_tests } from "./api-tests.mjs";
+window.test_result = run_tests(api).then(count => {
+    document.getElementById("output").textContent = "PASS: " + count + " browser API scenarios";
+    return { passed: true, count };
+}).catch(error => {
+    document.getElementById("output").textContent = error.stack;
+    return { passed: false, error: error.stack };
+});
+</script>
+</html>

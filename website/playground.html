@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Try relic in your browser</title>
+<meta name="description" content="Edit and run Datalog programs locally in your browser with relic and WebAssembly.">
+<link rel="stylesheet" href="assets/style.css">
+<script type="module" src="assets/playground.mjs"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header>
+<nav aria-label="Main navigation"><a href="index.html">relic</a>
+<a href="quickstart.html">Quickstart</a>
+<a href="tutorial.html">Language tutorial</a>
+<a href="c-api.html">C API</a>
+<a href="playground.html" aria-current="page">Try relic</a>
+<a href="https://github.com/stass/relic">GitHub ↗</a>
+</nav>
+</header>
+<main id="main">
+<p class="eyebrow">Datalog / WebAssembly / Runs on your device</p>
+<h1>Try relic</h1>
+<p class="lead">Edit a program, ask a question, and see what follows.
+Your program and results stay in your browser.</p>
+<p id="availability">This playground requires JavaScript, WebAssembly and workers.
+If it is unavailable, <a href="quickstart.html#install">install relic locally</a>.</p>
+<form id="playground">
+<div class="playground-toolbar">
+<label for="example">Example</label>
+<select id="example" disabled></select>
+</div>
+<label for="program">Program <span class="muted">(queries end in <code>?</code>)</span></label>
+<textarea id="program" rows="15" spellcheck="false" autocapitalize="off" autocomplete="off"
+    aria-describedby="run-limits" required></textarea>
+<div class="playground-toolbar">
+<button id="run" type="submit" disabled>Run</button>
+<button id="stop" type="button" disabled>Stop</button>
+<span id="status" role="status" aria-live="polite">Ready when the runner loads.</span>
+</div>
+</form>
+<p id="run-limits" class="muted">Runs are limited to 5 seconds and 1,000 result rows.
+Stop cancels the run; you can edit and run again.</p>
+<section id="diagnostics-section" aria-labelledby="diagnostics-heading" hidden>
+<h2 id="diagnostics-heading">Diagnostics</h2>
+<ul id="diagnostics"></ul>
+</section>
+<section id="results-section" aria-labelledby="results-heading" hidden>
+<h2 id="results-heading">Results</h2>
+<div id="results"></div>
+</section>
+<details>
+<summary>Embed relic in a JavaScript application</summary>
+<p>The playground uses a reusable module with typed results, exact integers and
+byte strings. Each evaluation runs independently in a worker. See the
+<a href="https://github.com/stass/relic/tree/master/wasm">JavaScript API and build instructions</a>.
+The native command-line tool and C library use the same engine.</p>
+<p>The playground allows 1 MiB of source, 64 MiB of accounted engine storage,
+100,000 tuples and 1 MiB of copied output. The Wasm runtime has a separate
+256 MiB memory ceiling; browser overhead is outside that ceiling.</p>
+</details>
+<p>Learn the syntax in the <a href="tutorial.html">language tutorial</a>,
+or work with files using the <a href="quickstart.html">command-line quickstart</a>.</p>
+</main>
+<footer><span>relic · BSD 2-Clause</span>
+<a href="https://github.com/stass/relic">Source</a>
+<a href="https://github.com/stass/relic/blob/master/man/relic.1">Manual</a>
+</footer>
+</body>
+</html>

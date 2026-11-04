@@ -5,6 +5,9 @@ and returns owned JavaScript values. It is a reusable interface beside the C
 library and command-line tool; the website playground is one consumer. The
 adapter follows the public C API and adds bounded copying, an asynchronous
 operation, and cancellation without changing Datalog evaluation.
+Node.js uses its built-in worker threads to implement the same operation and
+lifetime; the browser path uses standard dedicated workers. Neither needs an
+npm runtime package.
 
 Related: [library interface](design-api.md), [website](design-website.md),
 [memory](design-memory.md), [architecture contracts](architecture.md#contracts).
@@ -34,7 +37,7 @@ The playground permits one active call. This model trades worker startup and
 program reload cost for a single lifetime that also handles cancellation,
 failure and the engine's context-lifetime interned values.
 
-The distributable directory contains `relic.mjs`, `relic.d.ts`,
+The distributable directory contains `relic.mjs`, `relic.d.mts`,
 `relic-worker.mjs`, `relic-engine.mjs`, `relic-engine.wasm`, a README and license
 notices. Relative module URLs locate the companion
 assets, so an embedder serves the directory and imports the public module
@@ -83,6 +86,7 @@ export type ErrorKind = "argument" | "rejected" | "evaluation" | "limit"
     | "memory" | "internal" | "cancelled" | "timeout" | "worker";
 
 export class RelicError extends Error {
+    constructor(kind: ErrorKind, message: string, diagnostics?: Diagnostic[], engine_class?: number | null);
     readonly kind: ErrorKind;
     readonly engineClass: number | null;
     readonly diagnostics: Diagnostic[];
