@@ -3,14 +3,6 @@
 Forward-looking index. Closed items are deleted; git history is the record of
 what was done. Each item carries a severity and a component pointer.
 
-## Major initiatives
-
-**Release relic 1.0.** [Critical, component: `specs/design-release.md`]
-Complete the [release procedure](specs/design-release.md#the-release-procedure):
-tag `v1.0.0`, produce the tarball with `make distcheck`, publish it with its
-SHA-256, and update the Homebrew formula's checksum in the following commit.
-BSD ports skeletons and OpenBSD/NetBSD validation are outside the 1.0 scope.
-
 ## Engine
 
 **Type tests read the type bits directly.** [Medium, component:

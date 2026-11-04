@@ -12,7 +12,7 @@ class Relic < Formula
   desc "Datalog engine for C: an embeddable library and a command-line tool"
   homepage "https://github.com/stass/relic"
   url "https://github.com/stass/relic/releases/download/v1.0.0/relic-1.0.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "e717a79949d372005590a39c8428265ea2daeaf65a9c228f4448aa676230cb92"
   license "BSD-2-Clause"
 
   depends_on "pkgconf" => :test
