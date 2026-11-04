@@ -26,10 +26,23 @@ It supports dependency analysis, graph queries and reasoning over tables.</p>
 </p>
 <section aria-labelledby="install">
 <h2 id="install">Installation</h2>
+<h3>Homebrew</h3>
 <p>With <a href="https://brew.sh/">Homebrew</a> installed:</p>
 <pre><code class="language-sh">brew install stass/tap/relic</code>
 </pre>
-<p>The <a href="quickstart.html#install">quickstart</a> also covers building from source.</p>
+<h3>Build from source</h3>
+<p>Download and unpack a source tarball from
+<a href="https://github.com/stass/relic/releases">GitHub Releases</a>.
+With a C11 compiler, <code>make</code> and a POSIX shell, run these commands
+inside the unpacked directory:</p>
+<pre><code class="language-sh">./configure --prefix=&quot;$HOME/.local&quot;
+make
+make check
+make install
+export PATH=&quot;$HOME/.local/bin:$PATH&quot;</code>
+</pre>
+<p>This installs under your home directory without root access. See the
+<a href="quickstart.html#install">quickstart</a> for building from a Git checkout.</p>
 </section>
 <section aria-labelledby="example">
 <div class="section-label">A small program</div>
