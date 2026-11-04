@@ -7,12 +7,14 @@ if ! command -v python3 > /dev/null 2>&1; then
     exit 77
 fi
 python3 - "$RELIC_SRCDIR" <<'PY'
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 
 source = Path(sys.argv[1])
@@ -148,5 +150,48 @@ chmod +x "$binary"
     run(failed, exit_code='1')
     assert (failed / 'main-sweep-complete').exists()
     assert all(p.read_text().strip() == '1' for p in failed.glob('*.exit-status'))
-print('bench-sweep: preflight, full scheduling, fresh cohorts and abort evidence passed')
+
+    # Expose one checksum interface at a time, independently of host tools.
+    isolated = root / 'isolated-bin'
+    isolated.mkdir()
+    for name in ['awk', 'cat', 'chmod', 'cmp', 'cp', 'date', 'dirname', 'find',
+                 'grep', 'ln', 'mkdir', 'mktemp', 'realpath', 'rm', 'sed', 'sh',
+                 'tar', 'uname', 'wc', 'python3']:
+        path = shutil.which(name)
+        assert path is not None, f'Missing test tool: {name}'
+        (isolated / name).symlink_to(path)
+    for name in ['git', 'sysctl', 'timeout', 'gtimeout']:
+        path = shutil.which(name)
+        if path is not None:
+            (isolated / name).symlink_to(path)
+    (isolated / 'hyperfine').symlink_to(stubs / 'hyperfine')
+    environment['PATH'] = str(isolated)
+    for checksum in ['sha256sum', 'sha256', 'shasum']:
+        provider = isolated / checksum
+        provider.write_text('''#!/bin/sh
+exec python3 - "$0" "$@" <<'HASH'
+import hashlib, sys
+from pathlib import Path
+name = Path(sys.argv[1]).name
+arguments = sys.argv[2:]
+flags = {'sha256': ['-r'], 'sha256sum': [], 'shasum': ['-a', '256']}[name]
+assert arguments[:len(flags)] == flags, arguments
+for filename in arguments[len(flags):]:
+    print(hashlib.sha256(Path(filename).read_bytes()).hexdigest(), '  ', filename, sep='')
+HASH
+''')
+        provider.chmod(0o755)
+        checksummed = root / ('checksum-' + checksum)
+        run(checksummed)
+        with tarfile.open(checksummed / 'source.tar') as archive:
+            expected = {member.name: hashlib.sha256(archive.extractfile(member).read()).hexdigest()
+                        for member in archive.getmembers() if member.isfile()}
+        actual = {}
+        for line in (checksummed / 'source-sha256.txt').read_text().splitlines():
+            digest, filename = line.split('  ', 1)
+            actual[filename] = digest
+        assert actual == expected, (checksum, actual, expected)
+        assert (checksummed / 'main-sweep-complete').exists()
+        provider.unlink()
+print('bench-sweep: preflight, scheduling, cohorts, abort evidence and checksums passed')
 PY

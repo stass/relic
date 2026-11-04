@@ -185,8 +185,10 @@ main() {
 	cp "$work/source.tar" "$record/source.tar"
 	if command -v sha256 > /dev/null 2>&1; then
 		(cd "$work/source" && find bench -type f -exec sha256 -r {} +) > "$record/source-sha256.txt"
+	elif command -v sha256sum > /dev/null 2>&1; then
+		(cd "$work/source" && find bench -type f -exec sha256sum {} +) > "$record/source-sha256.txt"
 	else
-		command -v shasum > /dev/null 2>&1 || fail 'sha256 or shasum is required'
+		command -v shasum > /dev/null 2>&1 || fail 'sha256, sha256sum or shasum is required'
 		(cd "$work/source" && find bench -type f -exec shasum -a 256 {} +) > "$record/source-sha256.txt"
 	fi
 	for scale in 1 2 4 8; do
