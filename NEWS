@@ -1,6 +1,6 @@
 relic NEWS -- changes a user or an embedder of relic would notice, by release
 
-relic 1.0.0 (unreleased)
+relic 1.0.0 (2026-11-04)
 
   The first release: a Datalog engine for C, as a library, librelic, and a
   command-line tool, relic(1).
@@ -47,9 +47,10 @@ relic 1.0.0 (unreleased)
   * Optional limits cap the tuples held, the memory that relations,
     values, plans and rewrites occupy, and the size of one program text or
     one field of an imported table.  A load, an import, an evaluation or a
-    query that would exceed a limit is refused with a diagnostic and
-    changes nothing.  A finite memory limit can make some evaluations
-    slower.
+    query that would exceed a limit is refused with a diagnostic.  A failed
+    load or import adds no facts or program statements; interned values and
+    reserved capacity can remain after failure.  A finite memory limit can
+    make some evaluations slower.
   * A query that fails delivers no rows rather than a truncated answer.
     Only an interrupted query can have delivered a prefix of its rows.
 
@@ -132,4 +133,5 @@ relic 1.0.0 (unreleased)
   * --enable-thinlto builds with LLVM link-time optimization, after
     configuration checks that the compiler, archiver and linker support it.
   * Built and tested on macOS, on Linux with glibc and with musl, and on
-    FreeBSD.  OpenBSD and NetBSD are supported targets.
+    FreeBSD.  OpenBSD and NetBSD are portability targets without release
+    validation.

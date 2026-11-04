@@ -155,6 +155,9 @@ contrib/pkgsrc/devel/relic/      Makefile, distinfo, DESCR, PLIST
 contrib/homebrew/relic.rb        a formula
 ```
 
+Packaging skeletons are maintained independently of the release gate. A
+source release does not require a port for every target packaging system.
+
 `contrib/` lives in the repository and not in the tarball, since it
 describes the tarball: a file inside a tarball cannot hold that tarball's
 checksum. Each skeleton fetches the release tarball from
@@ -225,12 +228,12 @@ belongs with the per-push jobs. It is the one job that builds with the BSD
 A release is made only when all of the following hold on the release
 commit:
 
-1. Every job of the matrix passes. OpenBSD and NetBSD, primary target
-   platforms which no workflow reaches, are built and tested from the
-   tarball by hand, with the result recorded in the release's `NEWS`
-   entry. The tarball must build, install and pass its own suite with no
-   autotools present on FreeBSD, OpenBSD, NetBSD, macOS, and Linux with
-   both glibc and musl.
+1. Every job of the matrix passes. The tarball must build, install and pass
+   its own suite with no autotools present on FreeBSD, macOS, and Linux
+   with both glibc and musl. OpenBSD and NetBSD are portability targets;
+   validation on platforms outside the matrix is independent of the release
+   gate. The release's `NEWS` entry distinguishes validated platforms from
+   portability targets.
 2. The full suite runs clean under AddressSanitizer with leak detection and
    under UndefinedBehaviorSanitizer.
 3. The random program driver and the fuzz targets run clean at length: the

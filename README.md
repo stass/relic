@@ -250,9 +250,10 @@ RELIC_STRICT_CHECK=yes RELIC_ALLOWED_SKIPS=symbols.sh make distcheck
 
 ## Supported platforms
 
-relic supports macOS, Linux with glibc or musl, FreeBSD, OpenBSD and
-NetBSD. Continuous integration builds and tests a release tarball on Linux
-with glibc and musl and on FreeBSD for every change.
+relic supports macOS, Linux with glibc or musl, and FreeBSD. OpenBSD and
+NetBSD are portability targets without release validation. Continuous
+integration builds and tests a release tarball on Linux with glibc and musl
+and on FreeBSD for every change.
 
 ## Use from C
 
