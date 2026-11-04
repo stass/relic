@@ -3,6 +3,19 @@
 Forward-looking index. Closed items are deleted; git history is the record of
 what was done. Each item carries a severity and a component pointer.
 
+## Planned features
+
+**Reusable WebAssembly library and browser playground.** [Medium, component:
+`wasm/`, `website/`, `.github/workflows/`] Implement the
+[Wasm interface](specs/design-wasm.md) and the
+[website playground](specs/design-website.md#playground): public-API-only C
+adapter, bounded typed JavaScript results, per-call worker cancellation,
+optional Emscripten build and native/browser agreement tests. Publish the
+reusable distribution alongside the static guides through the Pages workflow.
+Resolve Libtool's Emscripten C++ PIC probe, which generates a bare
+`='-fPIC'` assignment and a nonfatal configure shell error with the explicit
+Wasm host; the C library build succeeds but the probe needs a valid result.
+
 ## Engine
 
 **Type tests read the type bits directly.** [Medium, component:

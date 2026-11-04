@@ -89,10 +89,12 @@ runtime use from proposals and related work.
 **Interfaces**
 
 * [Project website](design-website.md) -- public guides, static pages and
-  GitHub Pages deployment.
+  browser playground, with GitHub Pages deployment.
 
 * [Library interface](design-api.md) -- `<relic.h>`: contexts, ownership,
   callbacks, error classes, diagnostics and versioning.
+* [WebAssembly interface](design-wasm.md) -- reusable browser evaluation,
+  copied typed values, worker lifetime and resource limits.
 * [Command line](design-cli.md) -- the tool's phases, output formats, exit
   status and interactive session.
 * [Tables: import and export](design-tables.md) -- importing and

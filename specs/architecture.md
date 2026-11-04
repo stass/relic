@@ -13,7 +13,9 @@ Related: [specs index](README.md), [language](language.md),
 [code style](style.md), relic(1), relic(3).
 
 The [project website](design-website.md) introduces the language and its
-command-line and C interfaces through static pages hosted on GitHub Pages.
+command-line and C interfaces through static guides hosted on GitHub Pages.
+Its playground uses the reusable [WebAssembly interface](design-wasm.md)
+to evaluate programs in the browser.
 
 ## Summary
 
@@ -76,7 +78,8 @@ relic shall:
 4. Serve as a command-line program and as a reusable C library, with one
    engine behind both.
 5. Require no external runtime, VM, parser generator, database or
-   third-party library; the sole optional dependency is `libedit`.
+   third-party library for the native tool and library; the sole optional
+   dependency is `libedit`.
 6. Build naturally on BSD systems using BSD libc facilities, and portably
    elsewhere.
 7. Be deterministic: the same input gives byte-identical output on every
@@ -588,6 +591,19 @@ points, ownership and callback rules are in relic(3).
 
 See [design-api.md](design-api.md).
 
+### WebAssembly interface
+
+The browser interface is an ordinary client of `<relic.h>`, built with an
+optional Emscripten toolchain from the same library sources. An asynchronous
+JavaScript operation loads a program and answers its embedded queries in a
+fresh worker and context, returning copied, typed values. Integers retain their
+64-bit precision and strings retain arbitrary bytes. Worker termination owns
+cancellation and timeout, so no engine handle or recovery protocol reaches
+callers. Source, engine and copied-output limits bound each call. The website
+playground consumes this same reusable interface.
+
+See [design-wasm.md](design-wasm.md).
+
 ### Command line
 
 The tool (`cmd/relic`) is an ordinary library client. An invocation runs in
@@ -902,6 +918,12 @@ a callback: it raises a flag and can neither block nor fail.
 Primary platforms are FreeBSD, OpenBSD, NetBSD and macOS; Linux with glibc
 and with musl is supported as well.
 
+The optional browser target compiles the same library to WebAssembly with
+Emscripten and threads disabled. Its adapter uses only the public C API;
+browser lifecycle and value copying belong to that interface rather than to
+the engine. This keeps native and browser evaluation under one semantic
+contract without introducing browser platform branches in library sources.
+
 The code is ISO C11, compiled as `-std=gnu11` where available, since a
 strict-conformance switch hides BSD interfaces such as `strlcpy(3)` behind
 feature-test macros on several platforms, falling back to `-std=c11` and
@@ -937,8 +959,8 @@ not trees.
 
 ### Dependency policy
 
-relic has no third-party runtime dependencies. The engine and the tool use
-the C11 standard library and BSD interfaces, and nothing else. This is a
+The native relic library and tool have no third-party runtime dependencies.
+They use the C11 standard library and BSD interfaces, and nothing else. This is a
 product requirement, not an aesthetic preference: the tool must be as easy
 to install and audit as `awk` or `grep`.
 
@@ -972,6 +994,12 @@ required, and its absence changes only how the session reads input.
 Build and maintainer tools are a separate question from runtime
 dependencies. No parser generator is used at any time, so no generated
 source is committed and the grammar lives where its diagnostics do.
+
+Emscripten is an optional build tool for the WebAssembly interface, whose
+generated JavaScript support and toolchain libc are shipped with its artifact.
+That target requires a browser with WebAssembly, ES modules, workers and
+BigInt, but adds no native dependency. The reusable facade and playground use
+standard browser APIs without a framework, CDN or npm runtime package.
 
 ### C library and ABI
 
@@ -1029,6 +1057,12 @@ packaging skeletons live in `contrib/` rather than forming a second build.
 The tool lives in `cmd/relic/` rather than `usr.bin/relic/` for the same
 reason.
 
+The optional [Wasm build](design-wasm.md#build-and-distribution) uses an
+isolated Emscripten configuration and the ordinary library target, then links
+the browser adapter. Engine source selection stays in `Makefile.am`.
+Generated Wasm and JavaScript artifacts are build products, not tracked source;
+the website deployment builds them from its checkout with a pinned SDK.
+
 `--enable-thinlto` enables LLVM ThinLTO and defaults to off. Configuration
 checks that the selected compiler emits bitcode and that the selected
 archiver, archive indexer, symbol reader and linker can consume it. A
@@ -1085,6 +1119,8 @@ include/relic.h             the public header, the only one installed
 lib/                        librelic: front end, check, analysis,
                             planner, executor, evaluator, rewrite, store
 cmd/relic/                  the command-line tool
+wasm/                       browser adapter, public ES module and build script
+website/                    static guides and browser playground
 compat/                     replacements configure selects, bundled
                             queue.h
 man/                        relic(1) and relic(3)
