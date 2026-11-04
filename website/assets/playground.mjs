@@ -11,6 +11,7 @@ const run = document.getElementById("run");
 const stop = document.getElementById("stop");
 const status = document.getElementById("status");
 const results = document.getElementById("results");
+const placeholder = document.getElementById("result-placeholder");
 const diagnostics = document.getElementById("diagnostics");
 let controller = null;
 
@@ -39,6 +40,7 @@ async function submit(event) {
 	controller = new AbortController();
 	set_running(true);
 	status.textContent = "Running...";
+	placeholder.hidden = true;
 	results.replaceChildren();
 	diagnostics.replaceChildren();
 	document.getElementById("results-section").hidden = true;
@@ -56,10 +58,14 @@ async function submit(event) {
 			results.append(heading, text);
 		}
 		document.getElementById("results-section").hidden = result.queries.length === 0;
+		placeholder.hidden = result.queries.length !== 0;
+		placeholder.textContent = result.queries.length === 0 ?
+		    "Add a query ending in ? to see its answers." : "";
 		status.textContent = "Completed with relic " + result.version + "." +
 		    (result.queries.length === 0 ? " No queries in this program." : "");
 	} catch (error) {
 		show_diagnostics(error.diagnostics ?? []);
+		placeholder.hidden = true;
 		status.textContent = error.message;
 	} finally {
 		controller = null;

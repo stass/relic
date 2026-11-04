@@ -76,8 +76,21 @@ button[type="submit"] { background: var(--accent); color: white; }
 button:disabled, select:disabled { opacity: .55; cursor: default; }
 button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 textarea { display: block; width: 100%; margin-block: 8px 16px; padding: 18px; background: var(--code); resize: vertical; font-family: ui-monospace, monospace; font-size: .87rem; line-height: 1.65; }
-#status { font-size: .87rem; }
+#status { font-size: .8rem; min-width: 0; overflow-wrap: anywhere; }
 #example { max-width: 100%; }
+.playground-page main { padding-top: 32px; }
+.playground-workspace { display: grid; gap: 12px; }
+.playground-workspace > * { min-width: 0; }
+#playground textarea { margin-bottom: 0; }
+.playground-output-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: start; }
+.playground-actions { display: flex; flex-direction: column; gap: 8px; }
+.playground-actions button { width: 5rem; }
+.playground-output { padding: 14px 16px; border: 1px solid var(--line); border-radius: 3px; height: 12rem; min-width: 0; overflow: auto; overflow-wrap: anywhere; }
+.playground-output-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; }
+.playground-output h2 { margin: 0; font-size: 1rem; }
+.playground-output h3 { margin: 12px 0 8px; font-size: .9rem; }
+.playground-output pre { margin-block: 8px; padding: 8px 12px; }
+.playground-output:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 @media (max-width: 640px) {
   header, main, footer { padding-inline: 20px; }
   header nav { gap: 12px 20px; }
@@ -95,4 +108,7 @@ textarea { display: block; width: 100%; margin-block: 8px 16px; padding: 18px; b
   main { max-width: none; padding: 0; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; }
   a { color: inherit; }
+  .playground-output-row { grid-template-columns: 1fr; }
+  .playground-actions { display: none; }
+  .playground-output { height: auto; overflow: visible; }
 }

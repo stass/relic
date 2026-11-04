@@ -8,7 +8,7 @@
 <link rel="stylesheet" href="assets/style.css">
 <script type="module" src="assets/playground.mjs"></script>
 </head>
-<body>
+<body class="playground-page">
 <a class="skip" href="#main">Skip to content</a>
 <header>
 <nav aria-label="Main navigation"><a href="index.html">relic</a>
@@ -26,30 +26,39 @@
 Your program and results stay in your browser.</p>
 <p id="availability">This playground requires JavaScript, WebAssembly and workers.
 If it is unavailable, <a href="quickstart.html#install">install relic locally</a>.</p>
+<div class="playground-workspace">
 <form id="playground">
 <div class="playground-toolbar">
 <label for="example">Example</label>
 <select id="example" disabled></select>
 </div>
 <label for="program">Program <span class="muted">(queries end in <code>?</code>)</span></label>
-<textarea id="program" rows="15" spellcheck="false" autocapitalize="off" autocomplete="off"
+<textarea id="program" rows="10" spellcheck="false" autocapitalize="off" autocomplete="off"
     aria-describedby="run-limits" required></textarea>
-<div class="playground-toolbar">
-<button id="run" type="submit" disabled>Run</button>
-<button id="stop" type="button" disabled>Stop</button>
+</form>
+<div class="playground-output-row">
+<aside class="playground-output" aria-labelledby="results-heading" tabindex="0">
+<div class="playground-output-header">
+<h2 id="results-heading">Results</h2>
 <span id="status" role="status" aria-live="polite">Ready when the runner loads.</span>
 </div>
-</form>
-<p id="run-limits" class="muted">Runs are limited to 5 seconds and 1,000 result rows.
-Stop cancels the run; you can edit and run again.</p>
+<p id="result-placeholder" class="muted">Run a query to see results here.</p>
 <section id="diagnostics-section" aria-labelledby="diagnostics-heading" hidden>
-<h2 id="diagnostics-heading">Diagnostics</h2>
+<h3 id="diagnostics-heading">Diagnostics</h3>
 <ul id="diagnostics"></ul>
 </section>
-<section id="results-section" aria-labelledby="results-heading" hidden>
-<h2 id="results-heading">Results</h2>
+<div id="results-section" hidden>
 <div id="results"></div>
-</section>
+</div>
+</aside>
+<div class="playground-actions">
+<button id="run" type="submit" form="playground" disabled>Run</button>
+<button id="stop" type="button" disabled>Stop</button>
+</div>
+</div>
+</div>
+<p id="run-limits" class="muted">Runs are limited to 5 seconds and 1,000 result rows.
+Stop cancels the run; you can edit and run again.</p>
 <details>
 <summary>Embed relic in a JavaScript application</summary>
 <p>The playground uses a reusable module with typed results, exact integers and

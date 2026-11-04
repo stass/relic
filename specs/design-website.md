@@ -41,6 +41,10 @@ subsequent Run creates a fresh operation and remains usable after any failure.
 
 The page shows each query's rows separately in source order, bounded by the
 API's output limits, and distinguishes no rows from a true zero-column answer.
+A compact output panel follows the editor directly, before explanatory text,
+with Run and Stop beside it on the right. The panel shows its empty, running
+or failed state and scrolls long answers within the panel, keeping the results
+close to the code.
 The renderer prints integers in exact decimal, symbols as identifiers and byte
 strings with relic-compatible escaping, including NUL and non-UTF-8 bytes.
 It does not substitute lossy string decoding for the library's typed values.

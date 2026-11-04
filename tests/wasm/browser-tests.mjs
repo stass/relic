@@ -131,12 +131,54 @@ try {
 
 	await client.call("Page.navigate", { url: origin + "/website/playground.html" });
 	await wait_until(() => client.evaluate("document.getElementById('run')?.disabled === false"), "playground startup");
+	const layout = () => client.evaluate(`(() => {
+		const editor = document.getElementById('program').getBoundingClientRect();
+		const output = document.querySelector('.playground-output').getBoundingClientRect();
+		const row = document.querySelector('.playground-output-row').getBoundingClientRect();
+		const run = document.getElementById('run').getBoundingClientRect();
+		const limits = document.getElementById('run-limits').getBoundingClientRect();
+		return {
+			editor: { left: editor.left, right: editor.right, bottom: editor.bottom, height: editor.height },
+			output: { top: output.top, left: output.left, right: output.right, bottom: output.bottom, height: output.height },
+			row_right: row.right, run_left: run.left, run_top: run.top,
+			limits_top: limits.top,
+			fits: document.documentElement.scrollWidth <= innerWidth
+		};
+	})()`);
+	await client.call("Emulation.setDeviceMetricsOverride", {
+		width: 1280, height: 900, deviceScaleFactor: 1, mobile: false
+	});
+	const desktop = await layout();
+	assert(desktop.output.top >= desktop.editor.bottom &&
+	    desktop.output.top - desktop.editor.bottom <= 24, "output sits immediately below code");
+	assert(Math.abs(desktop.output.left - desktop.editor.left) < 1 &&
+	    Math.abs(desktop.row_right - desktop.editor.right) < 1, "output and controls align with code edges");
+	assert(desktop.run_left >= desktop.output.right &&
+	    Math.abs(desktop.run_top - desktop.output.top) < 1, "Run sits to the right of output");
+	assert(desktop.output.height < desktop.editor.height, "output window is compact");
+	assert(desktop.fits, "desktop content fits viewport");
+	assert.equal(await client.evaluate("document.getElementById('result-placeholder').hidden"), false);
+	await client.call("Emulation.setDeviceMetricsOverride", {
+		width: 390, height: 844, deviceScaleFactor: 1, mobile: false
+	});
+	const mobile = await layout();
+	assert(mobile.output.top >= mobile.editor.bottom, "mobile output follows editor");
+	assert(mobile.run_left >= mobile.output.right, "mobile Run remains beside output");
+	assert(mobile.output.bottom <= mobile.limits_top, "mobile output precedes explanatory text");
+	assert(mobile.fits, "mobile content fits viewport");
 	const submit = async program => {
 		await client.evaluate("document.getElementById('program').value = " + JSON.stringify(program) +
 		    "; document.getElementById('playground').requestSubmit()");
 	};
 	const finished = () => wait_until(() => client.evaluate(
 	    "document.getElementById('run').disabled === false"), "playground completion");
+	await submit('p("' + "a".repeat(3000) + '"). p(X)?');
+	await finished();
+	assert((await layout()).fits, "long result lines do not widen the mobile page");
+	assert.equal(await client.evaluate("document.getElementById('result-placeholder').hidden"), true);
+	await client.call("Emulation.setDeviceMetricsOverride", {
+		width: 1280, height: 900, deviceScaleFactor: 1, mobile: false
+	});
 	for (let i = 0; i < examples.length; i++) {
 		await client.evaluate(`document.getElementById('example').value = '${i}';` +
 		    "document.getElementById('example').dispatchEvent(new Event('change'));" +
@@ -161,8 +203,22 @@ try {
 	await finished();
 	assert((await client.evaluate("document.getElementById('diagnostics').textContent")).includes("1:"));
 	assert.equal(await client.evaluate("document.getElementById('results-section').hidden"), true);
+	assert.equal(await client.evaluate("document.getElementById('result-placeholder').hidden"), true);
+	await submit("p(a).");
+	await finished();
+	assert.match(await client.evaluate("document.getElementById('result-placeholder').textContent"), /query ending in/);
+	await client.call("Emulation.setDeviceMetricsOverride", {
+		width: 390, height: 844, deviceScaleFactor: 1, mobile: false
+	});
+	await submit("p(" + "W".repeat(43) + ")?");
+	await finished();
+	assert((await layout()).fits, "long diagnostics fit the mobile page");
+	await client.call("Emulation.setDeviceMetricsOverride", {
+		width: 1280, height: 900, deviceScaleFactor: 1, mobile: false
+	});
 
 	await submit(busy_program);
+	assert.equal(await client.evaluate("document.getElementById('status').textContent"), "Running...");
 	await client.evaluate("setTimeout(() => { document.body.dataset.responsive = 'yes'; }, 10)");
 	await wait_until(() => client.evaluate("document.body.dataset.responsive === 'yes'"), "responsive UI during evaluation");
 	await client.evaluate("document.getElementById('stop').click()");
@@ -179,6 +235,7 @@ try {
 	await finished();
 	assert.equal(await client.evaluate("document.querySelector('#results pre').textContent"), "ok");
 	console.log("PASS: playground examples, exact rendering, diagnostics, responsiveness, Stop, timeout, limits and recovery");
+	console.log("PASS: compact output below code, Run placement, mobile containment and output states");
 	await client.call("Browser.close");
 } catch (error) {
 	console.error(browser_log);
