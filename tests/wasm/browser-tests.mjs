@@ -297,7 +297,8 @@ try {
 	await wait_until(() => client.evaluate("document.getElementById('chart-status')?.textContent.includes('unavailable')"),
 	    "missing chart asset fallback");
 	assert.equal(await client.evaluate("document.getElementById('chart-status').hidden"), false);
-	assert((await client.evaluate("document.getElementById('methods').textContent")).includes("Methods"));
+	assert.equal(await client.evaluate("document.getElementById('methods').textContent"),
+	    "Relic optimization techniques");
 	await client.call("Network.setBlockedURLs", { urls: [] });
 	console.log("PASS: all-page responsive layout, fixed 1/16-thread charts, ratio directions, timing table and missing-data fallback");
 	await client.call("Browser.close");

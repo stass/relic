@@ -23,9 +23,11 @@
 </header>
 <main id="main">
 <h1>Performance</h1>
-<p>Native command-line results: Apple M3 Max (12 performance + 4 efficiency cores),
-128 GiB RAM, macOS 27.0.1. Scale 1, ten repetitions per timing.
-Medians include startup, loading, evaluation and output; compilation is excluded.</p>
+<p>In our recorded benchmark comparison, relic had the lowest median runtime
+on 22 of 31 workloads with one thread and 26 of 31 with sixteen threads.
+The tests cover graph queries, program analysis and table processing.
+Results depend on the query: relic leads on many recursive workloads, while
+other engines are faster on some table-processing tasks.</p>
 <p id="chart-note">Speedup = fastest completed rival median ÷ relic median.
 Above 1× favors relic; below 1× favors the rival. The ratio axis is logarithmic.
 Hover a point for its medians, or open the timing tables below.</p>
@@ -57,39 +59,83 @@ contains the complete tables.</p></noscript>
 <tbody id="parallel-timings"></tbody></table>
 </div>
 </details>
+<details>
+<summary>Benchmark setup</summary>
+<p>Native command-line results: Apple M3 Max (12 performance + 4 efficiency cores),
+128 GiB RAM, macOS 27.0.1. Scale 1, ten repetitions per timing.
+Medians include startup, loading, evaluation and output; compilation is excluded.</p>
 <p class="benchmark-note">One-thread runs include the serial engines; sixteen-thread runs compare relic,
 three Soufflé modes and DuckDB. Soufflé and Nemo export files; the other engines write to discarded stdout.
-Unavailable results remain statuses, not timings. These are native results, not Wasm measurements.</p>
+Comparisons use completed measurements; unavailable results remain statuses, not timings.
+These are native results, not Wasm measurements.</p>
+</details>
 <p><a href="https://github.com/stass/relic/blob/master/BENCHMARKS.md">Complete results, versions and measurement limits</a>
 · <a href="https://github.com/stass/relic/blob/master/bench/compare/results.tsv">Raw measurements</a></p>
 <section aria-labelledby="methods">
-<h2 id="methods">Methods and references</h2>
+<h2 id="methods">Relic optimization techniques</h2>
+<p>Relic evaluates recursive rules in rounds until no new facts are produced.
+Query rewriting can restrict that work, while the planner chooses how to find
+matching facts. The techniques below reduce repeated joins, retained data and
+coordination between workers. The charts measure complete commands rather than
+the contribution of any single optimization.</p>
 <ul class="benchmark-methods">
-<li><strong>Semi-naive evaluation.</strong> Delta relations avoid repeating joins made entirely from old facts.
+<li><strong>Semi-naive evaluation.</strong> After the initial round, recursive
+evaluation uses the facts added in the previous round as a delta.
+A recursive join must include at least one delta
+input, so combinations made entirely from old facts are not repeated.
+Relic represents a delta as a range in its append-only tuple store, reusing
+the relation's indexes instead of copying new facts into a separate table.
 Method reference: Abiteboul, Hull and Vianu, <em>Foundations of Databases</em>, chapter 13.
 <a href="https://github.com/stass/relic/blob/master/specs/design-eval.md#the-semi-naive-fixed-point">Implementation</a>.</li>
-<li><strong>Magic Sets.</strong> Query bindings become demand predicates that restrict bottom-up evaluation.
+<li><strong>Magic Sets.</strong> A query such as <code>path(a, Destination)?</code>
+supplies a starting point. Relic rewrites those bindings into demand predicates,
+which can avoid computing facts unrelated to the answer. The rewrite shares
+binding order with the planner; if its work limit is reached, relic can fall
+back to evaluating the full program.
 Beeri and Ramakrishnan, <a href="https://doi.org/10.1145/28659.28689"><em>On the Power of Magic</em></a> (1987).
 <a href="https://github.com/stass/relic/blob/master/specs/design-magic.md">Implementation</a>.</li>
-<li><strong>Bound recursive query factoring.</strong> Eligible rewrites reduce the columns carried through recursion,
-with checks to preserve correlations between origins. Naughton, Ramakrishnan, Sagiv and Ullman,
+<li><strong>Bound recursive query factoring.</strong> For eligible recursive
+predicates, the rewrite separates traversal state from final output. It
+propagates reachable states and joins them to complete base inputs, instead
+of carrying intermediate output combinations through recursion. Origin columns
+keep each answer tied to the bindings that requested it. Eligibility checks
+determine when this separation preserves the query's meaning.
+Naughton, Ramakrishnan, Sagiv and Ullman,
 <a href="https://sigmodrecord.org/publications/sigmodRecord/8906/pdfs/66926.66948.pdf"><em>Efficient Evaluation of Right-, Left-, and Multi-Linear Rules</em></a> (1989).
 <a href="https://github.com/stass/relic/blob/master/specs/design-query-factoring.md">Implementation</a>.</li>
-<li><strong>Indexed joins and existence checks.</strong> A greedy planner uses bindings, relation sizes and key counts;
-secondary indexes cover bound columns.
+<li><strong>Indexed joins and existence checks.</strong> The greedy planner uses
+bindings, relation sizes and key counts to choose join order and access paths.
+Bound columns let it probe an index for matching rows instead of scanning a
+whole relation. Filters run once their inputs are available. When a literal
+only needs to establish existence, a successful match can end that lookup
+without enumerating all matching rows.
 <a href="https://github.com/stass/relic/blob/master/specs/design-planning.md">Local planning design</a>.</li>
-<li><strong>Interned values and append-only relations.</strong> Tuples hold compact identifiers, and hash indexes
-provide membership and lookup paths.
+<li><strong>Interned values and append-only relations.</strong> Relic interns
+values and stores compact identifiers in tuples. Joins compare those identifiers
+instead of repeatedly comparing string bytes. Within an evaluation, appending
+tuples gives deltas stable ranges; hash indexes provide membership tests and
+lookups. Repeated derivations therefore do not create duplicate stored facts.
 <a href="https://github.com/stass/relic/blob/master/specs/design-values.md">Values</a> and
 <a href="https://github.com/stass/relic/blob/master/specs/design-storage.md">storage</a>.</li>
-<li><strong>Parallel rounds with ordered publication.</strong> Workers read frozen views; candidate publication preserves
-serial identifiers, answers and diagnostics.
+<li><strong>Parallel rounds with ordered publication.</strong> A shared round
+reads frozen relation and index views. Workers gather candidates while the
+input stores remain unchanged, then an ordered merge publishes the results.
+This separates parallel reads from store mutation and preserves serial
+identifiers, answers and diagnostics. Rounds that do not justify the
+coordination cost can stay on the calling thread.
 <a href="https://github.com/stass/relic/blob/master/specs/design-parallel.md">Local parallel design</a>.</li>
-<li><strong>Grouped count destinations.</strong> Eligible count queries deliver completed keys and counts without
-constructing a second answer relation.
+<li><strong>Grouped count destinations.</strong> A supported full count query
+feeds producer rows into a key/count destination. It can deliver completed
+counts without retaining the projection, group guard and answer as separate
+derived relations. The producer must satisfy the required distinctness proof;
+query shapes outside the supported grammar use ordinary evaluation.
 <a href="https://github.com/stass/relic/blob/master/specs/design-grouped-count.md">Local aggregation design</a>.</li>
-<li><strong>Thompson regular-expression simulation.</strong> Explicit instruction-thread lists keep matching linear in
-input length for a fixed pattern. Thompson,
+<li><strong>Thompson regular-expression simulation.</strong> The matcher advances
+explicit lists of instruction states over the input, merging equivalent states
+instead of revisiting them through separate backtracking paths. For a fixed
+pattern, matching work grows linearly with input length. Pattern size and
+compilation still contribute to the cost.
+Thompson,
 <a href="https://doi.org/10.1145/363347.363387"><em>Regular Expression Search Algorithm</em></a> (1968).
 <a href="https://github.com/stass/relic/blob/master/specs/design-expressions.md">Expression implementation</a>.</li>
 </ul>

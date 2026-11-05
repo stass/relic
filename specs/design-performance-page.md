@@ -55,7 +55,8 @@ comparisons, not an attribution of speedup to one implementation detail.
 
 The page identifies processor, memory, operating system, repetitions and
 compilation/output policy from `BENCHMARKS.md`, with a link to versions and
-the complete measurement conditions. It distinguishes
+the complete measurement conditions. Its introduction summarizes the measured
+results in plain language; detailed setup follows the charts. It distinguishes
 native CLI measurements from the single-threaded Wasm playground. It links to
 the complete results and raw timings.
 
@@ -64,6 +65,9 @@ the complete results and raw timings.
 Technique descriptions distinguish methods used by the runtime from related
 work and proposals. Semi-naive evaluation, Magic Sets and eligible recursive
 query factoring link to their method references and relic's owning designs.
+The "Relic optimization techniques" section explains the work each technique
+avoids and the conditions under which relic uses it, without attributing a
+separate benchmark speedup to an individual optimization.
 Storage, planning and deterministic parallel publication link to the local
 contracts that describe them. Related structures that relic does not implement
 are not advertised as implemented optimizations.
