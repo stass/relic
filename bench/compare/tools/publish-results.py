@@ -284,8 +284,12 @@ def render_report(rows, metadata, overview):
               "are retained with the measurement cohort. CPU frequency and thermal control follow the host OS. "
               "These results describe this host; operating systems, compilers, engine versions and output policy "
               "differ from the Apple M3 Max study, so cross-host differences cannot be attributed solely to hardware.\n")
+    build_table = ["| Engine | Build settings |", "| --- | --- |"]
+    build_table.extend(f"| {engine} | {settings} |"
+                       for engine, settings in metadata["engine_builds"].items())
     full = ["# Benchmark results", "", context, "## Comparison overview", "", "\n".join(overview), "",
-            "## Method and limits", "", method, "## Full comparisons", ""]
+            "## Method and limits", "", method, "## Engine builds", "",
+            metadata["optimization_policy"], "", "\n".join(build_table), "", "## Full comparisons", ""]
     for scale in RUNS:
         for threads in (1, parallel):
             selected = [r for r in rows if (int(r["scale"]), int(r["threads"])) == (scale, threads)]

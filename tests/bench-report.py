@@ -32,6 +32,8 @@ class PublicationTests(unittest.TestCase):
                                  "duckdb", "sqlite", "hyperfine", "compiler")},
             "compiler": "Test compiler",
             "relic_configure": "--disable-shared --enable-threads", "relic_cflags": "-O3 -g",
+            "optimization_policy": "Whole-program LTO is disabled.",
+            "engine_builds": {"relic": "-O3 -g, no LTO"},
         }
         self.workloads = {"generated": False, "external": True}
         self.rows = {}
@@ -222,6 +224,8 @@ class PublicationTests(unittest.TestCase):
         self.assertIn("64 threads", documents[root / "website/performance.html"])
         self.assertIn('aria-label="Serial benchmark timings"', documents[root / "website/performance.html"])
         self.assertIn("Test CPU", documents[root / "BENCHMARKS.md"])
+        self.assertIn("Whole-program LTO is disabled.", documents[root / "BENCHMARKS.md"])
+        self.assertIn("| relic | -O3 -g, no LTO |", documents[root / "BENCHMARKS.md"])
         self.assertIn("discarded stdout for every engine", documents[root / "README.md"])
 
 

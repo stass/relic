@@ -188,7 +188,7 @@ The configure options that matter most:
   alone.
 * `--disable-shared` or `--disable-static` installs only one kind of
   library.
-* `--enable-thinlto` links with LLVM ThinLTO, as the benchmark builds do.
+* `--enable-thinlto` links with LLVM ThinLTO.
 
 <details>
 <summary>All build options</summary>

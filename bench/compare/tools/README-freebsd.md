@@ -5,8 +5,8 @@ cores, 128 hardware threads and 256 GiB installed memory. The requested
 parallel setting is 64 workers. CPU placement follows the OS scheduler;
 workers are not pinned to individual cores.
 
-The engine ports are clingo 5.8.0, SWI-Prolog 10.0.2, DuckDB 1.5.6 and
-SQLite 3.53.4. DuckDB, SQLite and SWI-Prolog differ from the Mac versions;
+The engine ports are clingo 5.8.0, SWI-Prolog 10.0.2 and DuckDB 1.5.6.
+SQLite 3.54.1 is built from upstream source. DuckDB, SQLite and SWI-Prolog differ from the Mac versions;
 results retain each host's versions and do not attribute cross-host timing
 differences solely to hardware. Souffle 2.5, Nemo 0.10.1 and hyperfine 2.0.0
 are built from their release sources. This ports tree has no Souffle or Nemo
@@ -29,7 +29,6 @@ sudo make -C /usr/ports/lang/rust-nightly -DBATCH CPUTYPE= \
     MAKE_JOBS_NUMBER=16 install clean
 sudo make -C /usr/ports/math/clingo -DBATCH MAKE_JOBS_NUMBER=16 install clean
 sudo make -C /usr/ports/databases/duckdb -DBATCH MAKE_JOBS_NUMBER=16 install clean
-sudo make -C /usr/ports/databases/sqlite3 -DBATCH MAKE_JOBS_NUMBER=16 install clean
 sudo make -C /usr/ports/lang/swipl -DBATCH MAKE_JOBS_NUMBER=16 install clean
 ```
 
@@ -84,6 +83,19 @@ Check each archive with `sha256 -q`, extract it, and build hyperfine with
 `cargo build --locked --release -p nemo-cli -j16`. Their executables are
 `target/release/hyperfine` and `target/release/nmo` respectively.
 
+Build SQLite from
+`https://www.sqlite.org/2026/sqlite-autoconf-3540100.tar.gz`, with SHA3-256
+`b6ced585c750916b1052667239a12c25a7ff34e7f06e1e6e01ecb0427657d9c4`.
+Check the archive with `openssl dgst -sha3-256`, extract it, and run
+`./configure --disable-shared --prefix="$BENCH_TOOLS/sqlite" CFLAGS='-O3 -g -march=native'`,
+then `gmake -j8` and `gmake install`.
+
+The comparison uses no explicit whole-program LTO for any engine. Each
+engine keeps its release build defaults: the ports use native CPU targeting,
+SWI-Prolog's port selects its PGO build, and Nemo uses its Cargo release
+profile. Souffle and relic use their documented `-O3` builds with default
+CPU targeting. Preserve these differences in the environment record.
+
 Build relic with `autoreconf -fi`,
 `./configure --disable-shared --enable-threads CFLAGS='-O3 -g'`, and
 `gmake -j8`. Run `gmake check` before timing. Select the native executables
@@ -119,6 +131,7 @@ cd "$HOME/relic-work/src/relic"
 export PATH="$HOME/relic-work/tools/installed/hyperfine/bin:$PATH"
 export SOUFFLE="$HOME/relic-work/tools/installed/souffle/bin/souffle"
 export NMO="$HOME/relic-work/tools/installed/nemo/bin/nmo"
+export SQLITE="$HOME/relic-work/tools/installed/sqlite/bin/sqlite3"
 export RELIC="$PWD/relic" CXX=/usr/bin/c++ CC=/usr/bin/cc
 
 # Check tools and actual stdout exports without starting the sweep.
@@ -169,8 +182,10 @@ the commands in the [chart instructions](README.md#readme-charts).
 The cohort's `environment.json` supplies `processor`, `physical_cores`,
 `logical_cpus`, `installed_memory_gib`, `os`, `parallel_threads`,
 `source_commit`, `output_policy` (`stdout`),
-`verification_timeout_seconds` (300), `relic_configure`, `relic_cflags` and
-`compiler`. Its `version_strings` object maps `relic`, `swipl`, `souffle`,
+`verification_timeout_seconds` (300), `relic_configure`, `relic_cflags`,
+`compiler` and `optimization_policy`. Its `engine_builds` object maps
+display names to the recorded build settings, including Souffle's separate
+generated-program compilation. Its `version_strings` object maps `relic`, `swipl`, `souffle`,
 `clingo`, `nemo`, `duckdb`, `sqlite`, `hyperfine` and `compiler` to the
 version text recorded in scenario headers. Only participating engines are
 required in a parallel header. Record source and executable hashes, build
