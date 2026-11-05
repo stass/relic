@@ -90,6 +90,8 @@ runtime use from proposals and related work.
 
 * [Project website](design-website.md) -- public guides, static pages and
   browser playground, with GitHub Pages deployment.
+* [Performance page](design-performance-page.md) -- recorded benchmark data,
+  browser-rendered charts, measurement context and research provenance.
 
 * [Library interface](design-api.md) -- `<relic.h>`: contexts, ownership,
   callbacks, error classes, diagnostics and versioning.

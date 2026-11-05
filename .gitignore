@@ -38,6 +38,7 @@
 # Disposable trees made by the sanitizer and coverage suites.
 /disposable/
 /website/assets/wasm/
+/website/assets/benchmark-data.json
 
 # A fuzzing run's working corpus and the inputs it found.
 /fuzz-artifacts/

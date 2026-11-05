@@ -1,14 +1,14 @@
 # Website maintenance
 
-The public site consists of five HTML files, the shared `assets/style.css`,
-and the playground's stylesheet and JavaScript modules. Edit these sources
+The public site consists of six HTML files, the shared `assets/style.css`,
+and stylesheets and JavaScript modules for the playground and performance page. Edit these sources
 directly. The repository's manual pages and language
 specification define the contracts explained by the site.
 
-Build the optional Wasm assets, then preview from the repository root:
+Build the optional Wasm and benchmark-data assets, then preview from the repository root:
 
 ```sh
-make wasm-build WASM_OUTPUT="$PWD/website/assets/wasm"
+make website-assets
 python3 -m http.server --bind 127.0.0.1 --directory website 8000
 ```
 
@@ -20,6 +20,20 @@ The guides work without a Wasm build. The playground imports the reusable
 Generated assets under `assets/wasm/` are ignored by git and excluded from
 source distributions. Do not commit them. The Pages workflow builds them
 from its checkout with a pinned Emscripten SDK before uploading the site.
+
+The performance page renders SVG charts in the browser from recorded benchmark
+data. Refresh that small generated snapshot without rebuilding Wasm with:
+
+```sh
+python3 bench/compare/tools/export-website.py
+python3 tests/test_website_benchmarks.py
+```
+
+`assets/benchmark-data.json` is also ignored by git and excluded from source
+distributions. Deployment regenerates it from `bench/compare/results.tsv`;
+no benchmarks run during page loading or deployment. The source report in
+`BENCHMARKS.md` defines the hardware and measurement context described by the
+performance page. Update that prose when publishing a different cohort.
 
 Check page structure, local links and fragments:
 

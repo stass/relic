@@ -14,6 +14,8 @@ It's designed to be friendly enough for everyday work and fast enough to be a pa
 The [project website](https://stass.github.io/relic/) includes a quickstart,
 language tutorial, C API overview and a
 [browser playground](https://stass.github.io/relic/playground.html).
+The [performance page](https://stass.github.io/relic/performance.html) shows
+recorded benchmarks and lists the methods used by the engine.
 
 * **High performance.** In our
   [benchmark suite](#performance), relic beats leading Datalog engines on

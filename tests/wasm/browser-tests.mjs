@@ -85,7 +85,8 @@ const server = createServer(async (request, response) => {
 		    path.startsWith(join(root, directory) + sep)));
 		const content = await readFile(path);
 		const types = { ".html": "text/html", ".mjs": "text/javascript",
-		    ".js": "text/javascript", ".css": "text/css", ".wasm": "application/wasm" };
+		    ".js": "text/javascript", ".css": "text/css", ".wasm": "application/wasm",
+		    ".json": "application/json" };
 		response.writeHead(200, { "Content-Type": types[extname(path)] ?? "application/octet-stream" });
 		response.end(content);
 	} catch {
@@ -252,6 +253,53 @@ try {
 	assert.equal(await client.evaluate("document.querySelector('#results pre').textContent"), "ok");
 	console.log("PASS: playground examples, exact rendering, diagnostics, responsiveness, Stop, timeout, limits and recovery");
 	console.log("PASS: compact output below code, Run placement, mobile containment and output states");
+
+	for (const page of ["index", "quickstart", "tutorial", "c-api", "performance"]) {
+		await client.call("Page.navigate", { url: origin + "/website/" + page + ".html" });
+		await wait_until(() => client.evaluate("document.readyState === 'complete' && " +
+		    "location.pathname.endsWith('/" + page + ".html')"), page + " loading");
+		for (const width of [1280, 390]) {
+			await client.call("Emulation.setDeviceMetricsOverride", {
+				width, height: 900, deviceScaleFactor: 1, mobile: false
+			});
+			assert.equal(await client.evaluate("document.documentElement.scrollWidth <= innerWidth"),
+			    true, page + ": content fits " + width + "px viewport");
+		}
+	}
+	await wait_until(() => client.evaluate("document.getElementById('chart-status')?.hidden === true"),
+	    "performance chart data");
+	for (const id of ["serial-chart", "parallel-chart"])
+		assert.equal(await client.evaluate("document.querySelectorAll('#" + id + " g[data-workload]').length"), 31);
+	for (const id of ["serial-timings", "parallel-timings"])
+		assert.equal(await client.evaluate("document.querySelectorAll('#" + id + " tr').length"), 31);
+	assert.equal(await client.evaluate(`(() => {
+		const chart = document.getElementById('parallel-chart');
+		const parity = Number(chart.querySelector('.chart-parity').getAttribute('x1'));
+		const faster = chart.querySelector('[data-workload="chain-closure"]');
+		const slower = chart.querySelector('[data-workload="tc-cyclic-bf"]');
+		return Number(faster.dataset.ratio) > 2.8 && Number(faster.dataset.ratio) < 2.9 &&
+		    Number(faster.querySelector('circle').getAttribute('cx')) > parity &&
+		    Number(slower.querySelector('circle').getAttribute('cx')) < parity;
+	})()`), true, "ratio direction reflects both faster and slower workloads");
+	const serial_ratio = await client.evaluate("Number(document.querySelector('#serial-chart [data-workload=chain-closure]').dataset.ratio)");
+	assert(serial_ratio > 2 && serial_ratio < 2.1, "one-thread chart uses its own measurements");
+	assert((await client.evaluate("document.getElementById('serial-timings').textContent")).includes("timeout"),
+	    "unavailable measurements remain statuses in the timing table");
+	await delay(100);
+	assert.equal(await client.evaluate("document.documentElement.scrollWidth <= innerWidth"), true);
+	assert.equal(await client.evaluate(`(() => {
+		const chart = document.getElementById('serial-chart');
+		return Math.abs(chart.viewBox.baseVal.width - chart.clientWidth) < 1;
+	})()`), true, "mobile SVG coordinates preserve readable text size");
+	await client.call("Network.enable");
+	await client.call("Network.setBlockedURLs", { urls: ["*benchmark-data.json"] });
+	await client.call("Page.reload");
+	await wait_until(() => client.evaluate("document.getElementById('chart-status')?.textContent.includes('unavailable')"),
+	    "missing chart asset fallback");
+	assert.equal(await client.evaluate("document.getElementById('chart-status').hidden"), false);
+	assert((await client.evaluate("document.getElementById('methods').textContent")).includes("Methods"));
+	await client.call("Network.setBlockedURLs", { urls: [] });
+	console.log("PASS: all-page responsive layout, fixed 1/16-thread charts, ratio directions, timing table and missing-data fallback");
 	await client.call("Browser.close");
 } catch (error) {
 	console.error(browser_log);

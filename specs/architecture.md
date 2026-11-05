@@ -16,6 +16,9 @@ The [project website](design-website.md) introduces the language and its
 command-line and C interfaces through static guides hosted on GitHub Pages.
 Its playground uses the reusable [WebAssembly interface](design-wasm.md)
 to evaluate programs in the browser.
+The [performance page](design-performance-page.md) presents the recorded native
+comparison and the research methods behind evaluation, with charts rendered
+in the browser from the canonical benchmark data.
 
 ## Summary
 

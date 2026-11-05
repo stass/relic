@@ -2,6 +2,9 @@ relic NEWS -- changes a user or an embedder of relic would notice, by release
 
 Unreleased
 
+  * The website's performance guide includes browser-rendered benchmark
+    charts for one and sixteen threads, accessible timing tables, and
+    references for the algorithms and engineering used by relic.
   * The website includes a browser playground that evaluates programs locally
     with WebAssembly, examples, diagnostics and cancellable runs.
   * An optional Emscripten build produces a reusable JavaScript module for

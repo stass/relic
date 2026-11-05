@@ -9,7 +9,11 @@ wasm-check: relic
 	RELIC_WASM_CHECK=yes $(SHELL) $(abs_top_srcdir)/wasm/build.sh "$(abs_top_builddir)" "$(WASM_OUTPUT)"
 	node $(abs_top_srcdir)/tests/wasm/node-tests.mjs "$(WASM_OUTPUT)" "$(abs_top_builddir)/relic"
 
-.PHONY: wasm-build wasm-check
+website-assets:
+	$(MAKE) wasm-build WASM_OUTPUT="$(abs_top_srcdir)/website/assets/wasm"
+	python3 $(abs_top_srcdir)/bench/compare/tools/export-website.py
+
+.PHONY: wasm-build wasm-check website-assets
 
 AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib \
 	      -I$(top_srcdir)/compat -I$(top_builddir) \
@@ -99,9 +103,11 @@ pkgconfig_DATA = librelic.pc
 # document cannot be left out of the tarball.
 EXTRA_DIST = autogen.sh EXAMPLES.md LICENSE README.md BENCHMARKS.md bench/baseline.txt \
 	TODO.md docs specs website wasm tests/wasm tests/check-website.py \
+	tests/test_website_benchmarks.py \
 	bench/datasets.sh bench/run.sh \
 	bench/compare/results.tsv bench/compare/suite-summary.tsv \
 	bench/compare/tools/plot-performance.py \
+	bench/compare/tools/export-website.py \
 	bench/compare/tools/test_plot_performance.py \
 	bench/compare/run.sh bench/compare/sweep.sh bench/compare/timing.awk bench/compare/pairset.c \
 	tests/fixtures/bench \
@@ -1118,6 +1124,7 @@ coverage:
 dist-hook:
 	-rm -f "$(distdir)"/tests/lang/*.log "$(distdir)"/tests/lang/*.trs
 	-rm -rf "$(distdir)/website/assets/wasm"
+	-rm -f "$(distdir)/website/assets/benchmark-data.json"
 
 clean-local:
 	-cd $(top_builddir) && rm -rf disposable

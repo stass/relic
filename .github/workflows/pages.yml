@@ -17,6 +17,10 @@ on:
       - 'LICENSE'
       - 'tests/unit/**'
       - 'tests/wasm/**'
+      - 'tests/test_website_benchmarks.py'
+      - 'bench/compare/results.tsv'
+      - 'bench/compare/tools/export-website.py'
+      - 'BENCHMARKS.md'
       - 'tests/check-website.py'
       - '.github/workflows/pages.yml'
   pull_request:
@@ -34,6 +38,10 @@ on:
       - 'LICENSE'
       - 'tests/unit/**'
       - 'tests/wasm/**'
+      - 'tests/test_website_benchmarks.py'
+      - 'bench/compare/results.tsv'
+      - 'bench/compare/tools/export-website.py'
+      - 'BENCHMARKS.md'
       - 'tests/check-website.py'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
@@ -76,6 +84,8 @@ jobs:
           sed 's|"../../wasm/relic.mjs"|"./relic.mjs"|' tests/wasm/types.mts > website/assets/wasm/typecheck.mts
           "$RUNNER_TEMP/relic-types/node_modules/.bin/tsc" --noEmit --strict --module NodeNext --target ES2022 website/assets/wasm/typecheck.mts
           rm website/assets/wasm/typecheck.mts
+          python3 bench/compare/tools/export-website.py
+          python3 tests/test_website_benchmarks.py
           python3 tests/check-website.py --relic ./relic
           node tests/wasm/browser-tests.mjs "$(command -v google-chrome)"
       - name: Upload website only

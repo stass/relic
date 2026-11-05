@@ -3,7 +3,8 @@
 The public website introduces relic and teaches its command-line, C and
 browser interfaces. GitHub Pages serves the contents of `website/` at
 `https://stass.github.io/relic/`. Hand-written HTML pages share a base stylesheet:
-the landing page, quickstart, language tutorial, C API overview and playground.
+the landing page, quickstart, language tutorial, C API overview, playground and
+[performance guide](design-performance-page.md).
 Relative links work both under the project path and in a local preview.
 
 Related: [WebAssembly interface](design-wasm.md),
@@ -12,8 +13,10 @@ Related: [WebAssembly interface](design-wasm.md),
 ## Guides and navigation
 
 The site uses system fonts, readable line lengths, visible navigation and
-ordinary code blocks. The guides require no JavaScript, downloaded fonts,
-analytics, site generator or package installation. Navigation remains visible
+ordinary code blocks. The introductory guides require no JavaScript, downloaded
+fonts, analytics, site generator or package installation. The performance page
+uses JavaScript for charts and keeps its explanations and source links in HTML.
+Navigation remains visible
 on small screens; code blocks scroll without widening the page. Keyboard navigation,
 visible focus and a skip link are part of every page.
 Shared corner radii give code blocks, navigation, disclosures and feature cards

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>relic performance — Benchmarks and methods</title>
+<meta name="description" content="Recorded one-thread and sixteen-thread benchmarks, with references for the algorithms and implementation techniques used by relic.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/performance.css">
+<script type="module" src="assets/performance.mjs"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header>
+<nav aria-label="Main navigation"><a href="index.html">relic</a>
+<a href="quickstart.html">Quickstart</a>
+<a href="tutorial.html">Language tutorial</a>
+<a href="c-api.html">C API</a>
+<a href="performance.html" aria-current="page">Performance</a>
+<a href="playground.html">Try relic</a>
+<a href="https://github.com/stass/relic">GitHub ↗</a>
+</nav>
+</header>
+<main id="main">
+<h1>Performance</h1>
+<p>Native command-line results: Apple M3 Max (12 performance + 4 efficiency cores),
+128 GiB RAM, macOS 27.0.1. Scale 1, ten repetitions per timing.
+Medians include startup, loading, evaluation and output; compilation is excluded.</p>
+<p id="chart-note">Speedup = fastest completed rival median ÷ relic median.
+Above 1× favors relic; below 1× favors the rival. The ratio axis is logarithmic.
+Hover a point for its medians, or open the timing tables below.</p>
+<p id="chart-status" role="status" aria-live="polite">Loading recorded benchmark data…</p>
+<noscript><p>Charts need JavaScript. The
+<a href="https://github.com/stass/relic/blob/master/BENCHMARKS.md">benchmark report</a>
+contains the complete tables.</p></noscript>
+<div class="benchmark-legend" aria-hidden="true"><span>relic faster</span><span>Rival faster</span></div>
+<figure class="benchmark-chart">
+<h2 id="serial-title">1 thread</h2>
+<svg id="serial-chart" role="img" aria-labelledby="serial-title" aria-describedby="chart-note"></svg>
+</figure>
+<figure class="benchmark-chart">
+<h2 id="parallel-title">16 threads</h2>
+<svg id="parallel-chart" role="img" aria-labelledby="parallel-title" aria-describedby="chart-note"></svg>
+</figure>
+<details>
+<summary>Median timings</summary>
+<div class="benchmark-table" tabindex="0" role="region" aria-label="One-thread benchmark timings">
+<table><caption>1 thread — scale-1 median wall times</caption>
+<thead><tr><th scope="col">Workload</th><th scope="col">relic</th><th scope="col">Fastest completed rival</th>
+<th scope="col">Rival median</th><th scope="col">Speedup</th><th scope="col">Unavailable measurements</th></tr></thead>
+<tbody id="serial-timings"></tbody></table>
+</div>
+<div class="benchmark-table" tabindex="0" role="region" aria-label="Sixteen-thread benchmark timings">
+<table><caption>16 threads — scale-1 median wall times</caption>
+<thead><tr><th scope="col">Workload</th><th scope="col">relic</th><th scope="col">Fastest completed rival</th>
+<th scope="col">Rival median</th><th scope="col">Speedup</th><th scope="col">Unavailable measurements</th></tr></thead>
+<tbody id="parallel-timings"></tbody></table>
+</div>
+</details>
+<p class="benchmark-note">One-thread runs include the serial engines; sixteen-thread runs compare relic,
+three Soufflé modes and DuckDB. Soufflé and Nemo export files; the other engines write to discarded stdout.
+Unavailable results remain statuses, not timings. These are native results, not Wasm measurements.</p>
+<p><a href="https://github.com/stass/relic/blob/master/BENCHMARKS.md">Complete results, versions and measurement limits</a>
+· <a href="https://github.com/stass/relic/blob/master/bench/compare/results.tsv">Raw measurements</a></p>
+<section aria-labelledby="methods">
+<h2 id="methods">Methods and references</h2>
+<ul class="benchmark-methods">
+<li><strong>Semi-naive evaluation.</strong> Delta relations avoid repeating joins made entirely from old facts.
+Method reference: Abiteboul, Hull and Vianu, <em>Foundations of Databases</em>, chapter 13.
+<a href="https://github.com/stass/relic/blob/master/specs/design-eval.md#the-semi-naive-fixed-point">Implementation</a>.</li>
+<li><strong>Magic Sets.</strong> Query bindings become demand predicates that restrict bottom-up evaluation.
+Beeri and Ramakrishnan, <a href="https://doi.org/10.1145/28659.28689"><em>On the Power of Magic</em></a> (1987).
+<a href="https://github.com/stass/relic/blob/master/specs/design-magic.md">Implementation</a>.</li>
+<li><strong>Bound recursive query factoring.</strong> Eligible rewrites reduce the columns carried through recursion,
+with checks to preserve correlations between origins. Naughton, Ramakrishnan, Sagiv and Ullman,
+<a href="https://sigmodrecord.org/publications/sigmodRecord/8906/pdfs/66926.66948.pdf"><em>Efficient Evaluation of Right-, Left-, and Multi-Linear Rules</em></a> (1989).
+<a href="https://github.com/stass/relic/blob/master/specs/design-query-factoring.md">Implementation</a>.</li>
+<li><strong>Indexed joins and existence checks.</strong> A greedy planner uses bindings, relation sizes and key counts;
+secondary indexes cover bound columns.
+<a href="https://github.com/stass/relic/blob/master/specs/design-planning.md">Local planning design</a>.</li>
+<li><strong>Interned values and append-only relations.</strong> Tuples hold compact identifiers, and hash indexes
+provide membership and lookup paths.
+<a href="https://github.com/stass/relic/blob/master/specs/design-values.md">Values</a> and
+<a href="https://github.com/stass/relic/blob/master/specs/design-storage.md">storage</a>.</li>
+<li><strong>Parallel rounds with ordered publication.</strong> Workers read frozen views; candidate publication preserves
+serial identifiers, answers and diagnostics.
+<a href="https://github.com/stass/relic/blob/master/specs/design-parallel.md">Local parallel design</a>.</li>
+<li><strong>Grouped count destinations.</strong> Eligible count queries deliver completed keys and counts without
+constructing a second answer relation.
+<a href="https://github.com/stass/relic/blob/master/specs/design-grouped-count.md">Local aggregation design</a>.</li>
+<li><strong>Thompson regular-expression simulation.</strong> Explicit instruction-thread lists keep matching linear in
+input length for a fixed pattern. Thompson,
+<a href="https://doi.org/10.1145/363347.363387"><em>Regular Expression Search Algorithm</em></a> (1968).
+<a href="https://github.com/stass/relic/blob/master/specs/design-expressions.md">Expression implementation</a>.</li>
+</ul>
+<p><a href="https://github.com/stass/relic/blob/master/docs/research.md">Research index with implementation status and provenance</a></p>
+</section>
+</main>
+<footer><span>relic · BSD 2-Clause</span><a href="https://github.com/stass/relic/blob/master/BENCHMARKS.md">Benchmark report</a>
+<a href="https://github.com/stass/relic">Source</a></footer>
+</body>
+</html>
