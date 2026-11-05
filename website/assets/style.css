@@ -33,6 +33,14 @@ header a:first-child {
   letter-spacing: -.06em;
 }
 header a[aria-current]:not(:first-child) { color: var(--ink); background: var(--code); font-weight: 600; }
+header a[href="playground.html"], header a[href="playground.html"][aria-current] {
+  padding: 6px 12px;
+  background: var(--accent);
+  color: white;
+  font-weight: 600;
+}
+header a[href="playground.html"]:hover { background: #1c4830; }
+header a[href="playground.html"][aria-current] { text-decoration: underline; text-underline-offset: 3px; }
 a { color: var(--accent); text-underline-offset: 3px; }
 a:hover { text-decoration-thickness: 2px; }
 a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; }
@@ -51,7 +59,7 @@ p { margin-block: 16px; }
 }
 .intro-links { display: flex; flex-wrap: wrap; gap: 12px 28px; margin-block: 28px 56px; }
 .intro-links a { padding: 8px 14px; border: 1px solid var(--line); border-radius: var(--radius-control); background: #fff; font-size: .85rem; text-decoration: none; }
-.intro-links a:first-child { border-color: var(--accent); background: var(--accent); color: white; }
+.intro-links a[href="playground.html"] { padding: 7px 13px; border: 2px solid var(--accent); }
 .section-label { margin-top: 32px; padding-top: 28px; border-top: 1px solid var(--line); }
 .section-label + h2 { margin-top: 16px; }
 pre, code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .87em; }

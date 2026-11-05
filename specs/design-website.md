@@ -22,6 +22,8 @@ visible focus and a skip link are part of every page.
 Shared corner radii give code blocks, navigation, disclosures and feature cards
 a consistent rounded appearance. Playground panels and controls use the same
 sizes as the guides.
+The navigation highlights "Try relic" as a filled primary link on every page,
+with a visible focus indicator and an underlined current-page state.
 
 The manual pages and language specification remain the reference contracts.
 The website explains a small set of runnable examples and links to those
