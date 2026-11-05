@@ -189,6 +189,11 @@ try {
 	};
 	const finished = () => wait_until(() => client.evaluate(
 	    "document.getElementById('run').disabled === false"), "playground completion");
+	const expect_answers = async sample => {
+		const texts = await client.evaluate("[...document.querySelectorAll('#results pre')].map(node => node.textContent)");
+		const expected = sample.answers.map(rows => rows.length ? rows.slice().sort() : ["No rows."]);
+		assert.deepEqual(texts.map(text => text.split("\n").sort()), expected, sample.name);
+	};
 	await submit('p("' + "a".repeat(3000) + '"). p(X)?');
 	await finished();
 	assert((await layout()).fits, "long result lines do not widen the mobile page");
@@ -201,8 +206,18 @@ try {
 		    "document.getElementById('example').dispatchEvent(new Event('change'));" +
 		    "document.getElementById('playground').requestSubmit()");
 		await finished();
-		const text = await client.evaluate("document.querySelector('#results pre')?.textContent");
-		assert.deepEqual(text?.split("\n").sort(), examples[i].answer.slice().sort(), examples[i].name);
+		await expect_answers(examples[i]);
+	}
+	for (const id of ["subway-routes", "unused-functions", "type-inference", "unknown-example"]) {
+		const sample = examples.find(example => example.id === id) ?? examples[0];
+		await client.call("Page.navigate", { url: origin + "/website/playground.html?example=" + id });
+		await wait_until(() => client.evaluate("document.getElementById('run')?.disabled === false"), "linked example loading");
+		assert.equal(await client.evaluate("document.getElementById('program').value"), sample.program);
+		assert.equal(await client.evaluate("document.getElementById('status').textContent"), "Ready.",
+		    "links select a bundled example without executing it");
+		await submit(sample.program);
+		await finished();
+		await expect_answers(sample);
 	}
 	await submit(String.raw`v("\0\xff\"\\"). v(X)?`);
 	await finished();
@@ -258,6 +273,15 @@ try {
 		await client.call("Page.navigate", { url: origin + "/website/" + page + ".html" });
 		await wait_until(() => client.evaluate("document.readyState === 'complete' && " +
 		    "location.pathname.endsWith('/" + page + ".html')"), page + " loading");
+		if (page === "tutorial") {
+			const snippets = await client.evaluate("[...document.querySelectorAll('[data-playground-example]')].map(node => ({ id: node.dataset.playgroundExample, program: node.textContent }))");
+			assert.equal(snippets.length, 3, "tutorial contains the three worked application examples");
+			for (const snippet of snippets) {
+				const sample = examples.find(example => example.id === snippet.id);
+				assert(sample, "tutorial example has a matching playground record: " + snippet.id);
+				assert.equal(snippet.program, sample.program, "tutorial/playground program agreement: " + snippet.id);
+			}
+		}
 		for (const width of [1280, 390]) {
 			await client.call("Emulation.setDeviceMetricsOverride", {
 				width, height: 900, deviceScaleFactor: 1, mobile: false

@@ -31,6 +31,9 @@ and run <code>relic -s example.dl</code>.</p>
 <a href="#negation">Negation</a>
 <a href="#values">Values</a>
 <a href="#aggregates">Aggregates</a>
+<a href="#subway-routes">Subway routes</a>
+<a href="#unused-functions">Unused functions</a>
+<a href="#type-inference">Type inference</a>
 </nav>
 <h2 id="facts">1. State facts and ask questions</h2>
 <p>A fact ends in a period. Lowercase names are symbols; uppercase names are
@@ -144,6 +147,141 @@ through themselves.</p>
 <p>Keep the variables you want to count: <code>count { depends(S, _) }</code>
 counts distinct rows with no local columns, so it returns at most one.
 Using <code>Target</code> preserves each different dependency.</p>
+<h2 id="subway-routes">7. Plan a subway transfer</h2>
+<p>On this fictional network, start at <code>museum</code> on the red line.
+Find destinations that require one line change, along with the transfer
+station and the line to board.</p>
+<pre><code class="language-datalog" data-playground-example="subway-routes" data-answer="airport central blue
+garden central blue
+hill harbor green
+west_end central blue
+">% A fictional subway network; segments work in both directions.
+segment(red, museum, central).
+segment(red, central, harbor).
+segment(blue, west_end, central).
+segment(blue, central, garden).
+segment(blue, garden, airport).
+segment(green, harbor, hill).
+
+adjacent(Line, A, B) :- segment(Line, A, B).
+adjacent(Line, A, B) :- segment(Line, B, A).
+ride(Line, A, B) :- adjacent(Line, A, B).
+ride(Line, A, C) :- ride(Line, A, B), adjacent(Line, B, C).
+
+direct(Destination) :- ride(red, museum, Destination).
+one_transfer(Destination, Transfer, Line) :-
+    ride(red, museum, Transfer), ride(Line, Transfer, Destination),
+    Line != red, not direct(Destination).
+
+% Starting at museum on red: destination, transfer station, new line.
+one_transfer(Destination, Transfer, Line)?</code>
+</pre>
+<p><code>adjacent</code> makes each segment bidirectional. <code>ride</code>
+finds stations connected along a single line. <code>one_transfer</code> joins
+a red-line ride to a ride on another line; <code>not direct</code> excludes
+destinations already reachable on red. The columns below are destination,
+transfer station and new line.</p>
+<pre><code class="language-text">airport central blue
+garden central blue
+hill harbor green
+west_end central blue</code>
+</pre>
+<p>Recursion follows any number of stops on a line, including its cycles,
+without enumerating every possible path. This query finds destinations with
+one transfer; it does not optimize travel time or count the stops.</p>
+<p><a href="playground.html?example=subway-routes">Try this example in the browser</a>.</p>
+<h2 id="unused-functions">8. Find unused functions</h2>
+<p>A source-code analyzer can represent function definitions and calls as
+facts. Starting from the entry point, recursion finds reachable functions;
+negation then finds definitions outside that set.</p>
+<pre><code class="language-datalog" data-playground-example="unused-functions" data-answer="main
+parse
+print
+scan
+
+debug_dump
+legacy_parser
+">% Analyze an explicit call graph, starting at main.
+function(main). function(parse). function(scan). function(print).
+function(legacy_parser). function(debug_dump).
+entry(main).
+calls(main, parse). calls(parse, scan). calls(main, print).
+calls(legacy_parser, debug_dump). calls(debug_dump, legacy_parser).
+
+reachable(Function) :- entry(Function).
+reachable(Callee) :- reachable(Caller), calls(Caller, Callee).
+unused(Function) :- function(Function), not reachable(Function).
+
+% Reachable functions, then functions unreachable from any entry point.
+reachable(Function)?
+unused(Function)?</code>
+</pre>
+<p>The first query lists reachable functions. The second identifies
+<code>debug_dump</code> and <code>legacy_parser</code> as unreachable from
+<code>main</code>. They call each other, but a cycle does not make either
+reachable without a call from an entry point.</p>
+<pre><code class="language-text">main
+parse
+print
+scan
+
+debug_dump
+legacy_parser</code>
+</pre>
+<p>The result depends on the supplied call graph and entry points. Additional
+entry points can be represented by more <code>entry</code> facts.</p>
+<p><a href="playground.html?example=unused-functions">Try this example in the browser</a>.</p>
+<h2 id="type-inference">9. Infer types through an expression graph</h2>
+<p>Facts can also describe expressions and assignments. In this small model,
+assignments propagate type information and addition requires two integers.
+The symbols <code>integer</code> and <code>text</code> are labels for the
+analyzed language, represented as ordinary Datalog data.</p>
+<pre><code class="language-datalog" data-playground-example="type-inference" data-answer="label text
+one integer
+title text
+total integer
+x integer
+y integer
+
+broken
+">% Toy expression graph: assignments copy types; addition needs integers.
+int_literal(one). text_literal(label).
+assign(x, one). assign(y, x). assign(title, label).
+add(total, x, y). add(broken, x, title).
+
+type(Expression, integer) :- int_literal(Expression).
+type(Expression, text) :- text_literal(Expression).
+type(To, Type) :- assign(To, From), type(From, Type).
+type(Sum, integer) :- add(Sum, Left, Right),
+    type(Left, integer), type(Right, integer).
+
+type_error(Expression) :- add(Expression, Left, _),
+    type(Left, Type), Type != integer.
+type_error(Expression) :- add(Expression, _, Right),
+    type(Right, Type), Type != integer.
+
+% Inferred types, then additions with a non-integer operand.
+type(Expression, Type)?
+type_error(Expression)?</code>
+</pre>
+<p>The first query shows the inferred types. The type of <code>one</code>
+propagates through <code>x</code> and <code>y</code>, allowing <code>total</code>
+to be inferred as an integer. The second query reports <code>broken</code>,
+whose right operand has type <code>text</code>.</p>
+<pre><code class="language-text">label text
+one integer
+title text
+total integer
+x integer
+y integer
+
+broken</code>
+</pre>
+<p>The two <code>type_error</code> rules check the left and right operands
+separately. Either rule can report an invalid addition; set semantics merge
+duplicate reports. These diagnostics are query results from the model, not
+errors raised by relic itself.</p>
+<p><a href="playground.html?example=type-inference">Try this example in the browser</a>.</p>
 <h2 id="reference">The full language</h2>
 <p>See the <a href="https://github.com/stass/relic/blob/master/specs/language.md">language reference</a>
 for safety, ordering, string functions, aggregate semantics and limits. The

@@ -41,7 +41,11 @@ the playground without loading its scripts or Wasm.
 
 A labeled textarea holds a complete relic program with embedded queries.
 A small example selector supplies runnable examples, and Run and Stop control
-one active operation. There is no editor framework, filesystem import UI or
+one active operation. Worked tutorial examples cover subway transfers,
+call-graph reachability and type propagation and use the same programs as the
+playground. Tutorial links select a bundled example by its stable identifier;
+they do not execute it automatically or accept program text from a URL.
+There is no editor framework, filesystem import UI or
 server evaluation. Run clears the previous outcome and starts the reusable
 operation with an `AbortController`. Stop aborts it. Controls expose the running
 state, and a status region reports completion, failure or cancellation. A

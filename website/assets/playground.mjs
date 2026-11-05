@@ -81,7 +81,10 @@ if (typeof Worker !== "undefined" && typeof WebAssembly !== "undefined" &&
 		option.textContent = examples[i].name;
 		select.append(option);
 	}
-	program.value = examples[0].program;
+	const requested = new URLSearchParams(location.search).get("example");
+	const initial = examples.findIndex(example => example.id === requested);
+	select.value = initial >= 0 ? initial : 0;
+	program.value = examples[select.value].program;
 	select.addEventListener("change", () => { program.value = examples[select.value].program; });
 	form.addEventListener("submit", submit);
 	stop.addEventListener("click", () => controller?.abort());

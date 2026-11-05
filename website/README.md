@@ -52,6 +52,13 @@ sorted output, including its final newline. When editing `c-api.html`, compile
 its complete C example against the built or installed library and run it;
 its answers are `b` and `c`.
 
+Worked tutorial applications also carry a `data-playground-example` identifier
+matching `assets/examples.mjs`. Keep the program text identical in both places.
+Playground records declare expected rows separately for each embedded query;
+browser checks compare every answer and verify tutorial/source agreement.
+Tutorial links use `playground.html?example=ID` to select a bundled program
+without running it automatically.
+
 Run the optional C-in-Wasm and JavaScript API checks, then the real-browser
 suite (pass a Chrome, Chromium or Brave executable):
 
