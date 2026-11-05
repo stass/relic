@@ -423,6 +423,19 @@ are published only from a run that meets all of these:
 * a second machine of a different operating system and processor, to show
   the ranking is not an artifact of one platform.
 
+The stdout-output sweep publisher accepts a complete cohort directory and
+its `environment.json`. It checks every expected scenario and workload,
+recorded engine versions and output policy, and each successful invocation's
+exit code, metric units, repetition count and recomputed summaries before
+writing canonical results. Capacity classifications require diagnostics
+for the exact failing cell; uninvestigated failures prevent publication.
+Missing rival cells become `no-reference` only after relic times out.
+Publication updates bounded generated blocks in the README and website,
+preserving editorial prose and chart embeds. The canonical environment
+identifies the processor and configured parallel count for chart generation;
+the website exporter derives that count from the matrix and rejects mixed
+cohorts.
+
 Mechanism comparisons use independent reference strategies and include
 workloads outside the optimized case. Work counters establish which work is
 avoided; phase timings distinguish that work from parsing, planning and

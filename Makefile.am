@@ -103,9 +103,11 @@ pkgconfig_DATA = librelic.pc
 # document cannot be left out of the tarball.
 EXTRA_DIST = autogen.sh EXAMPLES.md LICENSE README.md BENCHMARKS.md bench/baseline.txt \
 	TODO.md docs specs website wasm tests/wasm tests/check-website.py \
-	tests/test_website_benchmarks.py \
+	tests/test_website_benchmarks.py tests/bench-report.py \
 	bench/datasets.sh bench/run.sh \
 	bench/compare/results.tsv bench/compare/suite-summary.tsv \
+	bench/compare/environment.json \
+	bench/compare/tools/publish-results.py \
 	bench/compare/tools/plot-performance.py \
 	bench/compare/tools/export-website.py \
 	bench/compare/tools/test_plot_performance.py \

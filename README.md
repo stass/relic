@@ -378,11 +378,13 @@ builds `embed.c` against the installed library.
 
 ## Performance
 
+<!-- benchmark-summary:start -->
 relic records the **lowest median wall time on 26 of 31 workloads with
 16 threads**, and **22 of 31 with one thread**, against completed rival runs.
 At the largest tested scale, it leads on **19 of 28 workloads with 16 threads**.
 The suite compares compiled Soufflé (with and without Magic Sets), Nemo,
 SWI-Prolog, clingo, DuckDB and SQLite.
+<!-- benchmark-summary:end -->
 
 Selected workloads show recursive queries, points-to analyses and table
 processing. Taller bars mean faster execution, with relic fixed at 1×;
@@ -400,6 +402,7 @@ and standard compiled Soufflé. The fastest rival column names the fastest
 completed rival at this scale and thread count. Speedup compares relic with
 that rival. relic runs Datalog directly, without a program compilation step.
 
+<!-- benchmark-table:start -->
 | Workload | relic | Soufflé Magic | Soufflé compiled | Fastest rival | relic speedup |
 | --- | ---: | ---: | ---: | --- | ---: |
 | `chain-left` | **2.51 ms** | 200 ms | 791 ms | Soufflé Magic: 200 ms | 79.7× 🟢 |
@@ -433,10 +436,13 @@ that rival. relic runs Datalog directly, without a program compilation step.
 | `facts-join` | 91.2 ms | 124 ms | 126 ms | DuckDB: **72.4 ms** | 0.8× 🔴 |
 | `files-grouped` | 94.4 ms | 338 ms | 254 ms | DuckDB: **52.6 ms** | 0.6× 🔴 |
 | `tc-cyclic-bf` | 255 ms | 121 ms | 124 ms | Soufflé Magic: **121 ms** | 0.5× 🔴 |
+<!-- benchmark-table:end -->
 
+<!-- benchmark-conditions:start -->
 These are scale-1 medians with 16 threads on an Apple M3 Max with 128 GiB RAM.
 Times include startup, loading, evaluation and output; compilation is excluded.
 Soufflé and Nemo export files; other engines write to discarded stdout.
+<!-- benchmark-conditions:end -->
 
 See the [full results](BENCHMARKS.md) for all workloads, timing spread and
 memory use, and [methodology](specs/design-bench.md) to reproduce the comparison.

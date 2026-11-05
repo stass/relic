@@ -6,7 +6,7 @@ For native ports and source builds on FreeBSD, see the
 ## README charts
 
 `plot-performance.py` reads `bench/compare/results.tsv` and writes the two
-SVG charts embedded in the README. It selects twelve scale-1, 16-thread
+SVG charts embedded in the README. It selects twelve scale-1 parallel
 workloads covering recursive queries, points-to analysis and table processing,
 including cases where rivals win. Each bar is relic's median wall time divided
 by that engine's median: relic is 1, and higher means faster. Timeouts and
@@ -22,7 +22,10 @@ python3.15 -m unittest discover -s bench/compare/tools -p 'test_plot_performance
 
 Use the Python interpreter provided by your Matplotlib installation.
 `--results FILE` selects an input matrix; `--output-dir DIR` selects an output
-directory. The script uses a headless renderer and omits SVG timestamps for
+directory. `--context FILE` selects the environment JSON identifying the
+processor and parallel thread count; it defaults to `bench/compare/environment.json`.
+The context must agree with the matrix's parallel profile. The script uses
+a headless renderer and omits SVG timestamps for
 reproducible output with the same Matplotlib version and fonts.
 
 ## Engine builds

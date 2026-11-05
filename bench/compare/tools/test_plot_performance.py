@@ -49,6 +49,18 @@ class PerformanceChartTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             self.read_fixture("1\t16\tsample\trelic\tok\t2\n" * 2)
 
+    def test_parallel_count_comes_from_the_recorded_cohort(self):
+        results = self.read_fixture(
+            "1\t1\tsample\trelic\tok\t99\n"
+            "1\t64\tsample\trelic\tok\t2\n")
+        self.assertEqual(results, {("sample", "relic"): 2.0})
+
+    def test_mixed_parallel_cohorts_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "parallel"):
+            self.read_fixture(
+                "1\t16\tsample\trelic\tok\t2\n"
+                "1\t64\tsample\trelic\tok\t3\n")
+
     def test_invalid_medians_are_rejected(self):
         for value in ("0", "-1", "nan", "inf", "bad"):
             with self.subTest(value=value), self.assertRaises(ValueError):
@@ -63,11 +75,14 @@ class PerformanceChartTests(unittest.TestCase):
         for _, _, workloads in charts.CHARTS:
             speeds = charts.relative_speeds(results, workloads)
             self.assertEqual(len(speeds), len(workloads) * len(charts.ENGINES))
-            figure = charts.plot_chart(results, "Test", workloads)
+            context = {"parallel_threads": 16, "processor": "Test processor"}
+            figure = charts.plot_chart(results, "Test", workloads, context)
             axes = figure.axes[0]
             self.assertEqual(len(axes.get_legend().get_texts()), 5)
             # Unavailable cells must not become zero-height bars.
             self.assertTrue(all(bar.get_height() > 0 for bar in axes.patches))
+            self.assertTrue(any("16 threads | Test processor" in text.get_text()
+                                for text in figure.texts))
             charts.plt.close(figure)
 
 

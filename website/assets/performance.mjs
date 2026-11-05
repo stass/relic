@@ -122,10 +122,11 @@ async function start() {
 	if (!response.ok)
 		throw new Error("Benchmark data could not be loaded.");
 	const data = await response.json();
-	const names = Object.keys(data.profiles["16"]);
+	const parallel_threads = String(data.parallel_threads);
+	const names = Object.keys(data.profiles[parallel_threads]);
 	const views = [
 		{ svg: serial, body: serial_table, rows: comparisons(data, names, "1") },
-		{ svg: parallel, body: parallel_table, rows: comparisons(data, names, "16") }
+		{ svg: parallel, body: parallel_table, rows: comparisons(data, names, parallel_threads) }
 	];
 	for (const view of views) {
 		render_table(view.body, view.rows);

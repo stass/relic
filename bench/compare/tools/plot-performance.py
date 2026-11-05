@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Plot selected scale-1, 16-thread medians from the published comparison."""
+"""Plot selected scale-1 parallel medians from the published comparison."""
 
 import argparse
 import csv
+import json
 import math
 from pathlib import Path
 
@@ -41,8 +42,14 @@ def read_results(path):
         required = {"scale", "threads", "workload", "engine", "status", "median"}
         if not required.issubset(reader.fieldnames or ()):
             raise ValueError("results file is missing required columns")
-        for row in reader:
-            if row["scale"] != "1" or row["threads"] != "16":
+        rows = list(reader)
+        parallel = {row["threads"] for row in rows
+                    if row["scale"] == "1" and int(row["threads"]) > 1}
+        if len(parallel) != 1:
+            raise ValueError("expected exactly one parallel thread count")
+        threads = parallel.pop()
+        for row in rows:
+            if row["scale"] != "1" or row["threads"] != threads:
                 continue
             key = (row["workload"], row["engine"])
             if key in results:
@@ -75,7 +82,7 @@ def relative_speeds(results, workloads):
     return speeds
 
 
-def plot_chart(results, title, workloads):
+def plot_chart(results, title, workloads, context):
     """Return a grouped bar chart; missing results have labels, never bars."""
     speeds = relative_speeds(results, workloads)
     figure, axes = plt.subplots(figsize=(12, 5.4), layout="constrained")
@@ -114,7 +121,8 @@ def plot_chart(results, title, workloads):
     axes.grid(axis="y", color="#dddddd", linewidth=0.6, zorder=0)
     axes.spines[["top", "right"]].set_visible(False)
     figure.supxlabel(
-        "Scale 1, 16 threads | Apple M3 Max | Median wall time including loading and output\n"
+        f"Scale 1, {context['parallel_threads']} threads | {context['processor']} | "
+        "Median wall time including loading and output\n"
         "T/O: verification timeout; n/a: unavailable | Source: bench/compare/results.tsv",
         fontsize=9, color="#444444",
     )
@@ -127,16 +135,24 @@ def main():
         "--results", type=Path, default=REPO / "bench/compare/results.tsv",
     )
     parser.add_argument("--output-dir", type=Path, default=REPO / "docs/images")
+    parser.add_argument("--context", type=Path,
+                        default=REPO / "bench/compare/environment.json")
     args = parser.parse_args()
     try:
         results = read_results(args.results)
+        context = json.loads(args.context.read_text())
+        with args.results.open(newline="") as source:
+            counts = {int(row["threads"]) for row in csv.DictReader(source, delimiter="\t")
+                      if row["scale"] == "1" and int(row["threads"]) > 1}
+        if counts != {context["parallel_threads"]}:
+            raise ValueError("chart context does not match recorded thread count")
         # Validate every selected cell before publishing either chart.
         for _, _, workloads in CHARTS:
             relative_speeds(results, workloads)
         args.output_dir.mkdir(parents=True, exist_ok=True)
         with plt.rc_context({"svg.hashsalt": "relic-performance"}):
             for name, title, workloads in CHARTS:
-                figure = plot_chart(results, title, workloads)
+                figure = plot_chart(results, title, workloads, context)
                 figure.savefig(
                     args.output_dir / f"performance-{name}.svg",
                     metadata={"Date": None},

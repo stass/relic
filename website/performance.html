@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>relic performance — Benchmarks and methods</title>
-<meta name="description" content="Recorded one-thread and sixteen-thread benchmarks, with references for the algorithms and implementation techniques used by relic.">
+<meta name="description" content="Recorded serial and parallel benchmarks, with references for the algorithms and implementation techniques used by relic.">
 <link rel="stylesheet" href="assets/style.css">
 <link rel="stylesheet" href="assets/performance.css">
 <script type="module" src="assets/performance.mjs"></script>
@@ -23,12 +23,14 @@
 </header>
 <main id="main">
 <h1>Performance</h1>
+<!-- benchmark-summary:start -->
 <p>Relic is faster than the competition on most workloads in our benchmark suite:
 it has the lowest median runtime on 22 of 31 workloads with one thread and
 26 of 31 with sixteen threads.
 The tests cover graph queries, program analysis and table processing.
 Results depend on the query: relic leads on many recursive workloads, while
 other engines are faster on some table-processing tasks.</p>
+<!-- benchmark-summary:end -->
 <p id="chart-note">Speedup = fastest completed rival median ÷ relic median.
 Above 1× favors relic; below 1× favors the rival. The ratio axis is logarithmic.
 Hover a point for its medians, or open the timing tables below.</p>
@@ -47,13 +49,13 @@ contains the complete tables.</p></noscript>
 </figure>
 <details>
 <summary>Median timings</summary>
-<div class="benchmark-table" tabindex="0" role="region" aria-label="One-thread benchmark timings">
+<div class="benchmark-table" tabindex="0" role="region" aria-label="Serial benchmark timings">
 <table><caption>1 thread — scale-1 median wall times</caption>
 <thead><tr><th scope="col">Workload</th><th scope="col">relic</th><th scope="col">Fastest completed rival</th>
 <th scope="col">Rival median</th><th scope="col">Speedup</th><th scope="col">Unavailable measurements</th></tr></thead>
 <tbody id="serial-timings"></tbody></table>
 </div>
-<div class="benchmark-table" tabindex="0" role="region" aria-label="Sixteen-thread benchmark timings">
+<div class="benchmark-table" tabindex="0" role="region" aria-label="Parallel benchmark timings">
 <table><caption>16 threads — scale-1 median wall times</caption>
 <thead><tr><th scope="col">Workload</th><th scope="col">relic</th><th scope="col">Fastest completed rival</th>
 <th scope="col">Rival median</th><th scope="col">Speedup</th><th scope="col">Unavailable measurements</th></tr></thead>
@@ -62,6 +64,7 @@ contains the complete tables.</p></noscript>
 </details>
 <details>
 <summary>Benchmark setup</summary>
+<!-- benchmark-setup:start -->
 <p>Native command-line results: Apple M3 Max (12 performance + 4 efficiency cores),
 128 GiB RAM, macOS 27.0.1. Scale 1, ten repetitions per timing.
 Medians include startup, loading, evaluation and output; compilation is excluded.</p>
@@ -69,6 +72,7 @@ Medians include startup, loading, evaluation and output; compilation is excluded
 three Soufflé modes and DuckDB. Soufflé and Nemo export files; the other engines write to discarded stdout.
 Comparisons use completed measurements; unavailable results remain statuses, not timings.
 These are native results, not Wasm measurements.</p>
+<!-- benchmark-setup:end -->
 </details>
 <p><a href="https://github.com/stass/relic/blob/master/BENCHMARKS.md">Complete results, versions and measurement limits</a>
 · <a href="https://github.com/stass/relic/blob/master/bench/compare/results.tsv">Raw measurements</a></p>

@@ -33,7 +33,11 @@ python3 tests/test_website_benchmarks.py
 distributions. Deployment regenerates it from `bench/compare/results.tsv`;
 no benchmarks run during page loading or deployment. The source report in
 `BENCHMARKS.md` defines the hardware and measurement context described by the
-performance page. Update that prose when publishing a different cohort.
+performance page. `bench/compare/environment.json` identifies the processor and
+parallel worker count. The exporter derives the serial and parallel profiles
+from the recorded matrix and rejects mixed parallel cohorts. The report
+publisher updates the page's bounded summary and setup blocks when publishing
+a different cohort.
 
 Check page structure, local links and fragments:
 

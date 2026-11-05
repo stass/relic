@@ -296,17 +296,27 @@ try {
 		assert.equal(await client.evaluate("document.querySelectorAll('#" + id + " g[data-workload]').length"), 31);
 	for (const id of ["serial-timings", "parallel-timings"])
 		assert.equal(await client.evaluate("document.querySelectorAll('#" + id + " tr').length"), 31);
-	assert.equal(await client.evaluate(`(() => {
-		const chart = document.getElementById('parallel-chart');
-		const parity = Number(chart.querySelector('.chart-parity').getAttribute('x1'));
-		const faster = chart.querySelector('[data-workload="chain-closure"]');
-		const slower = chart.querySelector('[data-workload="tc-cyclic-bf"]');
-		return Number(faster.dataset.ratio) > 2.8 && Number(faster.dataset.ratio) < 2.9 &&
-		    Number(faster.querySelector('circle').getAttribute('cx')) > parity &&
-		    Number(slower.querySelector('circle').getAttribute('cx')) < parity;
-	})()`), true, "ratio direction reflects both faster and slower workloads");
-	const serial_ratio = await client.evaluate("Number(document.querySelector('#serial-chart [data-workload=chain-closure]').dataset.ratio)");
-	assert(serial_ratio > 2 && serial_ratio < 2.1, "one-thread chart uses its own measurements");
+	const benchmark_data = JSON.parse(await readFile(join(root, "website/assets/benchmark-data.json"), "utf8"));
+	for (const [id, threads] of [["serial-chart", "1"], ["parallel-chart", String(benchmark_data.parallel_threads)]]) {
+		const expected = Object.fromEntries(Object.entries(benchmark_data.profiles[threads]).map(([name, engines]) => {
+			const times = Object.entries(engines).filter(([engine, cell]) => engine !== "relic" && cell.status === "ok")
+			    .map(([, cell]) => cell.seconds);
+			return [name, times.length ? Math.min(...times) / engines.relic.seconds : null];
+		}));
+		assert.equal(await client.evaluate(`(() => {
+			const expected = ${JSON.stringify(expected)};
+			const chart = document.getElementById(${JSON.stringify(id)});
+			const parity = Number(chart.querySelector('.chart-parity').getAttribute('x1'));
+			return [...chart.querySelectorAll('g[data-workload]')].every(node => {
+				const ratio = expected[node.dataset.workload];
+				if (ratio === null)
+					return node.dataset.ratio === 'unavailable' && !node.querySelector('circle');
+				const actual = Number(node.dataset.ratio);
+				const x = Number(node.querySelector('circle').getAttribute('cx'));
+				return Math.abs(actual / ratio - 1) < 1e-10 && Math.sign(x - parity) === Math.sign(ratio - 1);
+			});
+		})()`), true, id + ": every ratio and direction agrees with its recorded cohort");
+	}
 	assert((await client.evaluate("document.getElementById('serial-timings').textContent")).includes("timeout"),
 	    "unavailable measurements remain statuses in the timing table");
 	await delay(100);
@@ -324,7 +334,7 @@ try {
 	assert.equal(await client.evaluate("document.getElementById('methods').textContent"),
 	    "Relic optimization techniques");
 	await client.call("Network.setBlockedURLs", { urls: [] });
-	console.log("PASS: all-page responsive layout, fixed 1/16-thread charts, ratio directions, timing table and missing-data fallback");
+	console.log("PASS: all-page responsive layout, recorded serial/parallel charts, ratio directions, timing table and missing-data fallback");
 	await client.call("Browser.close");
 } catch (error) {
 	console.error(browser_log);

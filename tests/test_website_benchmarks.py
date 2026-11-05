@@ -1,6 +1,8 @@
 """Check benchmark chart provenance, missing results and comparison eligibility."""
 
 import importlib.util
+import csv
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -45,8 +47,15 @@ class WebsiteBenchmarkTests(unittest.TestCase):
 
     def test_recorded_report_matches_exported_profiles(self):
         data = benchmarks.export(ROOT / "bench/compare/results.tsv")
-        self.assertEqual(set(data["profiles"]), {"1", "16"})
-        for threads, expected_wins in (("1", 22), ("16", 26)):
+        context = json.loads((ROOT / "bench/compare/environment.json").read_text())
+        self.assertEqual(data["parallel_threads"], context["parallel_threads"])
+        self.assertEqual(set(data["profiles"]), {"1", str(context["parallel_threads"])})
+        with (ROOT / "bench/compare/suite-summary.tsv").open(newline="") as source:
+            summary = list(csv.DictReader(source, delimiter="\t"))
+        for threads in data["profiles"]:
+            expected_wins = sum(float(r["relic_median_seconds"]) <= float(r["best_other_median_seconds"])
+                                for r in summary if r["scale"] == "1" and r["threads"] == threads and
+                                r["relic_median_seconds"] != "-" and r["best_other_median_seconds"] != "-")
             workloads = data["profiles"][threads]
             self.assertEqual(len(workloads), 31)
             wins = 0
@@ -55,8 +64,33 @@ class WebsiteBenchmarkTests(unittest.TestCase):
                           if name != "relic" and cell["status"] == "ok"]
                 wins += engines["relic"]["seconds"] <= min(rivals)
             self.assertEqual(wins, expected_wins)
-        self.assertEqual(data["profiles"]["16"]["cspa"]["souffle-magic"]["status"], "ok")
-        self.assertEqual(data["profiles"]["16"]["andersen"]["souffle-magic"]["status"], "timeout")
+        with (ROOT / "bench/compare/results.tsv").open(newline="") as source:
+            for row in csv.DictReader(source, delimiter="\t"):
+                if row["scale"] == "1":
+                    cell = data["profiles"][row["threads"]][row["workload"]][row["engine"]]
+                    self.assertEqual(cell["status"], row["status"])
+
+    def test_export_uses_the_recorded_parallel_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.tsv"
+            path.write_text(
+                "scale\tthreads\tworkload\tengine\tstatus\tmedian\n"
+                "1\t1\twork\trelic\tok\t1\n"
+                "1\t64\twork\trelic\tok\t2\n")
+            data = benchmarks.export(path)
+            self.assertEqual(set(data["profiles"]), {"1", "64"})
+            self.assertEqual(data["parallel_threads"], 64)
+
+    def test_export_rejects_mixed_parallel_cohorts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.tsv"
+            path.write_text(
+                "scale\tthreads\tworkload\tengine\tstatus\tmedian\n"
+                "1\t1\twork\trelic\tok\t1\n"
+                "1\t16\twork\trelic\tok\t2\n"
+                "1\t64\twork\trelic\tok\t3\n")
+            with self.assertRaisesRegex(ValueError, "parallel"):
+                benchmarks.export(path)
 
 
 if __name__ == "__main__":

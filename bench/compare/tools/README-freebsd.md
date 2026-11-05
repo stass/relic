@@ -157,3 +157,29 @@ scenario aborts. `main-sweep-complete` means every scenario returned, not
 that every engine succeeded; review all statuses before publication.
 Choose a new output directory for every restart. The runner does not resume,
 overwrite or mix file-output measurements with stdout-output measurements.
+
+## Publishing a cohort
+
+`publish-results.py --record DIRECTORY --check` validates the whole sweep
+without changing publication files. Omit `--check` to write the canonical
+matrix, comparison summary, environment, full report and bounded generated
+README/website blocks. Regenerate README charts and the website JSON with
+the commands in the [chart instructions](README.md#readme-charts).
+
+The cohort's `environment.json` supplies `processor`, `physical_cores`,
+`logical_cpus`, `installed_memory_gib`, `os`, `parallel_threads`,
+`source_commit`, `output_policy` (`stdout`),
+`verification_timeout_seconds` (300), `relic_configure`, `relic_cflags` and
+`compiler`. Its `version_strings` object maps `relic`, `swipl`, `souffle`,
+`clingo`, `nemo`, `duckdb`, `sqlite`, `hyperfine` and `compiler` to the
+version text recorded in scenario headers. Only participating engines are
+required in a parallel header. Record source and executable hashes, build
+logs and initial/final machine context with the cohort.
+
+Publication rejects uninvestigated failures. An optional
+`investigated-failures.json` array can classify clingo ID exhaustion or
+DuckDB memory exhaustion. Each entry names `scale`, `threads`, `workload`,
+`engine`, `exit_code`, `classified_status`, `evidence` and `diagnostic`.
+The evidence must be that scenario's stderr file, with the harness failure
+header for that exact cell and the matching engine diagnostic. A mismatch,
+missing data or an unexplained failure prevents publication.

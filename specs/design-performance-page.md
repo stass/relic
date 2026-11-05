@@ -14,12 +14,12 @@ Related: [website](design-website.md), [benchmarks](design-bench.md),
 a compact JSON snapshot into the website's assets directory. Deployment builds
 this snapshot from its checkout. It is a generated asset, ignored by git, and
 contains scale-1 medians and explicit statuses for all recorded workloads at
-one and sixteen threads. A source digest identifies the
+one thread and the cohort's configured parallel thread count. A source digest identifies the
 input snapshot.
 
 The page's JavaScript fetches that same-origin asset and renders SVG with
 standard browser APIs. One chart presents the one-thread profile and another
-presents the sixteen-thread profile, each with a corresponding timing table.
+presents the parallel profile, each with a corresponding timing table.
 Both show all recorded scale-1 workloads. Rendering responds
 to container width so labels remain readable on small screens. No charting
 library, package installation, CDN, external font or analytics is required.

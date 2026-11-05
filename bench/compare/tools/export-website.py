@@ -56,12 +56,18 @@ def profile(measurements, scale, threads):
 
 def export(path):
     measurements = read_measurements(path)
-    profiles = {str(threads): profile(measurements, 1, threads) for threads in (1, 16)}
-    if not profiles["16"] or profiles["1"].keys() != profiles["16"].keys():
+    parallel_counts = {threads for scale, threads, _, _ in measurements
+                       if scale == 1 and threads > 1}
+    if len(parallel_counts) != 1:
+        raise ValueError("expected exactly one parallel thread count")
+    parallel = parallel_counts.pop()
+    profiles = {str(threads): profile(measurements, 1, threads)
+                for threads in (1, parallel)}
+    if not profiles["1"] or profiles["1"].keys() != profiles[str(parallel)].keys():
         raise ValueError("chart profiles must contain the same workloads")
     # A chart reference must complete in both profiles. Unavailable rivals
     # retain their statuses and never receive invented numeric times.
-    for name in profiles["16"]:
+    for name in profiles[str(parallel)]:
         for workloads in profiles.values():
             if workloads[name].get("relic", {}).get("status") != "ok":
                 raise ValueError(f"missing completed chart reference: {name}")
@@ -69,6 +75,7 @@ def export(path):
         "source": {"path": "bench/compare/results.tsv",
                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest()},
         "engines": ENGINE_NAMES,
+        "parallel_threads": parallel,
         "profiles": profiles,
 
     }
