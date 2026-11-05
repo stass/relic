@@ -163,7 +163,8 @@ def audit(record, metadata, workloads):
                     row["status"] = classify_failure(row, scale, threads, record, resolutions)
                 elif status not in {"timeout", "n/a", "no-reference"}:
                     raise ValueError(f"unknown result status: {status}")
-                elif any(row[metric] != "-" for metric in ("median", "fastest", "spread", "user", "peak_bytes")):
+                if row["status"] != "ok" and any(row[metric] != "-" for metric in
+                                                 ("median", "fastest", "spread", "user", "peak_bytes")):
                     raise ValueError(f"unmeasured cell contains timing values: {name} {workload} {engine}")
                 row["timed_runs_requested"] = requested
                 row["timed_runs"] = requested if status == "ok" else 0

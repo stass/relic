@@ -197,6 +197,12 @@ class PublicationTests(unittest.TestCase):
         evidence.write_text("compare: clingo failed on generated with status 65:\n" + diagnosis["diagnostic"])
         classified = [r for r in self.audit() if r["status"] == "engine-limit"]
         self.assertEqual(len(classified), 1)
+        row["median"] = "99"
+        self.save_scenario()
+        with self.assertRaisesRegex(ValueError, "unmeasured cell contains timing"):
+            self.audit()
+        row["median"] = "-"
+        self.save_scenario()
         evidence.write_text(evidence.read_text().replace("on generated", "on external"))
         with self.assertRaisesRegex(ValueError, "missing cell diagnostic"):
             self.audit()
