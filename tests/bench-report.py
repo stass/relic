@@ -181,6 +181,17 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "raw no-reference"):
             self.audit()
 
+    def test_unsupported_reference_cannot_hide_an_entire_workload(self):
+        for row in self.rows[1, 1]:
+            if row["workload"] != "generated":
+                continue
+            row["status"] = "n/a"
+            for metric in ("rows", "median", "fastest", "spread", "user", "peak_bytes"):
+                row[metric] = "-"
+        self.save_scenario()
+        with self.assertRaisesRegex(ValueError, "reference status"):
+            self.audit()
+
     def test_capacity_classification_requires_the_exact_cell_diagnostic(self):
         row = next(r for r in self.rows[1, 1] if r["workload"] == "generated" and r["engine"] == "clingo")
         row["status"] = "failed"

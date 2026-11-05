@@ -147,6 +147,8 @@ def audit(record, metadata, workloads):
                 reference = index.get((workload, "relic"))
                 if reference is None:
                     raise ValueError(f"missing reference cell: {name} {workload}")
+                if reference["status"] not in {"ok", "timeout"}:
+                    raise ValueError(f"invalid reference status: {name} {workload}")
                 if row is None:
                     if reference["status"] != "timeout":
                         raise ValueError(f"missing rival cell: {name} {workload} {engine}")
