@@ -16,6 +16,9 @@ ordinary code blocks. The guides require no JavaScript, downloaded fonts,
 analytics, site generator or package installation. Navigation remains visible
 on small screens; code blocks scroll without widening the page. Keyboard navigation,
 visible focus and a skip link are part of every page.
+Shared corner radii give code blocks, navigation, disclosures and feature cards
+a consistent rounded appearance. Playground panels and controls use the same
+sizes as the guides.
 
 The manual pages and language specification remain the reference contracts.
 The website explains a small set of runnable examples and links to those
@@ -48,7 +51,6 @@ close to the code.
 The playground has its own stylesheet for the workspace frame, dark editor
 and light output console. It uses system fonts and a plain textarea; visible
 labels and focus indicators accompany the compact controls.
-Workspace panels and controls have square corners, matching the guides.
 The renderer prints integers in exact decimal, symbols as identifiers and byte
 strings with relic-compatible escaping, including NUL and non-UTF-8 bytes.
 It does not substitute lossy string decoding for the library's typed values.
