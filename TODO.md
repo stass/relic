@@ -79,17 +79,6 @@ core-count effects.
 
 ## Testing and CI
 
-**The shared library fails to link where a compat function is used.**
-[High, component: `Makefile.am` (`librelic_la_LIBADD`)] On macOS 27 the
-libc links no `reallocarray`, so configure selects `compat/reallocarray.c`.
-libtool joins `$(LTLIBOBJS)` into `librelic.la` with `ld -r`, and Apple's
-`ld -r` turns the object's hidden-visibility symbol local without
-`-keep_private_externs`, leaving `_reallocarray` undefined for
-`librelic_internal.a`; a default `./configure && make` fails, and only
-`--disable-shared` builds. Link the compat objects into
-`librelic_internal.la` once, so every consumer gets them from one place, and
-check the static and shared builds on macOS, FreeBSD and Linux.
-
 **Libtool's Emscripten C++ PIC probe emits a malformed assignment.** [Low,
 component: generated `m4/libtool.m4`, `autogen.sh`] The upstream macro expands
 to a bare `='-fPIC'` assignment with the explicit Wasm host and emits a

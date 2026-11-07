@@ -57,10 +57,16 @@ librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c lib/arith.c \
 	lib/pool.c lib/pred.c lib/regex.c lib/relation.c lib/result.c \
 	lib/round.c lib/rule.c lib/stratify.c lib/strfn.c \
 	lib/symbol.c lib/task.c lib/util.c lib/value.c lib/window.c
+# The compatibility objects belong to the convenience library, so that every
+# consumer of it, librelic.la included, takes them from there.  Listed in
+# librelic.la's LIBADD next to the convenience library, they would be merged
+# by libtool with ld -r, and Apple's ld -r makes their hidden symbols local,
+# leaving the library's own calls to them undefined.
+librelic_internal_la_LIBADD = $(LTLIBOBJS)
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
-librelic_la_LIBADD = librelic_internal.la $(LTLIBOBJS)
+librelic_la_LIBADD = librelic_internal.la
 librelic_la_LDFLAGS = -no-undefined -export-symbols-regex '^relic_' \
 	-version-info $(RELIC_ABI_CURRENT):$(RELIC_ABI_REVISION):$(RELIC_ABI_AGE)
 
@@ -83,8 +89,8 @@ relic_SOURCES = cmd/relic/export.c cmd/relic/files.c cmd/relic/input.c \
 
 # The tool links the compatibility objects itself.  Hidden visibility and the
 # export list together make them unreachable through librelic, so the first
-# call to strtonum(3) from the tool would otherwise fail to link on every
-# platform whose C library lacks it.  libedit is the tool's alone, for the
+# call to strtonum(3) from the tool would otherwise fail to link against the
+# shared library on every platform whose C library lacks it.  libedit is the tool's alone, for the
 # interactive mode, and is empty when configure did not find it or was told
 # not to use it.
 relic_LDADD = librelic.la $(LTLIBOBJS) $(LIBEDIT_LIBS)
@@ -249,10 +255,10 @@ tests_unit_test_interrupt_CFLAGS = $(AM_CFLAGS) -pthread
 tests_unit_test_interrupt_LDADD = librelic.la
 
 tests_unit_test_arena_SOURCES = tests/unit/test_arena.c tests/unit/harness.c
-tests_unit_test_arena_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_arena_LDADD = librelic_internal.la
 
 tests_unit_test_arith_SOURCES = tests/unit/test_arith.c tests/unit/harness.c
-tests_unit_test_arith_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_arith_LDADD = librelic_internal.la
 
 ## Checked arithmetic uses the compiler's overflow builtins where it has
 ## them; this program compiles the portable comparisons instead and runs the
@@ -264,13 +270,13 @@ tests_unit_test_arith_portable_CPPFLAGS = $(AM_CPPFLAGS) \
 	-DRELIC_ARITH_PORTABLE
 
 tests_unit_test_cost_SOURCES = tests/unit/test_cost.c tests/unit/harness.c
-tests_unit_test_cost_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_cost_LDADD = librelic_internal.la
 
 tests_unit_test_diag_SOURCES = tests/unit/test_diag.c tests/unit/harness.c
-tests_unit_test_diag_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_diag_LDADD = librelic_internal.la
 
 tests_unit_test_eval_SOURCES = tests/unit/test_eval.c tests/unit/harness.c
-tests_unit_test_eval_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_eval_LDADD = librelic_internal.la
 
 ## The serial-cache boundary is private to eval.c. This test includes it to
 ## check compacted refusal prefixes and optional allocation failure without
@@ -288,82 +294,82 @@ tests_unit_test_grouped_LDADD = \
 	$(librelic_internal_la_OBJECTS:lib/round.lo=) $(LTLIBOBJS)
 
 tests_unit_test_exec_SOURCES = tests/unit/test_exec.c tests/unit/harness.c
-tests_unit_test_exec_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_exec_LDADD = librelic_internal.la
 
 tests_unit_test_facts_SOURCES = tests/unit/test_facts.c tests/unit/harness.c \
 	tests/unit/programs.c
-tests_unit_test_facts_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_facts_LDADD = librelic_internal.la
 
 tests_unit_test_fold_SOURCES = tests/unit/test_fold.c tests/unit/harness.c
-tests_unit_test_fold_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_fold_LDADD = librelic_internal.la
 
 tests_unit_test_import_SOURCES = tests/unit/test_import.c tests/unit/harness.c
-tests_unit_test_import_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_import_LDADD = librelic_internal.la
 
 tests_unit_test_index_SOURCES = tests/unit/test_index.c tests/unit/harness.c
-tests_unit_test_index_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_index_LDADD = librelic_internal.la
 
 tests_unit_test_lex_SOURCES = tests/unit/test_lex.c tests/unit/harness.c
-tests_unit_test_lex_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_lex_LDADD = librelic_internal.la
 
 tests_unit_test_magic_SOURCES = tests/unit/test_magic.c tests/unit/harness.c \
 	tests/unit/programs.c
-tests_unit_test_magic_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_magic_LDADD = librelic_internal.la
 
 tests_unit_test_merge_SOURCES = tests/unit/test_merge.c tests/unit/harness.c
-tests_unit_test_merge_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_merge_LDADD = librelic_internal.la
 
 tests_unit_test_dense_SOURCES = tests/unit/test_dense.c tests/unit/harness.c
-tests_unit_test_dense_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_dense_LDADD = librelic_internal.la
 
 tests_unit_test_parse_SOURCES = tests/unit/test_parse.c tests/unit/harness.c
-tests_unit_test_parse_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_parse_LDADD = librelic_internal.la
 
 tests_unit_test_plan_SOURCES = tests/unit/test_plan.c tests/unit/harness.c
-tests_unit_test_plan_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_plan_LDADD = librelic_internal.la
 
 tests_unit_test_pred_SOURCES = tests/unit/test_pred.c tests/unit/harness.c
-tests_unit_test_pred_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_pred_LDADD = librelic_internal.la
 
 tests_unit_test_query_SOURCES = tests/unit/test_query.c tests/unit/harness.c
-tests_unit_test_query_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_query_LDADD = librelic_internal.la
 
 tests_unit_test_relation_SOURCES = tests/unit/test_relation.c \
 	tests/unit/harness.c
-tests_unit_test_relation_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_relation_LDADD = librelic_internal.la
 
 tests_unit_test_round_SOURCES = tests/unit/test_round.c tests/unit/harness.c
-tests_unit_test_round_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_round_LDADD = librelic_internal.la
 
 tests_unit_test_regex_SOURCES = tests/unit/test_regex.c tests/unit/harness.c
-tests_unit_test_regex_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_regex_LDADD = librelic_internal.la
 
 tests_unit_test_rule_SOURCES = tests/unit/test_rule.c tests/unit/harness.c
-tests_unit_test_rule_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_rule_LDADD = librelic_internal.la
 
 tests_unit_test_stratify_SOURCES = tests/unit/test_stratify.c \
 	tests/unit/harness.c
 # The long-chain test runs its analysis on a thread with a small stack.
 tests_unit_test_stratify_CFLAGS = $(AM_CFLAGS) -pthread
-tests_unit_test_stratify_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_stratify_LDADD = librelic_internal.la
 
 tests_unit_test_strfn_SOURCES = tests/unit/test_strfn.c tests/unit/harness.c
-tests_unit_test_strfn_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_strfn_LDADD = librelic_internal.la
 
 tests_unit_test_symbol_SOURCES = tests/unit/test_symbol.c tests/unit/harness.c
-tests_unit_test_symbol_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_symbol_LDADD = librelic_internal.la
 
 tests_unit_test_text_SOURCES = tests/unit/test_text.c tests/unit/harness.c
-tests_unit_test_text_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_text_LDADD = librelic_internal.la
 
 tests_unit_test_util_SOURCES = tests/unit/test_util.c tests/unit/harness.c
-tests_unit_test_util_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_util_LDADD = librelic_internal.la
 
 tests_unit_test_compute_SOURCES = tests/unit/test_compute.c \
 	tests/unit/harness.c
-tests_unit_test_compute_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_compute_LDADD = librelic_internal.la
 tests_unit_test_value_SOURCES = tests/unit/test_value.c tests/unit/harness.c
-tests_unit_test_value_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_unit_test_value_LDADD = librelic_internal.la
 
 ##
 ## The allocation-failure suite is the one test program that cannot link the
@@ -641,7 +647,7 @@ tests_fuzz_replay_load_LDADD = librelic.la $(LTLIBOBJS)
 ## links the convenience library as the unit tests do.
 tests_fuzz_replay_regex_SOURCES = tests/fuzz/replay.c \
 	tests/fuzz/fuzz_regex.c tests/fuzz/fuzz.h
-tests_fuzz_replay_regex_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_fuzz_replay_regex_LDADD = librelic_internal.la
 
 dist_check_SCRIPTS += tests/fuzz/replay.sh
 
@@ -661,7 +667,7 @@ tests_fuzz_fuzz_load_CFLAGS = $(AM_CFLAGS) -fsanitize=fuzzer
 tests_fuzz_fuzz_load_LDADD = librelic.la $(LTLIBOBJS)
 tests_fuzz_fuzz_regex_SOURCES = tests/fuzz/fuzz_regex.c tests/fuzz/fuzz.h
 tests_fuzz_fuzz_regex_CFLAGS = $(AM_CFLAGS) -fsanitize=fuzzer
-tests_fuzz_fuzz_regex_LDADD = librelic_internal.la $(LTLIBOBJS)
+tests_fuzz_fuzz_regex_LDADD = librelic_internal.la
 
 # -max_len bounds an input's text, and with it how long a program can take
 # to load and check; -timeout reports an input that runs longer anyway.  An
