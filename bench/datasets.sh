@@ -10,7 +10,8 @@
 # platform.
 
 # dataset NAME DIR SCALE: generate the data set NAME into DIR, every size
-# multiplied by SCALE; a tree deepens by one level, doubling, per step.
+# multiplied by SCALE, but for the trees: `tree` has depth 11 + SCALE, and
+# `small-tree` 1024 * SCALE - 1 nodes.
 # SCALE must be a positive decimal integer: shell arithmetic would read a
 # leading zero as octal.  Every relation written is a set: a generator may
 # draw the same row twice, and unique_rows keeps only its first occurrence.
@@ -27,8 +28,8 @@ dataset() {
 	chain) dataset_chain "$2" $((2000 * $3)) ;;
 	graph) dataset_graph "$2" $((20000 * $3)) $((100000 * $3)) ;;
 	grid) dataset_grid "$2" $((150 * $3)) ;;
-	tree) dataset_tree "$2" $((12 + $3 - 1)) ;;
-	small-tree) dataset_tree "$2" $((9 + $3 - 1)) ;;
+	tree) dataset_tree "$2" $(((1 << (12 + $3)) - 1)) ;;
+	small-tree) dataset_tree "$2" "$(small_tree_nodes "$3")" ;;
 	tasks) dataset_tasks "$2" $((50000 * $3)) ;;
 	facts) dataset_facts "$2" $((300000 * $3)) ;;
 	files) dataset_files "$2" $((300000 * $3)) ;;
@@ -134,15 +135,23 @@ dataset_grid() {
 	}'
 }
 
-# dataset_tree DIR D: a complete binary tree of depth D, as parent(P, C).
+# small_tree_nodes SCALE: the nodes of the small tree at SCALE, 1024 more
+# per step, 1023 (depth 9) at scale 1.  Same generation over the whole tree
+# pairs every two nodes of a level, so its answer grows with the square of
+# the nodes, and of the scale, as the chain's closure does; a tree a level
+# deeper per step would quadruple the answer every step.
+small_tree_nodes() {
+	echo $((1024 * $1 - 1))
+}
+
+# dataset_tree DIR N: a complete binary tree of N nodes, t1 to tN, numbered
+# as a heap, t1 the root and tI the parent of t(2I) and t(2I + 1), as
+# parent(P, C).  With N one less than a power of two every level is full.
 dataset_tree() {
-	dataset_dir=$1 awk -v depth="$2" 'BEGIN {
+	dataset_dir=$1 awk -v nodes="$2" 'BEGIN {
 		parents = ENVIRON["dataset_dir"] "/parent.tsv"
-		nodes = 2 ^ (depth + 1) - 1
-		for (i = 1; 2 * i + 1 <= nodes; i++) {
-			printf "t%d\tt%d\n", i, 2 * i > parents
-			printf "t%d\tt%d\n", i, 2 * i + 1 > parents
-		}
+		for (child = 2; child <= nodes; child++)
+			printf "t%d\tt%d\n", int(child / 2), child > parents
 	}'
 }
 

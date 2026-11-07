@@ -11,8 +11,8 @@
 # the tuples scanned and looked up, which say how the time was spent.
 # BENCH_SCALE, 1 by default, grows every workload: it multiplies the
 # chain's length, the graph's nodes and edges, the tasks, the facts, the
-# files and the grid's side, and deepens the trees by one level per step,
-# which doubles them.  BENCH_THREADS, `1` by default, lists the thread
+# files and the grid's side, deepens the bound query's tree to 11 + scale
+# levels and gives the small tree 1024 * scale - 1 nodes.  BENCH_THREADS, `1` by default, lists the thread
 # counts to run each workload at, each with -j, in a row of its own: with
 # "1 16", the rows of a workload show what sixteen threads gain it.  The
 # counters are the same at every count.

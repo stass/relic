@@ -737,14 +737,28 @@ normalize_answer() {
 	esac | LC_ALL=C sort -u
 }
 
+# tree_bits: the bits a node ID of tree-sg-all's data set, small-tree
+# (bench/compare/tree-sg-all/dataset), needs at this scale: the length in
+# binary of its largest ID (small_tree_nodes in bench/datasets.sh).
+tree_bits() {
+	tree_id=$(small_tree_nodes "$scale")
+	bits=0
+	while [ "$tree_id" -gt 0 ]; do
+		tree_id=$((tree_id >> 1))
+		bits=$((bits + 1))
+	done
+	echo "$bits"
+}
+
 # bitmap_answer WORKLOAD: whether this answer uses canonical bounded tree
-# pairs. The generated tree depth is 8 + scale, so IDs need 9 + scale bits.
+# pairs, whose IDs fit the 17 bits pairset accepts (its -b maximum in
+# bench/compare/pairset.c).
 bitmap_answer() {
-	[ -n "$pairset" ] && [ "$scale" -le 8 ] || return 1
 	case $1 in
-	tree-sg-all) return 0 ;;
+	tree-sg-all) ;;
 	*) return 1 ;;
 	esac
+	[ -n "$pairset" ] && [ "$(tree_bits)" -le 17 ]
 }
 
 # verify ENGINE WORKLOAD: run WORKLOAD once with ENGINE under the time limit,
@@ -812,13 +826,13 @@ verify() {
 judge_answer() {
 	if bitmap_answer "$2"; then
 		if [ "$1" = relic ]; then
-			if ! rows=$("$pairset" -b "$((9 + scale))" "$work/answer"); then
+			if ! rows=$("$pairset" -b "$(tree_bits)" "$work/answer"); then
 				status=failed
 				rows=-
 				return 0
 			fi
 		else
-			if ! rows=$("$pairset" -b "$((9 + scale))" \
+			if ! rows=$("$pairset" -b "$(tree_bits)" \
 			    "$work/reference" "$work/answer"); then
 				status=mismatch
 				rows=-

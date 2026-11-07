@@ -392,9 +392,10 @@ are excluded from these tables.
 
 Scale 1 uses **10 repetitions**; scales 2, 4 and 8 use **3**. The 31 workloads
 include three fixed Graspan datasets at scale 1. The other 28 workloads run
-at all scales. Scaling follows each generator: tree depth increases with
-scale, so tree size grows exponentially. All accepted answers are checked
-as exact sets against relic before timing. Verification and compilation
+at all scales. Scaling follows each generator: the small tree of
+`tree-sg-all` has 1024 * scale - 1 nodes, while the tree of `tree-sg-bound`
+has depth 11 + scale, so its size grows exponentially. All accepted answers
+are checked as exact sets against relic before timing. Verification and compilation
 are excluded from execution times.
 
 Times include process startup, input loading, evaluation and output writing.

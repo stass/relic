@@ -62,8 +62,9 @@ graph, a large fact file and a set of file paths:
   extension: a string computed and a pattern matched per path, then groups
   of strings.
 
-`BENCH_SCALE` multiplies every size (a tree deepens one level, doubling, per
-step), so the same workloads trace a curve as the input grows.
+`BENCH_SCALE` multiplies every size but the trees': the bound query's tree
+has depth 11 + scale, doubling per step, and the small tree 1024 * scale - 1
+nodes. The same workloads trace a curve as the input grows.
 `BENCH_THREADS` lists thread counts, each passed as `-j`, and each workload
 runs at each count in a row of its own, so `"1 16"` shows what sixteen
 threads gain it. The counters should be identical at every thread count;
@@ -190,7 +191,7 @@ The data sets of `bench/run.sh`, queried as a user would query them:
 | `degree-count` | the graph | free; each node's out- and in-degree, two `count` aggregates |
 | `grid-reach` | a 150 by 150 grid | reachability from a corner |
 | `tree-sg-bound` | a complete binary tree of depth 12 | bound; same generation |
-| `tree-sg-all` | a tree of depth 9 | free; same generation |
+| `tree-sg-all` | a complete binary tree of 1023 nodes, depth 9 | free; same generation |
 | `tasks-ready` | 50000 tasks and their dependencies, half done | stratified negation |
 | `facts-join` | 300000 ternary facts | a join with integer constants; mostly loading |
 | `files-grouped` | 300000 file paths | free; non-test files counted per directory and extension: string functions, a pattern and `count` |

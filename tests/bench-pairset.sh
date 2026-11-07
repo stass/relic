@@ -16,9 +16,10 @@ else
 	    "$root/bench/compare/pairset.c" -o "$checker"
 fi
 # The bounded tree query prints one column and must retain the TSV verifier.
-awk '/^bitmap_answer\(\)/ { copying = 1 }
+awk '/^(tree_bits|bitmap_answer)\(\)/ { copying = 1 }
     copying { print }
-    copying && /^}/ { exit }' "$root/bench/compare/run.sh" > "$work/scope.sh"
+    copying && /^}/ { copying = 0 }' "$root/bench/compare/run.sh" > "$work/scope.sh"
+. "$root/bench/datasets.sh"
 . "$work/scope.sh"
 pairset=$checker
 scale=8
@@ -27,7 +28,19 @@ if bitmap_answer tree-sg-bound || bitmap_answer chain-closure; then
 	echo 'pairset: incompatible answer schema selected' >&2
 	exit 1
 fi
-scale=9
+# The generated tree's IDs fit the width the run passes pairset.
+scale=2
+mkdir "$work/tree"
+dataset small-tree "$work/tree" "$scale"
+"$checker" -b "$(tree_bits)" "$work/tree/parent.tsv" > /dev/null
+# Scale 128's largest tree ID is the last to fit pairset's 17 bits.
+scale=128
+bitmap_answer tree-sg-all
+if [ "$(tree_bits)" -ne 17 ]; then
+	echo 'pairset: scale 128 needs 17 bits' >&2
+	exit 1
+fi
+scale=129
 if bitmap_answer tree-sg-all; then
 	echo 'pairset: out-of-domain tree selected' >&2
 	exit 1

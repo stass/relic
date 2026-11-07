@@ -267,7 +267,8 @@ def render_report(rows, metadata, overview):
                f"Source revision: `{metadata['source_commit']}`.\n")
     method = ("Scale 1 uses ten repetitions and all 31 workloads, including three fixed Graspan datasets. "
               "Scales 2, 4 and 8 use three repetitions and the 28 generated workloads. "
-              "Scaling follows each generator; tree depth increases with scale, so tree size grows exponentially.\n\n"
+              "Scaling follows each generator; the small tree of `tree-sg-all` has 1024 * scale - 1 nodes, "
+              "while the tree of `tree-sg-bound` has depth 11 + scale, so its size grows exponentially.\n\n"
               "Every engine's complete answer is checked as an exact set against relic before timing. "
               "Times include process startup, input loading, evaluation and serialization of the complete answer "
               "to discarded stdout for every engine. Verification and compilation are excluded. "

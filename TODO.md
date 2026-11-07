@@ -56,15 +56,6 @@ error, but undercharges acquisition until then.
 
 ## Benchmarks
 
-**The `tree-sg-all` workload has no answer at scale 8.** [Medium, component:
-`bench/datasets.sh`, workload `bench/compare/tree-sg-all`] The `small-tree`
-depth grows by one per scale doubling, and the answer by a factor of four
-per level. Scale 4 has 11 million rows (relic: 2.2 s); scale 8 has about
-2.9 billion, which exceeds the 300 s limit and takes tens of gigabytes of
-memory, so relic times out and every rival cell is `no-reference`. Cap the
-tree depth for scales above 4, or exempt the workload from them, so the
-largest scale still compares engines.
-
 **Include comparison inputs and build resources in source archives.**
 [Medium, component: `Makefile.am`]
 Distribute the workload programs and descriptors, shared Graspan programs,

@@ -153,11 +153,13 @@ cc -O3 -std=c11 -pthread -o /tmp/relic-pairset bench/compare/pairset.c
 BENCH_PAIRSET=/tmp/relic-pairset bench/compare/run.sh -w tree-sg-all,tree-sg-bound
 ```
 
-For scales up to 8, each bitmap uses at most 2 GiB; comparing two answers
-uses two bitmaps. Input files are mapped read-only and must remain unchanged
-while verification runs. Their resident pages also contribute to peak RSS.
+A node ID of the scale-S tree needs as many bits as 1024 * S - 1 has in
+binary, at most the 17 pairset accepts, so scales up to 128 are verified
+this way. Each bitmap holds 2^(2 * bits) bits, 8 MiB at scale 8 and 2 GiB at
+scale 128; comparing two answers uses two bitmaps. Input files are mapped
+read-only and must remain unchanged while verification runs. Their resident pages also contribute to peak RSS.
 Other workloads, including the single-column `tree-sg-bound` answer, and tree
-scales above 8 use sorted TSV comparison.
+scales above 128 use sorted TSV comparison.
 
 ## Timed output policy
 
