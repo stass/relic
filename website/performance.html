@@ -24,12 +24,7 @@
 <main id="main">
 <h1>Performance</h1>
 <!-- benchmark-summary:start -->
-<p>Relic is faster than the competition on most workloads in our benchmark suite:
-it has the lowest median runtime on 22 of 31 workloads with one thread and
-26 of 31 with sixteen threads.
-The tests cover graph queries, program analysis and table processing.
-Results depend on the query: relic leads on many recursive workloads, while
-other engines are faster on some table-processing tasks.</p>
+<p>On AMD Ryzen Threadripper PRO 5995WX with 256 GiB RAM, relic records the lowest median wall time on 29 of 31 comparable workloads with 64 threads, and 25 of 31 with one thread, against completed rival runs. The suite compares compiled Souffle (with and without Magic Sets), interpreted Souffle, Nemo, SWI-Prolog, clingo, DuckDB and SQLite.</p>
 <!-- benchmark-summary:end -->
 <p id="chart-note">Speedup = fastest completed rival median ÷ relic median.
 Above 1× favors relic; below 1× favors the rival. The ratio axis is logarithmic.
@@ -44,7 +39,7 @@ contains the complete tables.</p></noscript>
 <svg id="serial-chart" role="img" aria-labelledby="serial-title" aria-describedby="chart-note"></svg>
 </figure>
 <figure class="benchmark-chart">
-<h2 id="parallel-title">16 threads</h2>
+<h2 id="parallel-title">64 threads</h2>
 <svg id="parallel-chart" role="img" aria-labelledby="parallel-title" aria-describedby="chart-note"></svg>
 </figure>
 <details>
@@ -56,7 +51,7 @@ contains the complete tables.</p></noscript>
 <tbody id="serial-timings"></tbody></table>
 </div>
 <div class="benchmark-table" tabindex="0" role="region" aria-label="Parallel benchmark timings">
-<table><caption>16 threads — scale-1 median wall times</caption>
+<table><caption>64 threads — scale-1 median wall times</caption>
 <thead><tr><th scope="col">Workload</th><th scope="col">relic</th><th scope="col">Fastest completed rival</th>
 <th scope="col">Rival median</th><th scope="col">Speedup</th><th scope="col">Unavailable measurements</th></tr></thead>
 <tbody id="parallel-timings"></tbody></table>
@@ -65,13 +60,7 @@ contains the complete tables.</p></noscript>
 <details>
 <summary>Benchmark setup</summary>
 <!-- benchmark-setup:start -->
-<p>Native command-line results: Apple M3 Max (12 performance + 4 efficiency cores),
-128 GiB RAM, macOS 27.0.1. Scale 1, ten repetitions per timing.
-Medians include startup, loading, evaluation and output; compilation is excluded.</p>
-<p class="benchmark-note">One-thread runs include the serial engines; sixteen-thread runs compare relic,
-three Soufflé modes and DuckDB. Soufflé and Nemo export files; the other engines write to discarded stdout.
-Comparisons use completed measurements; unavailable results remain statuses, not timings.
-These are native results, not Wasm measurements.</p>
+<p>Native command-line results: AMD Ryzen Threadripper PRO 5995WX, 64 physical cores, 128 hardware threads, 256 GiB RAM, FreeBSD 16.0-CURRENT. Scale 1, ten repetitions per timing. Medians include startup, loading, evaluation and complete answer serialization to discarded stdout for every engine; compilation is excluded. Serial runs include all engines; 64-thread runs compare relic, three Souffle modes and DuckDB. Unavailable measurements remain statuses. These are native CLI measurements.</p>
 <!-- benchmark-setup:end -->
 </details>
 <p><a href="https://github.com/stass/relic/blob/master/BENCHMARKS.md">Complete results, versions and measurement limits</a>

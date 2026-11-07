@@ -1110,6 +1110,16 @@ report the work an evaluation did, and the benchmark harness compares
 relic with other Datalog and tabled-Prolog engines on answers as well as
 time (see [design-bench.md](design-bench.md)).
 
+Benchmark publication validates a complete hardware cohort before replacing
+the canonical results. `bench/compare/environment.json` identifies its
+processor, build settings and parallel worker count;
+`bench/compare/results.tsv` holds the measured cells. Reports, README
+figures and the performance page are generated from that cohort, with
+serial and parallel profiles derived from its matrix. The chart generator
+reads the same environment file and rejects one that disagrees with the
+matrix's parallel profile, so a stale host label or thread count fails
+rather than being published.
+
 ## Source layout
 
 ```text

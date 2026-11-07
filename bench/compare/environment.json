@@ -1,4 +1,44 @@
 {
-  "processor": "Apple M3 Max",
-  "parallel_threads": 16
+  "processor": "AMD Ryzen Threadripper PRO 5995WX",
+  "physical_cores": 64,
+  "logical_cpus": 128,
+  "installed_memory_gib": 256,
+  "usable_memory_bytes": 274654773248,
+  "os": "FreeBSD 16.0-CURRENT",
+  "parallel_threads": 64,
+  "source_commit": "9a1ed59d7b59888f933b58ccfac87bf8716e798e",
+  "source_archive_sha256": "47ed8cbe6c5510b110aa61e43e790699dff350792c0574430d3497df12a97616",
+  "started_utc": "2026-11-05T02:59:15Z",
+  "output_policy": "stdout",
+  "verification_timeout_seconds": 300,
+  "relic_configure": "--disable-shared --enable-threads",
+  "relic_cflags": "-O3 -g",
+  "compiler": "FreeBSD clang 19.1.7",
+  "souffle_domain_bits": 32,
+  "cpu_placement": "OS scheduler, no explicit pinning",
+  "frequency_observation_mhz": 2700,
+  "thermal_observation": "CPU temperature sysctl unavailable",
+  "version_strings": {
+    "relic": "relic 1.0.0",
+    "swipl": "SWI-Prolog version 10.0.2",
+    "souffle": "souffle 2.5",
+    "clingo": "clingo version 5.8.0",
+    "nemo": "nemo-cli 0.10.1",
+    "duckdb": "duckdb v1.5.6",
+    "sqlite": "sqlite 3.54.1",
+    "hyperfine": "hyperfine 2.0.0",
+    "compiler": "FreeBSD clang version 19.1.7"
+  },
+  "optimization_policy": "No explicit whole-program LTO is enabled for any engine. Each engine retains its documented release-build defaults; optimization levels, CPU targeting and SWI-Prolog PGO are recorded rather than treated as identical compiler settings. Nemo retains Cargo release defaults, including any within-crate compiler optimization.",
+  "engine_builds": {
+    "relic": "`--disable-shared --enable-threads`, `CFLAGS=-O3 -g`; ThinLTO disabled; default CPU target",
+    "Souffle interpreter": "Release build, `-O3`, OpenMP, 32-bit domains, runtime assertions enabled; no LTO; default CPU target",
+    "Souffle generated programs": "`-std=c++17 -O3 -DRAM_DOMAIN_SIZE=32`; `-fopenmp` at 64 workers; no LTO; default CPU target",
+    "Nemo": "Locked Cargo release build with upstream release profile; no explicit cross-crate LTO",
+    "SWI-Prolog": "FreeBSD port PGO build with native CPU targeting; no explicit LTO",
+    "clingo": "FreeBSD port release defaults with native CPU targeting; no explicit LTO",
+    "DuckDB": "FreeBSD port release defaults with native CPU targeting; no explicit LTO; default memory allowance",
+    "SQLite": "`--disable-shared`, `CFLAGS=-O3 -g -march=native`; no LTO; upstream 3.54.1 source"
+  },
+  "sqlite_source_sha3_256": "b6ced585c750916b1052667239a12c25a7ff34e7f06e1e6e01ecb0427657d9c4"
 }

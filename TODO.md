@@ -5,6 +5,19 @@ what was done. Each item carries a severity and a component pointer.
 
 ## Engine
 
+**Parallel evaluation of `chain-closure` degrades with the chain length.**
+[High, component: parallel evaluation in `lib/`, workload
+`bench/compare/chain-closure`] On a 128-CPU FreeBSD host with 64 workers,
+relic takes 0.33 s at scale 1 (the same as serial), 56 s at scale 2 (serial
+1.5 s), and exceeds the 300 s limit at scales 4 and 8 (serial 7.3 s and
+32 s). DuckDB and Souffle finish scale 2 with 64 workers in 6-7.5 s, and
+slow down far less than relic does going from one worker to 64. Record the
+host's kernel and allocator configuration (a development kernel with lock
+and invariant checking makes contention look worse) with the measurement.
+Find the contention or partitioning cost that grows with the chain, gate the
+fix on a deterministic work or contention counter from `-X stats` rather
+than on wall time, and fix the cause.
+
 **Type tests read the type bits directly.** [Medium, component:
 `lib/exec.c`, `lib/rule.c`] Floats take tag 3 with the top bit of the index
 set, which works only if every type test goes through the accessors that
@@ -46,20 +59,35 @@ error, but undercharges acquisition until then.
 
 ## Benchmarks
 
+**The `tree-sg-all` workload has no answer at scale 8.** [Medium, component:
+`bench/datasets.sh`, workload `bench/compare/tree-sg-all`] The `small-tree`
+depth grows by one per scale doubling, and the answer by a factor of four
+per level. Scale 4 has 11 million rows (relic: 2.2 s); scale 8 has about
+2.9 billion, which exceeds the 300 s limit and takes tens of gigabytes of
+memory, so relic times out and every rival cell is `no-reference`. Cap the
+tree depth for scales above 4, or exempt the workload from them, so the
+largest scale still compares engines.
+
+**Include comparison inputs and build resources in source archives.**
+[Medium, component: `Makefile.am`]
+Distribute the workload programs and descriptors, shared Graspan programs,
+engine build instructions and patches alongside the harness. Keep downloaded
+datasets and build products out of the archive; the harness alone cannot
+reproduce the comparison from a release tarball.
+
 **Preserve the editorial README when publishing benchmark reports.**
 [Medium, component: `bench/compare/tools/render-mac-results.py`]
-The report publisher replaces the whole README Performance section with its
-own template, removing the curated table and chart embeds. Give generated
-results a bounded destination that preserves the surrounding prose and charts.
+The legacy renderer replaces the whole README Performance section with its
+own template, removing the curated prose and chart embeds, unlike
+`publish-results.py`, which rewrites only its marked blocks. Give it the same
+bounded destinations or retire it.
 
 **Refresh published comparisons with consistent output and host coverage.**
 [Medium, component: `bench/compare/`]
-The M3 Max composition check of the accepted changes together uses
-stdout for every timed engine; it does not replace the full
-[file-output tables](BENCHMARKS.md). When publishing a broader comparison,
-keep those cohorts separate, validate second-host coverage, and distinguish
-OS/compiler/engine-version differences from core-count effects. The selected
-performance-plan comparisons take precedence over a full publication sweep.
+The published cohort uses stdout for every timed engine. A file-output
+cohort must be kept separate from it. When adding a second host, validate its
+coverage and distinguish OS/compiler/engine-version differences from
+core-count effects.
 
 ## Testing and CI
 

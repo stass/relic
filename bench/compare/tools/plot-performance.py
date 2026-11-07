@@ -22,10 +22,13 @@ ENGINES = (
     ("souffle-interp", "Souffle interpreter", "#aa3377"),
     ("duckdb", "DuckDB", "#666666"),
 )
+# Each chart lists workloads that cover its theme and include cases where a
+# rival is at or ahead of relic; revisit the lists when a new cohort changes
+# which workloads those are.
 CHARTS = (
     ("recursive", "Recursive queries", (
-        "chain-closure", "graph-left", "grid-reach",
-        "tree-sg-bound", "tc-acyclic-bf", "tc-cyclic-bf",
+        "chain-closure", "graph-left", "tc-sparse-acyclic",
+        "tree-sg-all", "tc-acyclic-bf", "tc-cyclic-bf",
     )),
     ("analysis", "Analysis and table processing", (
         "andersen", "cspa", "cspa-httpd",
