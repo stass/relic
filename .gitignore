@@ -72,3 +72,4 @@
 # Release tarballs and the directories distcheck unpacks them into.
 /relic-*.tar.*
 /relic-*/
+__pycache__/

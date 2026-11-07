@@ -25,7 +25,7 @@ class PublicationTests(unittest.TestCase):
         self.metadata = {
             "processor": "Test CPU", "parallel_threads": 64,
             "physical_cores": 64, "logical_cpus": 128, "installed_memory_gib": 256,
-            "os": "Test OS", "source_commit": "a" * 40,
+            "os": "Test OS", "source_commit": "a" * 40, "started_utc": "2026-11-07T10:24:59Z",
             "output_policy": "stdout", "verification_timeout_seconds": 300,
             "version_strings": {key: "engine 1.0" for key in
                                 ("relic", "swipl", "souffle", "clingo", "nemo",
@@ -218,7 +218,7 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing cell diagnostic"):
             self.audit()
 
-    def test_publication_preserves_editorial_sections_and_uses_host_context(self):
+    def make_repository(self):
         root = self.record / "repo"
         (root / "website").mkdir(parents=True)
         readme = "Editorial introduction\n"
@@ -231,6 +231,10 @@ class PublicationTests(unittest.TestCase):
         for name in ("benchmark-summary", "benchmark-setup"):
             page += f"<!-- {name}:start -->\nold\n<!-- {name}:end -->\n"
         (root / "website/performance.html").write_text(page)
+        return root
+
+    def test_publication_preserves_editorial_sections_and_uses_host_context(self):
+        root = self.make_repository()
         before = self.fingerprint()
         summary, documents = publisher.publication(self.audit(), self.metadata, root)
         self.assertEqual(self.fingerprint(), before)
@@ -244,7 +248,73 @@ class PublicationTests(unittest.TestCase):
         self.assertIn("Whole-program LTO is disabled.", documents[root / "BENCHMARKS.md"])
         self.assertIn("| relic | -O3 -g, no LTO |", documents[root / "BENCHMARKS.md"])
         self.assertIn("discarded stdout for every engine", documents[root / "README.md"])
+        self.assertNotIn("earlier run", documents[root / "BENCHMARKS.md"])
+        self.assertNotIn("earlier run", documents[root / "README.md"])
 
+    def carry(self, rerun=("generated",), earlier_answer="d1", current_answer="d1"):
+        """Make the record carry every rival cell outside RERUN from an earlier cohort."""
+        earlier = copy.deepcopy(self.metadata)
+        earlier.update(source_commit="b" * 40, started_utc="2026-11-05T02:59:15Z")
+        earlier["version_strings"]["relic"] = "relic 0.9"
+        earlier["engine_builds"]["relic"] = "-O2"
+        self.metadata["cells_carried_from"] = {"environment": earlier, "rerun_workloads": list(rerun)}
+        for revision, digest in (("earlier", earlier_answer), ("current", current_answer)):
+            for threads in (1, 64):
+                path = self.record / f"carried-answers/{revision}/scale-1-threads-{threads}/external"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(digest + "\n")
+        return self.metadata["cells_carried_from"]
+
+    def test_carried_rival_cells_are_disclosed(self):
+        self.carry()
+        root = self.make_repository()
+        _, documents = publisher.publication(self.audit(), self.metadata, root)
+        report = documents[root / "BENCHMARKS.md"]
+        self.assertIn("Rival timings on every workload except `generated` come from an earlier run", report)
+        self.assertIn("started 2026-11-05T02:59:15Z at revision `" + "b" * 40 + "`", report)
+        self.assertIn("run started 2026-11-07T10:24:59Z", report)
+        self.assertIn("Rival timings outside `generated` come from an earlier run", documents[root / "README.md"])
+
+    def test_carried_rival_cells_require_the_same_environment(self):
+        for field, damage in (
+                ("processor", lambda e: e.update(processor="Other CPU")),
+                ("parallel_threads", lambda e: e.update(parallel_threads=32)),
+                ("installed_memory_gib", lambda e: e.pop("installed_memory_gib")),
+                ("new_condition", lambda e: e.update(new_condition="other")),
+                ("version_strings", lambda e: e["version_strings"].update(duckdb="duckdb 0.1")),
+                ("engine_builds", lambda e: e["engine_builds"].update(DuckDB="debug build")),
+                ("source_commit", lambda e: e.update(source_commit="a" * 40)),
+                ("source_commit", lambda e: e.update(source_commit="B" * 40)),
+                ("started_utc", lambda e: e.update(started_utc="2026-11-07T10:24:59Z")),
+                ("carried start time", lambda e: e.update(started_utc="2026-13-45T09:09:09Z"))):
+            with self.subTest(field=field):
+                damage(self.carry()["environment"])
+                with self.assertRaisesRegex(ValueError, f"invalid (carried-cell provenance: )?{field}$"):
+                    self.audit()
+        self.carry()["environment"]["version_strings"] = ["not", "a", "map"]
+        with self.assertRaisesRegex(ValueError, "maps must be objects"):
+            self.audit()
+
+    def test_carried_rival_cells_require_named_reruns_and_equal_answers(self):
+        for rerun in ((), ("generated", "generated"), ("unknown",), (["generated"],),
+                      ("generated", "external")):
+            with self.subTest(rerun=rerun):
+                self.carry(rerun=rerun)
+                with self.assertRaisesRegex(ValueError, "rerun_workloads$"):
+                    self.audit()
+        for answers in (("d1", "d2"), ("", "")):
+            with self.subTest(answers=answers):
+                self.carry(earlier_answer=answers[0], current_answer=answers[1])
+                with self.assertRaisesRegex(ValueError, "answers differ or are missing: scale-1-threads-1/external"):
+                    self.audit()
+        self.metadata["cells_carried_from"] = ["generated"]
+        with self.assertRaisesRegex(ValueError, "not an object$"):
+            self.audit()
+
+    def test_start_time_is_validated(self):
+        self.metadata["started_utc"] = "2026-11-07 10:24:59"
+        with self.assertRaisesRegex(ValueError, "invalid start time"):
+            self.audit()
 
 if __name__ == "__main__":
     unittest.main()

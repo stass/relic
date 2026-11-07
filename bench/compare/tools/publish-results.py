@@ -3,6 +3,7 @@
 
 import argparse
 import csv
+from datetime import datetime
 import html
 import json
 import math
@@ -94,6 +95,82 @@ def classify_failure(row, scale, threads, record, resolutions):
     return status
 
 
+def utc_time(text, what):
+    """The UTC time TEXT names, in the records' 2026-11-05T02:59:15Z form."""
+    if not isinstance(text, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", text):
+        raise ValueError(f"invalid {what}")
+    try:
+        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        raise ValueError(f"invalid {what}") from None
+
+
+# The environment fields a merged record and the cohort it carries cells
+# from may differ in: the run's identity.  Every other field must agree.
+RUN_IDENTITY = {"source_commit", "source_archive_sha256", "started_utc", "cells_carried_from"}
+
+
+def without_relic(entries):
+    """ENTRIES, a version or build map, without relic's own entry."""
+    if not isinstance(entries, dict):
+        raise ValueError("version and build maps must be objects")
+    return {k: v for k, v in entries.items() if k != "relic"}
+
+
+def check_carried(record, metadata, workloads, rows):
+    """Accept a record that carries rival cells from an earlier cohort.
+
+    A merged record reruns relic on every workload, and every engine on the
+    workloads `rerun_workloads` names, and keeps the earlier cohort's rival
+    cells elsewhere.  `environment` repeats that cohort's environment.json.
+    Its cells are comparable when it agrees with this record's in every field
+    but the run's identity and relic's own version and build.  Its rival
+    answers were checked against relic at its revision, so they stay checked
+    when relic answers the same at both revisions: carried-answers/earlier
+    and carried-answers/current hold, per scenario directory, a digest of
+    relic's normalized answer to each workload, and every carried rival
+    cell's scenario and workload needs two equal digests.
+    """
+    carried = metadata.get("cells_carried_from")
+    if carried is None:
+        return
+
+    def require(condition, field):
+        if not condition:
+            raise ValueError(f"invalid carried-cell provenance: {field}")
+
+    require(isinstance(carried, dict), "not an object")
+    earlier = carried.get("environment")
+    require(isinstance(earlier, dict), "environment")
+    for field in (earlier.keys() | metadata.keys()) - RUN_IDENTITY:
+        theirs, ours = earlier.get(field), metadata.get(field)
+        if field in ("version_strings", "engine_builds"):
+            theirs, ours = without_relic(theirs), without_relic(ours)
+        require(theirs == ours, field)
+    commit = earlier.get("source_commit")
+    require(isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit)
+            and commit != metadata["source_commit"], "source_commit")
+    require(utc_time(earlier.get("started_utc"), "carried start time")
+            < utc_time(metadata["started_utc"], "start time"), "started_utc")
+    rerun = carried.get("rerun_workloads")
+    require(isinstance(rerun, list) and rerun and all(isinstance(w, str) for w in rerun)
+            and len(set(rerun)) == len(rerun) and set(rerun) < workloads.keys(), "rerun_workloads")
+    for row in rows:
+        if row["engine"] == "relic" or row["workload"] in rerun or row["status"] != "ok":
+            continue
+        scenario = f"scale-{row['scale']}-threads-{row['threads']}/{row['workload']}"
+        digests = []
+        for revision in ("earlier", "current"):
+            path = record / "carried-answers" / revision / scenario
+            digests.append(path.read_text().strip() if path.is_file() else "")
+        require(digests[0] and digests[0] == digests[1], f"relic's answers differ or are missing: {scenario}")
+
+
+def rerun_workload_names(carried):
+    """The workloads every engine reran, as the disclosure names them."""
+    return " and ".join(f"`{w}`" for w in sorted(carried["rerun_workloads"]))
+
+
 def audit(record, metadata, workloads):
     """Require every scenario and cell before accepting any publication output."""
     parallel = metadata["parallel_threads"]
@@ -103,6 +180,7 @@ def audit(record, metadata, workloads):
         raise ValueError("unsupported output policy or verification timeout")
     if not re.fullmatch(r"[0-9a-f]{40}", metadata["source_commit"]):
         raise ValueError("invalid source revision")
+    utc_time(metadata["started_utc"], "start time")
     if not (record / "main-sweep-complete").exists() or list(record.glob("*.interrupted")):
         raise ValueError("incomplete or interrupted sweep")
     resolution_path = record / "investigated-failures.json"
@@ -173,6 +251,7 @@ def audit(record, metadata, workloads):
                 accepted.append(row)
     if resolutions:
         raise ValueError("unused capacity diagnosis")
+    check_carried(record, metadata, workloads, accepted)
     return accepted
 
 
@@ -265,6 +344,15 @@ def render_report(rows, metadata, overview):
                f"{metadata['logical_cpus']} hardware threads, {metadata['installed_memory_gib']} GiB installed RAM**.\n"
                f"OS: {metadata['os']}. Parallel runs request {parallel} workers; placement follows the OS scheduler.\n"
                f"Source revision: `{metadata['source_commit']}`.\n")
+    carried = metadata.get("cells_carried_from")
+    if carried is not None:
+        earlier = carried["environment"]
+        context += (f"\nRival timings on every workload except {rerun_workload_names(carried)} come from an "
+                    "earlier run on this host with the same engine versions, builds and conditions, started "
+                    f"{earlier['started_utc']} at revision `{earlier['source_commit']}`. For each of those "
+                    "timings relic's answer is the same set at both revisions, so the carried answer was "
+                    "checked against relic. All relic timings, and every engine's on the rerun workloads, "
+                    f"come from the run started {metadata['started_utc']} at the revision above.\n")
     method = ("Scale 1 uses ten repetitions and all 31 workloads, including three fixed Graspan datasets. "
               "Scales 2, 4 and 8 use three repetitions and the 28 generated workloads. "
               "Scaling follows each generator; the small tree of `tree-sg-all` has 1024 * scale - 1 nodes, "
@@ -349,6 +437,10 @@ def render_readme(rows, metadata, introduction, root):
     conditions = (f"These are scale-1 medians with {parallel} threads on {metadata['processor']} with "
                   f"{metadata['installed_memory_gib']} GiB RAM. Times include startup, loading, evaluation and "
                   "complete answer serialization to discarded stdout for every engine; compilation is excluded.")
+    carried = metadata.get("cells_carried_from")
+    if carried is not None:
+        conditions += (f" Rival timings outside {rerun_workload_names(carried)} come from an earlier run on the "
+                       "same host and engine builds; the full results give both runs.")
     readme = (root / "README.md").read_text()
     for name, replacement in (("benchmark-summary", introduction), ("benchmark-table", readme_table(rows, parallel)),
                               ("benchmark-conditions", conditions)):

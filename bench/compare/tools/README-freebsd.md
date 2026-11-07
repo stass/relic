@@ -189,7 +189,24 @@ generated-program compilation. Its `version_strings` object maps `relic`, `swipl
 `clingo`, `nemo`, `duckdb`, `sqlite`, `hyperfine` and `compiler` to the
 version text recorded in scenario headers. Only participating engines are
 required in a parallel header. Record source and executable hashes, build
-logs and initial/final machine context with the cohort.
+logs and initial/final machine context with the cohort. `started_utc` is the
+cohort's start, in the form `2026-11-05T02:59:15Z`.
+
+A record may rerun relic on every workload, and every engine on chosen
+workloads, and carry the other rival cells from an earlier cohort on the same
+host. Its optional `cells_carried_from` object then holds `environment`, the
+earlier cohort's `environment.json`, and `rerun_workloads`, the workloads
+every engine reran (some, not all). The two environments must agree in
+every field but `source_commit`, `source_archive_sha256`, `started_utc` and
+relic's entries in `version_strings` and `engine_builds`, and the earlier
+cohort must have started first. The record also keeps
+`carried-answers/earlier/` and `carried-answers/current/`: one directory per
+scenario (`scale-S-threads-T`), holding one file per workload, named for it,
+with a digest of relic's normalized answer (sorted and deduplicated, as the
+harness compares answers) at that revision. Every carried rival cell with a
+time needs two equal digests, so its answer, checked against relic at the
+earlier revision, equals relic's at this one. The full report and the README
+conditions state which timings are carried.
 
 Publication rejects uninvestigated failures. An optional
 `investigated-failures.json` array can classify clingo ID exhaustion or

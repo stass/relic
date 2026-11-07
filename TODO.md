@@ -15,6 +15,20 @@ below what a 64-worker barrier and task setup cost. Scale the sharing
 threshold, or the workers a round uses, with the round's expected work, and
 gate the fix on `-X stats` round counters rather than on wall time.
 
+**Choosing the dense collector by expected derivations slows some parallel
+closures.** [Medium, component: `dense_is_smaller()` and `ordinary_bytes()`
+in `lib/dense.c`, `item_estimate()` in `lib/round.c`] With 64 workers on the
+128-CPU FreeBSD host, the derivation-based byte model is 13 to 46% slower
+than the estimate it replaced, which assumed each worker gathers as many
+candidates as the target holds. `tc-cyclic` takes 226 ms instead of
+155 ms at scale 1, and 724 ms instead of 529 ms at scale 2. `tc-acyclic`
+and `tc-sparse-cyclic` are 14 to 17% slower at scales 1 and 2,
+`tc-nonlinear` 31% at scale 8, and `sg-cyclic` 13% at scale 8. Serial runs
+are unchanged, and `chain-closure`, `tree-sg-all` and `tc-sparse-acyclic`
+gain two- to twentyfold. Find which collector each slower round picks under
+both models (`-X stats`), and correct the model so the parallel closures
+regain their earlier collector without losing the gains.
+
 **Type tests read the type bits directly.** [Medium, component:
 `lib/exec.c`, `lib/rule.c`] Floats take tag 3 with the top bit of the index
 set, which works only if every type test goes through the accessors that

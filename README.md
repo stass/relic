@@ -379,7 +379,7 @@ builds `embed.c` against the installed library.
 ## Performance
 
 <!-- benchmark-summary:start -->
-On AMD Ryzen Threadripper PRO 5995WX with 256 GiB RAM, relic records the **lowest median wall time on 29 of 31 comparable workloads with 64 threads**, and **25 of 31 with one thread**, against completed rival runs. The suite compares compiled Souffle (with and without Magic Sets), interpreted Souffle, Nemo, SWI-Prolog, clingo, DuckDB and SQLite.
+On AMD Ryzen Threadripper PRO 5995WX with 256 GiB RAM, relic records the **lowest median wall time on 31 of 31 comparable workloads with 64 threads**, and **25 of 31 with one thread**, against completed rival runs. The suite compares compiled Souffle (with and without Magic Sets), interpreted Souffle, Nemo, SWI-Prolog, clingo, DuckDB and SQLite.
 <!-- benchmark-summary:end -->
 
 The charts show every scale-1 workload at the parallel thread count, grouped
@@ -410,41 +410,41 @@ that rival. relic runs Datalog directly, without a program compilation step.
 <!-- benchmark-table:start -->
 | Workload | relic | Souffle Magic | Souffle compiled | Fastest rival | relic speedup |
 | --- | ---: | ---: | ---: | --- | ---: |
-| `chain-right` | **2.98 ms** | 1.6 s | 1.55 s | DuckDB: 1.42 s | 477.9x |
-| `chain-left` | **2.69 ms** | 28 ms | 1.63 s | Souffle Magic: 28 ms | 10.4x |
-| `sg-acyclic-bf` | **2.62 ms** | 15.6 ms | 64.1 ms | Souffle Magic: 15.6 ms | 6.0x |
+| `chain-right` | **3.08 ms** | 1.6 s | 1.55 s | DuckDB: 1.42 s | 462.0x |
+| `chain-left` | **2.87 ms** | 28 ms | 1.63 s | Souffle Magic: 28 ms | 9.7x |
+| `sg-acyclic-bf` | **2.67 ms** | 15.6 ms | 64.1 ms | Souffle Magic: 15.6 ms | 5.9x |
+| `chain-closure` | **323 ms** | 2.17 s | 2.02 s | DuckDB: 1.87 s | 5.8x |
 | `tc-cyclic-bf` | **18.2 ms** | 107 ms | 103 ms | Souffle compiled: 103 ms | 5.7x |
-| `grid-reach` | **18.5 ms** | 106 ms | 100 ms | Souffle compiled: 100 ms | 5.4x |
-| `chain-closure` | **328 ms** | 2.15 s | 2.04 s | DuckDB: 1.72 s | 5.3x |
-| `tree-sg-bound` | **5.16 ms** | 18.2 ms | 417 ms | Souffle Magic: 18.2 ms | 3.5x |
-| `tc-acyclic-bf` | **12.9 ms** | 40.6 ms | 63 ms | Souffle Magic: 40.6 ms | 3.1x |
-| `tc-cyclic` | **158 ms** | 583 ms | 495 ms | Souffle compiled: 495 ms | 3.1x |
-| `tc-sparse-cyclic` | **157 ms** | 504 ms | 468 ms | Souffle compiled: 468 ms | 3.0x |
-| `dist-bounded` | **287 ms** | 997 ms | 942 ms | DuckDB: 841 ms | 2.9x |
-| `tc-cyclic-fb` | **13.1 ms** | 37.5 ms | 274 ms | Souffle Magic: 37.5 ms | 2.9x |
-| `tc-acyclic-fb` | **12.2 ms** | 33 ms | 118 ms | Souffle Magic: 33 ms | 2.7x |
-| `startup` | **731 us** | 2.01 ms | 1.9 ms | Souffle compiled: 1.9 ms | 2.6x |
-| `sg-cyclic` | **188 ms** | 583 ms | 476 ms | Souffle compiled: 476 ms | 2.5x |
-| `tc-acyclic` | **133 ms** | 283 ms | 247 ms | Souffle compiled: 247 ms | 1.9x |
-| `sg-acyclic` | **156 ms** | 291 ms | 244 ms | Souffle compiled: 244 ms | 1.6x |
-| `graph-reach` | **44.6 ms** | 67.3 ms | 66.3 ms | Souffle compiled: 66.3 ms | 1.5x |
-| `graph-left` | **49.3 ms** | 70.8 ms | 29.4 s | Souffle Magic: 70.8 ms | 1.4x |
-| `degree-count` | **59.8 ms** | 85.8 ms | 86.6 ms | Souffle Magic: 85.8 ms | 1.4x |
-| `tc-nonlinear` | **60 ms** | 107 ms | 81.1 ms | Souffle compiled: 81.1 ms | 1.4x |
+| `grid-reach` | **18 ms** | 106 ms | 100 ms | Souffle compiled: 100 ms | 5.6x |
+| `tree-sg-bound` | **5.07 ms** | 18.2 ms | 417 ms | Souffle Magic: 18.2 ms | 3.6x |
+| `tc-acyclic-bf` | **12.6 ms** | 40.6 ms | 63 ms | Souffle Magic: 40.6 ms | 3.2x |
+| `tc-cyclic-fb` | **12.9 ms** | 37.5 ms | 274 ms | Souffle Magic: 37.5 ms | 2.9x |
+| `dist-bounded` | **294 ms** | 997 ms | 942 ms | DuckDB: 841 ms | 2.9x |
+| `tc-acyclic-fb` | **12 ms** | 33 ms | 118 ms | Souffle Magic: 33 ms | 2.8x |
+| `tc-sparse-cyclic` | **183 ms** | 504 ms | 468 ms | Souffle compiled: 468 ms | 2.6x |
+| `sg-cyclic` | **189 ms** | 583 ms | 476 ms | Souffle compiled: 476 ms | 2.5x |
+| `tc-sparse-acyclic` | **35.1 ms** | 90.8 ms | 87.6 ms | Souffle compiled: 87.6 ms | 2.5x |
+| `startup` | **762 us** | 2.01 ms | 1.9 ms | Souffle compiled: 1.9 ms | 2.5x |
+| `tc-cyclic` | **226 ms** | 583 ms | 495 ms | Souffle compiled: 495 ms | 2.2x |
+| `tree-sg-all` | **36.8 ms** | 77.3 ms | 74.2 ms | Souffle compiled: 74.2 ms | 2.0x |
+| `sg-acyclic` | **146 ms** | 291 ms | 244 ms | Souffle compiled: 244 ms | 1.7x |
+| `tc-acyclic` | **155 ms** | 283 ms | 247 ms | Souffle compiled: 247 ms | 1.6x |
+| `graph-reach` | **43.4 ms** | 67.3 ms | 66.3 ms | Souffle compiled: 66.3 ms | 1.5x |
+| `tc-nonlinear` | **54.4 ms** | 107 ms | 81.1 ms | Souffle compiled: 81.1 ms | 1.5x |
+| `graph-left` | **47.6 ms** | 70.8 ms | 29.4 s | Souffle Magic: 70.8 ms | 1.5x |
+| `degree-count` | **58.7 ms** | 85.8 ms | 86.6 ms | Souffle Magic: 85.8 ms | 1.5x |
+| `cspa` | **97.5 ms** | 11.9 s | 117 ms | Souffle compiled: 117 ms | 1.2x |
 | `cspa-postgresql` | **24.6 s** | timeout | 29.3 s | Souffle compiled: 29.3 s | 1.2x |
-| `files-grouped` | **75.3 ms** | 199 ms | 167 ms | DuckDB: 87.6 ms | 1.2x |
-| `cspa` | **102 ms** | 11.9 s | 117 ms | Souffle compiled: 117 ms | 1.1x |
-| `tasks-ready` | **65.7 ms** | 76.9 ms | 74.2 ms | Souffle compiled: 74.2 ms | 1.1x |
-| `cspa-httpd` | **21.4 s** | timeout | 23.9 s | Souffle compiled: 23.9 s | 1.1x |
-| `facts-join` | **106 ms** | 220 ms | 218 ms | DuckDB: 116 ms | 1.1x |
-| `andersen` | **85.6 ms** | timeout | 93.3 ms | Souffle compiled: 93.3 ms | 1.1x |
-| `cspa-linux` | **8.42 s** | timeout | 8.97 s | Souffle compiled: 8.97 s | 1.1x |
-| `tc-sparse-acyclic` | 90 ms | 90.8 ms | 87.6 ms | Souffle compiled: 87.6 ms | 1.0x |
-| `tree-sg-all` | 75.5 ms | 77.3 ms | 71.2 ms | Souffle compiled: 71.2 ms | 0.9x |
+| `files-grouped` | **74.1 ms** | 199 ms | 167 ms | DuckDB: 87.6 ms | 1.2x |
+| `tasks-ready` | **65.6 ms** | 76.9 ms | 74.2 ms | Souffle compiled: 74.2 ms | 1.1x |
+| `facts-join` | **104 ms** | 220 ms | 218 ms | DuckDB: 116 ms | 1.1x |
+| `cspa-httpd` | **21.3 s** | timeout | 23.9 s | Souffle compiled: 23.9 s | 1.1x |
+| `cspa-linux` | **8.28 s** | timeout | 8.97 s | Souffle compiled: 8.97 s | 1.1x |
+| `andersen` | **87.5 ms** | timeout | 93.3 ms | Souffle compiled: 93.3 ms | 1.1x |
 <!-- benchmark-table:end -->
 
 <!-- benchmark-conditions:start -->
-These are scale-1 medians with 64 threads on AMD Ryzen Threadripper PRO 5995WX with 256 GiB RAM. Times include startup, loading, evaluation and complete answer serialization to discarded stdout for every engine; compilation is excluded.
+These are scale-1 medians with 64 threads on AMD Ryzen Threadripper PRO 5995WX with 256 GiB RAM. Times include startup, loading, evaluation and complete answer serialization to discarded stdout for every engine; compilation is excluded. Rival timings outside `chain-closure` and `tree-sg-all` come from an earlier run on the same host and engine builds; the full results give both runs.
 <!-- benchmark-conditions:end -->
 
 See the [full results](BENCHMARKS.md) for all workloads, timing spread and
