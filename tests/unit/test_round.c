@@ -66,6 +66,7 @@
 #define	SCENARIO_COMPACT	"a merge resolves each local value once"
 #define	SCENARIO_DRIVER		"a lookup plan keeps its indexed access"
 #define	SCENARIO_DENSE		"assigned heads retain expression scratch"
+#define	SCENARIO_DENSE_SMALL	"small rounds over a large domain stay ordinary"
 #define	SCENARIO_DELTA_DRIVER	"whole delta lookup plans agree with serial"
 
 /* Room for a generated program and for a context's diagnostics. */
@@ -80,6 +81,9 @@
  */
 #define	GRAPH_NODES		40
 #define	CHAIN_LENGTH		150
+
+/* The nodes of the chain whose closure's rounds are small beside its grid. */
+#define	DENSE_CHAIN_NODES	300
 #define	LIMIT_STEPS		60
 
 /*
@@ -195,6 +199,7 @@ static size_t	 compact_values_held(const relic_t *ctx);
 static void	 compacted_rounds_agree(size_t threads, size_t max_memory);
 static void	 computing_rounds_merge(size_t threads);
 static void	 dense_rounds_keep_expression_scratch(size_t threads);
+static void	 small_rounds_keep_the_ordinary_collector(size_t threads);
 static void	 pending_values_resolve_once(void);
 static void	 errors_fail_as_serially(size_t threads);
 static void	 sums_overflow_as_serially(size_t threads);
@@ -2096,6 +2101,53 @@ dense_rounds_keep_expression_scratch(size_t threads)
 	relic_destroy(deferred);
 }
 
+/*
+ * A chain's closure over DENSE_CHAIN_NODES nodes derives at most that many
+ * tuples a round, while its grid has their square in cells and its target
+ * soon holds many times a round's derivations: every round is expected to
+ * derive far fewer tuples than a dense collector's rank array has cells to
+ * fill and scan, so none may choose it.
+ */
+static void
+small_rounds_keep_the_ordinary_collector(size_t threads)
+{
+	diagnostics_t serial_diagnostics, deferred_diagnostics;
+	relic_t *serial, *deferred;
+	char what[64];
+	unsigned int i;
+	int serial_status, deferred_status;
+
+	failing.length = 0;
+	failing.bytes[0] = '\0';
+	for (i = 0; i < DENSE_CHAIN_NODES; i++)
+		appendf(&failing, "edge(%u, %u).\n", i, i + 1);
+	appendf(&failing,
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n");
+	snprintf(what, sizeof(what), "a chain on %zu thread(s)", threads);
+	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
+	deferred = context_for(failing.bytes,
+	    RELIC_UNSTABLE_PARALLEL_ALWAYS, threads, 0, 0,
+	    &deferred_diagnostics);
+	if (serial != NULL && deferred != NULL) {
+		serial_status = relic_materialize(serial);
+		deferred_status = relic_materialize(deferred);
+		checkf(serial_status == 0 && deferred_status == 0,
+		    SCENARIO_DENSE_SMALL, "%s: both materialize", what);
+		checkf(deferred->pool != NULL &&
+		    deferred->pool->merged_rounds > 0, SCENARIO_DENSE_SMALL,
+		    "%s: the rounds are shared", what);
+		checkf(deferred->pool != NULL &&
+		    deferred->pool->dense_rounds == 0, SCENARIO_DENSE_SMALL,
+		    "%s: no round opens a dense collector (%ju did)", what,
+		    deferred->pool != NULL ?
+		    (uintmax_t)deferred->pool->dense_rounds : 0);
+		contexts_agree(SCENARIO_DENSE_SMALL, what, serial, deferred);
+	}
+	relic_destroy(serial);
+	relic_destroy(deferred);
+}
+
 int
 main(void)
 {
@@ -2122,6 +2174,7 @@ main(void)
 		notes_come_as_serially(threads);
 		computing_rounds_merge(threads);
 		dense_rounds_keep_expression_scratch(threads);
+		small_rounds_keep_the_ordinary_collector(threads);
 		errors_fail_as_serially(threads);
 		sums_overflow_as_serially(threads);
 		strings_rounds_merge(threads);

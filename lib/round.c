@@ -87,6 +87,16 @@
 typedef struct relic_round_expectation relic_round_expectation_t;
 
 /*
+ * What a round's estimates count from its plans' histories: the work they
+ * do, the tuples read and derived, which decides whether a round is
+ * shared, or the tuples derived alone, which chooses its collector.
+ */
+enum round_count {
+	ROUND_WORK,
+	ROUND_DERIVATIONS
+};
+
+/*
  * What a round's workers are expected to gather in all: `candidates`, and
  * `words`, their columns.
  */
@@ -103,7 +113,7 @@ static int	 cut_tasks(relic_pool_t *pool, const relic_round_t *round,
 		    bool finest);
 static void	 forget_worker_counters(relic_pool_t *pool);
 static uint64_t	 item_estimate(const relic_round_t *round,
-		    const relic_round_item_t *item);
+		    const relic_round_item_t *item, enum round_count count);
 static bool	 item_is_cut(const relic_round_item_t *item);
 static size_t	 item_pieces(const relic_pool_t *pool,
 		    const relic_round_t *round, const relic_round_item_t *item,
@@ -126,12 +136,12 @@ static int	 reserve_candidates(relic_t *ctx, relic_pool_t *pool,
 		    const relic_round_t *round);
 static relic_round_expectation_t round_expectation(
 		    const relic_round_t *round);
-static bool	 round_is_worth_sharing(const relic_t *ctx,
-		    const relic_round_t *round);
 static void	 round_needs(const relic_round_t *round, size_t *op_roomp,
 		    uint16_t *arity_roomp);
 static bool	 round_reads_no_target(const relic_round_t *round);
-static uint64_t	 scaled_work(uint64_t work, uint64_t range_now,
+static uint64_t	 round_estimate(const relic_round_t *round,
+		    enum round_count count);
+static uint64_t	 scaled_count(uint64_t count, uint64_t range_now,
 		    uint64_t range_then);
 static void	 take_worker_counters(relic_pool_t *pool,
 		    relic_counters_t *counters);
@@ -150,7 +160,10 @@ static size_t	 worker_share(uint64_t expected, size_t workers,
  * pool, however little it holds and however few workers the pool has, and
  * cut as finely as the pool allows, so that small programs exercise what
  * large ones do.  Otherwise a round is shared only when the context has
- * threads to share it with and it is expected to repay them.
+ * threads to share it with and its expected work, RELIC_PARALLEL_MIN_WORK
+ * or more, repays them.  Its expected derivations, the candidates it
+ * offers its collector, decide whether that is the dense collector
+ * (relic_dense_open()).
  *
  * An interrupt observed before the merge declines the round for its serial
  * run to report.  An interrupt raised while reporting a merged round's
@@ -178,7 +191,10 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 
 	bzero(&dense, sizeof(dense));
 	always = (ctx->config.flags & RELIC_UNSTABLE_PARALLEL_ALWAYS) != 0;
-	if (!always && !round_is_worth_sharing(ctx, round))
+	if (!always && ctx->config.threads < 2)
+		return (RELIC_ROUND_DECLINED);
+	if (!always &&
+	    round_estimate(round, ROUND_WORK) < RELIC_PARALLEL_MIN_WORK)
 		return (RELIC_ROUND_DECLINED);
 	if (!round_reads_no_target(round))
 		return (RELIC_ROUND_DECLINED);
@@ -203,7 +219,8 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 	}
 	job_begin(&job, ctx, pool, round);
 	outcome = RELIC_ROUND_DECLINED;
-	collector = relic_dense_open(&dense, pool, &job);
+	collector = relic_dense_open(&dense, pool, &job,
+	    round_estimate(round, ROUND_DERIVATIONS));
 	if (collector < 0 ||
 	    (collector == 0 && reserve_candidates(ctx, pool, round) != 0)) {
 		decline_round(ctx, pool);
@@ -260,10 +277,11 @@ relic_round_first_call(const relic_round_t *round)
 
 void
 relic_round_record(const relic_round_t *round, relic_round_item_t *item,
-    uint64_t work, uint64_t inserted)
+    uint64_t work, uint64_t derived, uint64_t inserted)
 {
 	if (item->history != NULL) {
 		item->history->work = work;
+		item->history->derived = derived;
 		item->history->range = item_range(round, item);
 		item->history->ran = true;
 	}
@@ -274,73 +292,71 @@ relic_round_record(const relic_round_t *round, relic_round_item_t *item,
 }
 
 /*
- * Whether a round is worth sharing: the context has threads to share it
- * with, and the round is expected to do enough work to repay them.  The
- * work summed so far stays below the threshold, so comparing each estimate
- * with what remains of it cannot overflow.
+ * The `count` a round is expected to reach: the sum of its items'
+ * estimates, or UINT64_MAX when that is more than a uint64_t holds.
  */
-static bool
-round_is_worth_sharing(const relic_t *ctx, const relic_round_t *round)
+static uint64_t
+round_estimate(const relic_round_t *round, enum round_count count)
 {
 	uint64_t estimate;
-	uint64_t work;
+	uint64_t sum;
 	size_t i;
 
-	if (ctx->config.threads < 2)
-		return (false);
-
-	work = 0;
+	sum = 0;
 	for (i = 0; i < round->item_count; i++) {
-		estimate = item_estimate(round, &round->items[i]);
-		if (estimate >= RELIC_PARALLEL_MIN_WORK - work)
-			return (true);
-		work += estimate;
+		estimate = item_estimate(round, &round->items[i], count);
+		if (estimate > UINT64_MAX - sum)
+			return (UINT64_MAX);
+		sum += estimate;
 	}
 
-	return (false);
+	return (sum);
 }
 
 /*
- * The work an item is expected to do: what it did the last time it ran,
- * scaled by how its first scan's view has grown or shrunk since, or the
- * view itself for an item that has not run or keeps no history.  A
- * recursive component's rounds change size gradually, so the round before
- * predicts the next well enough for a threshold whose only cost is a
- * missed chance or a barrier paid for nothing.  An item whose view was
- * empty last time did work that no tuple of it accounts for -- the rest of
- * its plan found nothing to read -- so there is nothing to scale, and it
- * is expected to do that much again and to read its view now.
+ * The `count` an item is expected to reach: what it reached the last time
+ * it ran, scaled by how its first scan's view has grown or shrunk since, or
+ * the view itself for an item that has not run or keeps no history, which
+ * reads its view and is guessed to derive about one tuple per tuple read.
+ * A recursive component's rounds change size gradually, so the round
+ * before predicts the next well enough for a choice whose only cost is a
+ * missed chance or time paid for nothing.  An item whose view was empty
+ * last time reached a count that no tuple of it accounts for -- the rest of
+ * its plan found nothing to read -- so there is nothing to scale, and it is
+ * expected to reach that much again and, as an item without history, its
+ * view's size more.
  */
 static uint64_t
-item_estimate(const relic_round_t *round, const relic_round_item_t *item)
+item_estimate(const relic_round_t *round, const relic_round_item_t *item,
+    enum round_count count)
 {
 	const relic_plan_history_t *history;
-	uint64_t range;
+	uint64_t range, then;
 
 	range = item_range(round, item);
 	history = item->history;
 	if (history == NULL || !history->ran)
 		return (range);
+	then = count == ROUND_DERIVATIONS ? history->derived : history->work;
 	if (history->range == 0)
-		return (history->work > UINT64_MAX - range ? UINT64_MAX :
-		    history->work + range);
+		return (then > UINT64_MAX - range ? UINT64_MAX : then + range);
 
-	return (scaled_work(history->work, range, history->range));
+	return (scaled_count(then, range, history->range));
 }
 
 /*
- * `work` times `range_now` over `range_then`, which is not zero, or
+ * `count` times `range_now` over `range_then`, which is not zero, or
  * UINT64_MAX when that is more than a uint64_t holds.  A range is at most
  * a relation's tuples, below 2^32, so the remainder's product fits.
  */
 static uint64_t
-scaled_work(uint64_t work, uint64_t range_now, uint64_t range_then)
+scaled_count(uint64_t count, uint64_t range_now, uint64_t range_then)
 {
 	uint64_t whole;
 	uint64_t part;
 
-	whole = work / range_then;
-	part = work % range_then * range_now / range_then;
+	whole = count / range_then;
+	part = count % range_then * range_now / range_then;
 	if (whole != 0 && range_now > (UINT64_MAX - part) / whole)
 		return (UINT64_MAX);
 
@@ -382,30 +398,34 @@ job_begin(relic_round_job_t *job, relic_t *ctx, relic_pool_t *pool,
 }
 
 /*
- * Record in each item's history the work its tasks did and the tuples they
- * inserted, which the merge has made the item's turn.  An item's tasks are
- * consecutive.
+ * Record in each item's history the work its tasks did, the tuples they
+ * derived and the tuples they inserted, which the merge has made the item's
+ * turn.  An item's tasks are consecutive.
  */
 static void
 record_task_work(const relic_pool_t *pool, relic_round_t *round)
 {
 	const relic_round_task_t *task;
+	uint64_t derived;
 	uint64_t inserted;
 	uint64_t work;
 	size_t i;
 
 	work = 0;
+	derived = 0;
 	inserted = 0;
 	for (i = 0; i < pool->task_count; i++) {
 		task = &pool->tasks[i];
 		work += task->work;
+		derived += task->derived;
 		inserted += task->inserted;
 
 		if (i + 1 == pool->task_count ||
 		    pool->tasks[i + 1].item != task->item) {
 			relic_round_record(round, &round->items[task->item],
-			    work, inserted);
+			    work, derived, inserted);
 			work = 0;
+			derived = 0;
 			inserted = 0;
 		}
 	}
@@ -737,7 +757,7 @@ item_pieces(const relic_pool_t *pool, const relic_round_t *round,
 	if (finest)
 		return (most);
 
-	wanted = item_estimate(round, item) / RELIC_CHUNK_WORK;
+	wanted = item_estimate(round, item, ROUND_WORK) / RELIC_CHUNK_WORK;
 	if (wanted < 1)
 		return (1);
 	if (wanted > most)

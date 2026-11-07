@@ -19,6 +19,15 @@
 #define	OLD_ROWS	(NODES * NODES / 2)
 #define	NEW_ROWS	132u
 
+/*
+ * The derivations of a round expected to derive every cell of the square,
+ * which the dense layout serves, and of one expected to derive a single
+ * row, which the ordinary collector serves more cheaply than a rank per
+ * cell.
+ */
+#define	SQUARE		(NODES * NODES)
+#define	ROW		NODES
+
 typedef struct dense_fixture dense_fixture_t;
 struct dense_fixture {
 	relic_t			*ctx;
@@ -42,7 +51,9 @@ static void	 expected_tuple(const dense_fixture_t *fixture, size_t position,
 		    relic_dom_t *tuple);
 static void	 fixture_close(dense_fixture_t *fixture);
 static bool	 fixture_open(dense_fixture_t *fixture, size_t workers);
+static int	 open_square(dense_fixture_t *fixture);
 static void	 malformed_and_ineligible(void);
+static void	 a_small_round_keeps_the_ordinary_collector(void);
 static void	 an_old_only_round_needs_no_order_array(void);
 static void	 staging_refusal_releases_room(void);
 static void	 several_tasks_win(void);
@@ -116,6 +127,14 @@ fixture_open(dense_fixture_t *fixture, size_t workers)
 	return (true);
 }
 
+/* Open the collector for a round expected to derive the whole square. */
+static int
+open_square(dense_fixture_t *fixture)
+{
+	return (relic_dense_open(&fixture->dense, fixture->pool, &fixture->job,
+	    SQUARE));
+}
+
 static void
 fixture_close(dense_fixture_t *fixture)
 {
@@ -179,7 +198,7 @@ ordered_publication(bool parallel)
 	}
 	if (!parallel)
 		fixture.pool->task_count = fixture.pool->worker_count;
-	check(relic_dense_open(&fixture.dense, fixture.pool, &fixture.job) == 1,
+	check(open_square(&fixture) == 1,
 	    SCENARIO, "the real byte choice selects dense collection");
 	if (fixture.dense.ranks == NULL) {
 		fixture_close(&fixture);
@@ -254,7 +273,7 @@ several_tasks_win(void)
 		return;
 	}
 	fixture.pool->task_count = 5;
-	check(relic_dense_open(&fixture.dense, fixture.pool, &fixture.job) == 1,
+	check(open_square(&fixture) == 1,
 	    SCENARIO, "the multi-owner round selects dense collection");
 	if (fixture.dense.ranks == NULL) {
 		fixture_close(&fixture);
@@ -308,26 +327,26 @@ malformed_and_ineligible(void)
 		return;
 	}
 	fixture.terms[0].action = RELIC_PLAN_TEXT;
-	check(relic_dense_open(&fixture.dense, fixture.pool, &fixture.job) == 0,
+	check(open_square(&fixture) == 0,
 	    SCENARIO, "a computed head keeps the general collector");
 	fixture.terms[0].action = RELIC_PLAN_BOUND;
 	saved = fixture.pool->task_count;
 	fixture.pool->task_count = UINT32_MAX;
-	check(relic_dense_open(&fixture.dense, fixture.pool, &fixture.job) == 0,
+	check(open_square(&fixture) == 0,
 	    SCENARIO, "task rank overflow is declined before allocation");
 	fixture.pool->task_count = saved;
 	integers = fixture.ctx->values.integer_count;
 	symbols = fixture.ctx->symbols.count;
 	fixture.ctx->values.integer_count = 65536;
 	fixture.ctx->symbols.count = 0;
-	check(relic_dense_open(&fixture.dense, fixture.pool, &fixture.job) == 0,
+	check(open_square(&fixture) == 0,
 	    SCENARIO, "a rectangle beyond 32-bit positions is declined");
 	fixture.ctx->values.integer_count = 0;
-	check(relic_dense_open(&fixture.dense, fixture.pool, &fixture.job) == 0,
+	check(open_square(&fixture) == 0,
 	    SCENARIO, "an empty domain is declined before allocation");
 	fixture.ctx->values.integer_count = integers;
 	fixture.ctx->symbols.count = symbols;
-	check(relic_dense_open(&fixture.dense, fixture.pool, &fixture.job) == 1,
+	check(open_square(&fixture) == 1,
 	    SCENARIO, "valid dimensions are admitted");
 	if (fixture.dense.ranks != NULL) {
 		expected_tuple(&fixture, 0, tuple);
@@ -347,6 +366,41 @@ malformed_and_ineligible(void)
 	fixture_close(&fixture);
 }
 
+/*
+ * However much the target holds, the derivations a round is expected to
+ * make decide: a round deriving one row of the square would pay for a rank
+ * per cell of it, and one whose estimate saturates is the dense layout's.
+ */
+static void
+a_small_round_keeps_the_ordinary_collector(void)
+{
+	static const uint64_t ordinary[] = { 0, ROW };
+	dense_fixture_t fixture;
+	relic_account_t *account;
+	size_t i;
+
+	if (!fixture_open(&fixture, 4)) {
+		check(false, SCENARIO, "the fixture is built");
+		fixture_close(&fixture);
+		return;
+	}
+	account = &fixture.ctx->account;
+	for (i = 0; i < sizeof(ordinary) / sizeof(ordinary[0]); i++)
+		check(relic_dense_open(&fixture.dense, fixture.pool,
+		    &fixture.job, ordinary[i]) == 0 &&
+		    fixture.dense.ranks == NULL &&
+		    relic_atomic_size_load(&account->round_bytes) == 0,
+		    SCENARIO, "a round expected to derive at most a row "
+		    "allocates no ranks");
+	check(relic_dense_open(&fixture.dense, fixture.pool, &fixture.job,
+	    UINT64_MAX) == 1, SCENARIO,
+	    "a saturated ordinary estimate selects the dense layout");
+	relic_dense_close(&fixture.dense);
+	check(open_square(&fixture) == 1, SCENARIO,
+	    "the same round expected to derive the square selects it");
+	fixture_close(&fixture);
+}
+
 static void
 refusal_releases_room(bool interrupt, bool during_order)
 {
@@ -361,7 +415,7 @@ refusal_releases_room(bool interrupt, bool during_order)
 		return;
 	}
 	if (during_order) {
-		status = relic_dense_open(&fixture.dense, fixture.pool, &fixture.job);
+		status = open_square(&fixture);
 		check(status == 1, SCENARIO, "collection is admitted before refusal");
 		if (status != 1) {
 			fixture_close(&fixture);
@@ -380,7 +434,7 @@ refusal_releases_room(bool interrupt, bool during_order)
 		    relic_atomic_size_load(&account->round_bytes) + headroom;
 	}
 	status = during_order ? relic_dense_order(&fixture.dense) :
-	    relic_dense_open(&fixture.dense, fixture.pool, &fixture.job);
+	    open_square(&fixture);
 	check(status == -1, SCENARIO, "private refusal is returned to the caller");
 	check(relic_relation_count(fixture.target) == OLD_ROWS, SCENARIO,
 	    "refusal publishes no tuple");
@@ -402,7 +456,7 @@ an_old_only_round_needs_no_order_array(void)
 		return;
 	}
 	fixture.job.admissible = 0;
-	check(relic_dense_open(&fixture.dense, fixture.pool, &fixture.job) == 1,
+	check(open_square(&fixture) == 1,
 	    SCENARIO, "an old-only round selects dense collection");
 	if (fixture.dense.ranks != NULL) {
 		tuple[0] = fixture.values[0];
@@ -439,7 +493,7 @@ staging_refusal_releases_room(void)
 		fixture_close(&fixture);
 		return;
 	}
-	check(relic_dense_open(&fixture.dense, fixture.pool, &fixture.job) == 1,
+	check(open_square(&fixture) == 1,
 	    SCENARIO, "staging refusal starts with an admitted collector");
 	if (fixture.dense.ranks == NULL) {
 		fixture_close(&fixture);
@@ -476,6 +530,7 @@ main(void)
 		an_old_only_round_needs_no_order_array();
 		staging_refusal_releases_room();
 		malformed_and_ineligible();
+		a_small_round_keeps_the_ordinary_collector();
 		refusal_releases_room(false, false);
 		refusal_releases_room(false, true);
 		refusal_releases_room(true, false);

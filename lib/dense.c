@@ -51,11 +51,12 @@ static size_t	 boundary(const relic_dense_t *dense, size_t count,
 		    size_t part);
 static bool	 count_task_insertions(relic_dense_t *dense);
 static size_t	 dense_bytes(const relic_dense_t *dense, size_t room);
-static bool	 dense_is_smaller(const relic_dense_t *dense, size_t held);
+static bool	 dense_is_smaller(const relic_dense_t *dense, size_t held,
+		    uint64_t derivations);
 static void	 initialize_part(void *argument, size_t part, size_t worker);
 static void	 list_part(void *argument, size_t part, size_t worker);
-static size_t	 ordinary_bytes(const relic_dense_t *dense, size_t held,
-		    size_t copies);
+static size_t	 ordinary_bytes(const relic_dense_t *dense, size_t share,
+		    size_t candidates);
 static size_t	 ordinary_candidate_bytes(void);
 static void	 radix_part(void *argument, size_t part, size_t worker);
 static bool	 radix_sort(relic_dense_t *dense);
@@ -165,21 +166,22 @@ ordinary_candidate_bytes(void)
 }
 
 /*
- * The ordinary collector's bytes when each worker gathers `held`
- * candidates, `copies` in all: the candidates themselves, each worker's
+ * The ordinary collector's bytes when each worker gathers `share`
+ * candidates, `candidates` in all: the candidates themselves, each worker's
  * screen over its own, and one table over all of them standing for the
  * merge's stripe tables, whose actual distribution is not known yet.
  */
 static size_t
-ordinary_bytes(const relic_dense_t *dense, size_t held, size_t copies)
+ordinary_bytes(const relic_dense_t *dense, size_t share, size_t candidates)
 {
 	size_t bytes;
 
-	bytes = relic_saturating_product(copies, ordinary_candidate_bytes());
+	bytes = relic_saturating_product(candidates,
+	    ordinary_candidate_bytes());
 	bytes = relic_saturating_sum(bytes, relic_saturating_product(
-	    dense->parts, relic_idtab_bytes_for(true, held)));
+	    dense->parts, relic_idtab_bytes_for(true, share)));
 	bytes = relic_saturating_sum(bytes,
-	    relic_idtab_bytes_for(true, copies));
+	    relic_idtab_bytes_for(true, candidates));
 	return (bytes);
 }
 
@@ -203,36 +205,44 @@ dense_bytes(const relic_dense_t *dense, size_t room)
 }
 
 /*
- * Whether the dense layout is expected to be the smaller.  The model has
- * each worker gather as many candidates as the target holds, `held`; the
- * new tuples among them are at most the grid's free cells.  This is a
- * heuristic: the arrays are charged at their actual sizes either way, and a
- * poor guess costs time or memory, never a different result.  An estimate
- * that saturates declines the dense layout.
+ * Whether the dense layout is expected to be the smaller for a round
+ * expected to make `derivations` over a target holding `held` tuples: the
+ * workers gather one candidate per derivation, an even share each, and the
+ * new tuples among them are at most the grid's free cells.  The dense
+ * arrays are filled and scanned every round, so the comparison bounds time
+ * as well as memory (specs/design-dense-rounds.md).  This is a heuristic:
+ * the arrays are charged at their actual sizes either way, and a poor guess
+ * costs time or memory, never a different result.  A dense estimate that
+ * saturates declines the dense layout; an ordinary one that saturates
+ * leaves the dense layout the smaller.
  */
 static bool
-dense_is_smaller(const relic_dense_t *dense, size_t held)
+dense_is_smaller(const relic_dense_t *dense, size_t held,
+    uint64_t derivations)
 {
-	size_t copies, dense_estimate, free_cells, ordinary_estimate, room;
+	size_t candidates, dense_estimate, free_cells, ordinary_estimate;
+	size_t room, share;
 
-	copies = relic_saturating_product(dense->parts, held);
+	candidates = derivations > SIZE_MAX ? SIZE_MAX : (size_t)derivations;
+	share = candidates / dense->parts + (candidates % dense->parts != 0);
 	free_cells = dense->grid.cells - held;
-	room = free_cells < copies ? free_cells : copies;
+	room = free_cells < candidates ? free_cells : candidates;
 	dense_estimate = dense_bytes(dense, room);
-	ordinary_estimate = ordinary_bytes(dense, held, copies);
-	if (dense_estimate == SIZE_MAX || ordinary_estimate == SIZE_MAX)
+	ordinary_estimate = ordinary_bytes(dense, share, candidates);
+	if (dense_estimate == SIZE_MAX)
 		return (false);
 	return (dense_estimate < ordinary_estimate);
 }
 
 /*
  * Select the dense collector for a round of the right shape whose grid a
- * rank array can cover and which the byte model favours, then initialize
- * every rank and seed the cells of the tuples the target already holds.
+ * rank array can cover and which the byte model favours for the round's
+ * expected `derivations`, then initialize every rank and seed the cells of
+ * the tuples the target already holds.
  */
 int
 relic_dense_open(relic_dense_t *dense, relic_pool_t *pool,
-    relic_round_job_t *job)
+    relic_round_job_t *job, uint64_t derivations)
 {
 	size_t held, i;
 
@@ -249,7 +259,8 @@ relic_dense_open(relic_dense_t *dense, relic_pool_t *pool,
 	if (dense->grid.cells == 0 || dense->grid.cells > UINT32_MAX)
 		return (0);
 	held = relic_relation_count(target_relation(dense));
-	if (held > dense->grid.cells || !dense_is_smaller(dense, held))
+	if (held > dense->grid.cells || !dense_is_smaller(dense, held,
+	    derivations))
 		return (0);
 
 	dense->ranks = allocate(dense, relic_saturating_product(

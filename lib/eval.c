@@ -1339,6 +1339,7 @@ run_item(relic_evaluation_t *eval, const relic_round_t *round,
     relic_round_item_t *item)
 {
 	relic_emit_target_t target;
+	uint64_t derived_before;
 	uint64_t inserted_before;
 	uint64_t work_before;
 	int status;
@@ -1346,6 +1347,7 @@ run_item(relic_evaluation_t *eval, const relic_round_t *round,
 	bzero(&target, sizeof(target));
 	target.destination = round->targets[item->target];
 	work_before = counted_work(eval->ctx);
+	derived_before = eval->ctx->counters.derivations;
 	inserted_before = eval->ctx->counters.tuples_inserted;
 
 	eval->derived = false;
@@ -1357,6 +1359,7 @@ run_item(relic_evaluation_t *eval, const relic_round_t *round,
 	item->gained = eval->derived;
 
 	relic_round_record(round, item, counted_work(eval->ctx) - work_before,
+	    eval->ctx->counters.derivations - derived_before,
 	    eval->ctx->counters.tuples_inserted - inserted_before);
 
 	return (status);

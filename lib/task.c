@@ -203,7 +203,7 @@ run_task(const relic_round_job_t *job, relic_worker_t *worker,
 {
 	const relic_round_item_t *item;
 	relic_scratch_t *scratch;
-	uint64_t work_before;
+	uint64_t derived_before, work_before;
 	int status;
 
 	item = &job->round->items[task->item];
@@ -212,6 +212,7 @@ run_task(const relic_round_job_t *job, relic_worker_t *worker,
 	task->worker = worker_index;
 	task->first_candidate = worker->candidates.count;
 	work_before = worker_work(worker);
+	derived_before = worker->derivations;
 
 	if (item->plan == NULL) {
 		place_seed(scratch, item->rule);
@@ -225,6 +226,7 @@ run_task(const relic_round_job_t *job, relic_worker_t *worker,
 	task->note = scratch->note;
 	scratch->note.where = NULL;
 	task->work = worker_work(worker) - work_before;
+	task->derived = worker->derivations - derived_before;
 
 	return (status);
 }

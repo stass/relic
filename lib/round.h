@@ -53,13 +53,15 @@ typedef struct relic_round_task relic_round_task_t;
 typedef struct relic_worker relic_worker_t;
 
 /*
- * What a plan did the last time it ran, from which the next run's work is
- * estimated: `work`, the tuples it read and derived, and `range`, the
- * tuples its first scan's view held then, one for a plan that is not cut.
- * `ran` is false until it has run.
+ * What a plan did the last time it ran, from which the next run's work and
+ * derivations are estimated: `work`, the tuples it read and derived,
+ * `derived`, the tuples it derived alone, each one candidate offered to the
+ * round's collector, and `range`, the tuples its first scan's view held
+ * then, one for a plan that is not cut.  `ran` is false until it has run.
  */
 struct relic_plan_history {
 	uint64_t	work;
+	uint64_t	derived;
 	uint64_t	range;
 	bool		ran;
 };
@@ -123,9 +125,10 @@ struct relic_round {
  *
  * The worker that runs the task then writes, for the merge to read once
  * every task has run, which worker ran it, where its candidates lie among
- * that worker's, the first mixed-type comparison it met, and the work it
- * did, the tuples it read and derived.  `inserted` is the merge's: how
- * many of the task's candidates are tuples new to its target.
+ * that worker's, the first mixed-type comparison it met, the work it did,
+ * the tuples it read and derived, and the tuples it derived alone.
+ * `inserted` is the merge's: how many of the task's candidates are tuples
+ * new to its target.
  */
 struct relic_round_task {
 	size_t			 item;
@@ -137,6 +140,7 @@ struct relic_round_task {
 	size_t			 candidate_count;
 	relic_mixed_note_t	 note;
 	uint64_t		 work;
+	uint64_t		 derived;
 
 	size_t			 inserted;
 };
@@ -355,9 +359,13 @@ struct relic_dense {
 	bool			 scattering;
 };
 
-/* Open returns 1 if selected, 0 if ineligible, -1 on private refusal. */
+/*
+ * Open returns 1 if selected, 0 if ineligible or not chosen, -1 on private
+ * refusal.  `derivations` is the round's expected derivations, the
+ * candidates it is expected to offer its collector.
+ */
 int	 relic_dense_open(relic_dense_t *dense, relic_pool_t *pool,
-	    relic_round_job_t *job);
+	    relic_round_job_t *job, uint64_t derivations);
 void	 relic_dense_close(relic_dense_t *dense);
 bool	 relic_dense_take(relic_dense_t *dense, size_t task,
 	    uint32_t *sequence, const relic_dom_t *tuple);
@@ -426,7 +434,8 @@ struct relic_pool_filler {
  *
  * relic_round_record() records in an item's history, when it has one,
  * that its turn in a round run serially did `work`, the tuples it read and
- * derived, and inserted `inserted` tuples its target lacked.
+ * derived, derived `derived` tuples, and inserted `inserted` tuples its
+ * target lacked.
  * relic_round_first_call() gives the first item of a round whose
  * plan calls a function, or NULL when none does.
  */
@@ -438,7 +447,8 @@ enum relic_round_outcome {
 
 enum relic_round_outcome relic_round_run(relic_t *ctx, relic_round_t *round);
 void	 relic_round_record(const relic_round_t *round,
-	    relic_round_item_t *item, uint64_t work, uint64_t inserted);
+	    relic_round_item_t *item, uint64_t work, uint64_t derived,
+	    uint64_t inserted);
 const relic_round_item_t *relic_round_first_call(const relic_round_t *round);
 
 /*

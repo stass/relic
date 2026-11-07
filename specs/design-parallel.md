@@ -321,6 +321,9 @@ work count is scaled by the size of its leading scan's view. Without a
 history the view's size is the estimate; a plan without a leading scan
 has unit range and runs whole. An empty previous view leaves no range to
 scale, so its recorded work and the current range are added instead.
+The history records the plan's derivations beside its work, and the same
+scaling of them gives the round's expected derivations, which choose its
+candidate collector ([dense collection](design-dense-rounds.md)).
 
 This scheduling estimate does not influence the recursive selector's
 pure, thread-independent choice of plan. It reads frozen view sizes and

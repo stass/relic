@@ -70,25 +70,46 @@ come through a frozen accessor returning only `I` and `S`; workers receive
 no mutable value-table representation and cannot reach an interner.
 
 Selection compares byte estimates. Let `R` be the target's existing tuple
-count and `P` the active worker count. Model the ordinary collector holding
-`R` binary candidates per worker, using actual entry/column/stripe sizes,
-tagged screen sizing, merge references and stripe-list positions. A single
-tagged table for `P * R` estimates the combined merge tables; their actual
-stripe distribution is unknown. Include scalar bookkeeping in both layouts.
-Overflow declines the dense choice rather than wrapping an estimate.
+count, `P` the active worker count and `N` the round's expected derivations:
+the tuples its plans are expected to emit, each one candidate offered to the
+collector, as a screen probe and a candidate in the ordinary layout or a rank
+claim in the dense one. Each plan's history records its derivations apart
+from its reads; `N` scales what each item derived last time by how its first
+scan's view has changed, as the decision to share the round scales its work,
+and an item that has not run is expected to derive its view's size. Model the
+ordinary collector holding `N` binary candidates in all and `N / P`, rounded
+up, per worker, using actual entry/column/stripe sizes, tagged screen sizing,
+merge references and stripe-list positions. A single tagged table for `N`
+estimates the combined merge tables; their actual stripe distribution is
+unknown. Include scalar bookkeeping in both layouts.
 
-The dense estimate is `8C + 8 min(C - R, P * R)`: the fixed rank array and
-two position arrays at an estimated distinct count, plus histogram room.
-Choose it only when smaller than the ordinary estimate. With `R == 0`, the
-ordinary estimate is zero. This heuristic does not predict that every worker
-derives `R` new tuples. Actual arrays are charged at their actual sizes,
-including a distinct count above the estimate. A poor estimate can cost time
-or decline private work; it cannot change results or publication order.
+The dense estimate is `8C + 8 min(C - R, N)`: the fixed rank array and two
+position arrays at an estimated distinct count, plus histogram room. Choose
+it only when smaller than the ordinary estimate. A dense estimate that
+overflows declines the dense choice; an ordinary one that overflows leaves
+the dense layout the smaller.
+
+The comparison bounds time as well as memory. The rank array is initialized
+and scanned twice in every dense round, whatever the round derives, while
+the ordinary collector's work follows its candidates. A round expected to
+derive far fewer tuples than the grid has cells keeps the ordinary
+collector, however large the target. The target's size enters only through
+`C - R`: it predicts nothing about one round's derivations, which in a
+recursive component shrink as the target grows. Reads are not counted,
+because plan execution performs them whichever collector gathers: a round
+that scans much and derives little pays the dense layout's `C` for nothing.
+
+`N` is an estimate from the round before, and it errs both ways: a round
+whose derivations collapse can open a dense collector once before its
+history catches up, and an item that has not run may derive many times its
+view. Actual arrays are charged at their actual sizes, including a distinct
+count above the estimate. A poor estimate can cost time or decline private
+work; it cannot change results or publication order.
 
 The ordinary decision whether to share a round precedes this choice. Default
-one-thread evaluation retains its fast path. Small bound relations and large
-sparse domains make the dense estimate unattractive without workload names,
-new query flags or a second execution-cost model.
+one-thread evaluation retains its fast path. Small rounds, small bound
+relations and large sparse domains make the dense estimate unattractive
+without workload names, new query flags or a second execution-cost model.
 
 ## Gathering earliest occurrences
 

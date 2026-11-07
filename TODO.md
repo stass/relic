@@ -5,18 +5,15 @@ what was done. Each item carries a severity and a component pointer.
 
 ## Engine
 
-**Parallel evaluation of `chain-closure` degrades with the chain length.**
-[High, component: parallel evaluation in `lib/`, workload
-`bench/compare/chain-closure`] On a 128-CPU FreeBSD host with 64 workers,
-relic takes 0.33 s at scale 1 (the same as serial), 56 s at scale 2 (serial
-1.5 s), and exceeds the 300 s limit at scales 4 and 8 (serial 7.3 s and
-32 s). DuckDB and Souffle finish scale 2 with 64 workers in 6-7.5 s, and
-slow down far less than relic does going from one worker to 64. Record the
-host's kernel and allocator configuration (a development kernel with lock
-and invariant checking makes contention look worse) with the measurement.
-Find the contention or partitioning cost that grows with the chain, gate the
-fix on a deterministic work or contention counter from `-X stats` rather
-than on wall time, and fix the cause.
+**Rounds too small to repay many workers are still shared.** [Medium,
+component: the sharing threshold in `relic_round_run()`, `lib/round.c`, workload
+`bench/compare/chain-closure`] On a 128-CPU FreeBSD host, `chain-closure`
+at scale 2 takes 1.7 s serially, 1.75 s with 8 workers and 3.6 s with 64,
+of which 15 s is system time across workers. Each of its 4000 rounds derives
+a few thousand tuples, above the fixed `RELIC_PARALLEL_MIN_WORK` but far
+below what a 64-worker barrier and task setup cost. Scale the sharing
+threshold, or the workers a round uses, with the round's expected work, and
+gate the fix on `-X stats` round counters rather than on wall time.
 
 **Type tests read the type bits directly.** [Medium, component:
 `lib/exec.c`, `lib/rule.c`] Floats take tag 3 with the top bit of the index
@@ -90,6 +87,17 @@ coverage and distinguish OS/compiler/engine-version differences from
 core-count effects.
 
 ## Testing and CI
+
+**The shared library fails to link where a compat function is used.**
+[High, component: `Makefile.am` (`librelic_la_LIBADD`)] On macOS 27 the
+libc links no `reallocarray`, so configure selects `compat/reallocarray.c`.
+libtool joins `$(LTLIBOBJS)` into `librelic.la` with `ld -r`, and Apple's
+`ld -r` turns the object's hidden-visibility symbol local without
+`-keep_private_externs`, leaving `_reallocarray` undefined for
+`librelic_internal.a`; a default `./configure && make` fails, and only
+`--disable-shared` builds. Link the compat objects into
+`librelic_internal.la` once, so every consumer gets them from one place, and
+check the static and shared builds on macOS, FreeBSD and Linux.
 
 **Libtool's Emscripten C++ PIC probe emits a malformed assignment.** [Low,
 component: generated `m4/libtool.m4`, `autogen.sh`] The upstream macro expands
