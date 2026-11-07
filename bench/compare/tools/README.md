@@ -5,10 +5,10 @@ For native ports and source builds on FreeBSD, see the
 
 ## README charts
 
-`plot-performance.py` reads `bench/compare/results.tsv` and writes the two
-SVG charts embedded in the README. It selects twelve scale-1 parallel
-workloads covering recursive queries, points-to analysis and table processing,
-including cases where rivals win. Each bar is relic's median wall time divided
+`plot-performance.py` reads `bench/compare/results.tsv` and writes the
+SVG charts embedded in the README. It charts every scale-1 parallel workload,
+grouped by kind, and fails if the results contain a workload that no chart
+lists. Each bar is relic's median wall time divided
 by that engine's median: relic is 1, and higher means faster. Timeouts and
 unavailable results have labels, not zero-valued bars.
 

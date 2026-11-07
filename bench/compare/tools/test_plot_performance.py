@@ -1,4 +1,4 @@
-"""Checks for the README chart's cohort selection and speed normalization."""
+"""Checks for the README charts' cohort coverage and speed normalization."""
 
 import importlib.util
 from pathlib import Path
@@ -69,6 +69,17 @@ class PerformanceChartTests(unittest.TestCase):
     def test_missing_selected_cell_is_rejected(self):
         with self.assertRaises(KeyError):
             charts.relative_speeds({("sample", "relic"): 2.0}, ["sample"])
+
+    def test_every_recorded_workload_is_charted_once(self):
+        results = charts.read_results(charts.REPO / "bench/compare/results.tsv")
+        charts.check_coverage(results)
+        extra = dict(results)
+        extra["new-workload", "relic"] = 1.0
+        with self.assertRaises(ValueError):
+            charts.check_coverage(extra)
+        missing = {k: v for k, v in results.items() if k[0] != "cspa"}
+        with self.assertRaises(ValueError):
+            charts.check_coverage(missing)
 
     def test_recorded_selection_has_all_five_engines(self):
         results = charts.read_results(charts.REPO / "bench/compare/results.tsv")

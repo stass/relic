@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot selected scale-1 parallel medians from the published comparison."""
+"""Plot every scale-1 parallel median from the published comparison."""
 
 import argparse
 import csv
@@ -22,17 +22,30 @@ ENGINES = (
     ("souffle-interp", "Souffle interpreter", "#aa3377"),
     ("duckdb", "DuckDB", "#666666"),
 )
-# Each chart lists workloads that cover its theme and include cases where a
-# rival is at or ahead of relic; revisit the lists when a new cohort changes
-# which workloads those are.
+# Every scale-1 workload appears in exactly one chart; check_coverage rejects
+# a results file whose workloads differ from this list, so a new workload
+# cannot be left out unnoticed.
 CHARTS = (
-    ("recursive", "Recursive queries", (
-        "chain-closure", "graph-left", "tc-sparse-acyclic",
-        "tree-sg-all", "tc-acyclic-bf", "tc-cyclic-bf",
+    ("closure", "Transitive closure", (
+        "tc-acyclic", "tc-cyclic", "tc-nonlinear",
+        "tc-sparse-acyclic", "tc-sparse-cyclic", "chain-closure",
     )),
-    ("analysis", "Analysis and table processing", (
-        "andersen", "cspa", "cspa-httpd",
-        "cspa-postgresql", "cspa-linux", "files-grouped",
+    ("bound", "Queries with a bound argument", (
+        "tc-acyclic-bf", "tc-acyclic-fb", "tc-cyclic-bf",
+        "tc-cyclic-fb", "chain-left", "chain-right",
+    )),
+    ("graph", "Graph reachability and distances", (
+        "graph-left", "graph-reach", "grid-reach", "dist-bounded",
+    )),
+    ("samegen", "Same-generation queries", (
+        "sg-acyclic", "sg-acyclic-bf", "sg-cyclic",
+        "tree-sg-all", "tree-sg-bound",
+    )),
+    ("analysis", "Program analysis", (
+        "andersen", "cspa", "cspa-httpd", "cspa-linux", "cspa-postgresql",
+    )),
+    ("tables", "Table processing and startup", (
+        "degree-count", "facts-join", "files-grouped", "tasks-ready", "startup",
     )),
 )
 
@@ -68,6 +81,15 @@ def read_results(path):
             else:
                 raise ValueError(f"unsupported result status {status}: {key}")
     return results
+
+
+def check_coverage(results):
+    """Require that the charts show each recorded workload exactly once."""
+    charted = [w for _, _, workloads in CHARTS for w in workloads]
+    recorded = {workload for workload, _ in results}
+    if len(charted) != len(set(charted)) or set(charted) != recorded:
+        raise ValueError("charts do not cover the recorded workloads exactly: "
+                         + ", ".join(sorted(recorded ^ set(charted))))
 
 
 def relative_speeds(results, workloads):
@@ -149,7 +171,8 @@ def main():
                       if row["scale"] == "1" and int(row["threads"]) > 1}
         if counts != {context["parallel_threads"]}:
             raise ValueError("chart context does not match recorded thread count")
-        # Validate every selected cell before publishing either chart.
+        # Validate every charted cell before publishing any chart.
+        check_coverage(results)
         for _, _, workloads in CHARTS:
             relative_speeds(results, workloads)
         args.output_dir.mkdir(parents=True, exist_ok=True)

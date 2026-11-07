@@ -382,13 +382,22 @@ builds `embed.c` against the installed library.
 On AMD Ryzen Threadripper PRO 5995WX with 256 GiB RAM, relic records the **lowest median wall time on 29 of 31 comparable workloads with 64 threads**, and **25 of 31 with one thread**, against completed rival runs. The suite compares compiled Souffle (with and without Magic Sets), interpreted Souffle, Nemo, SWI-Prolog, clingo, DuckDB and SQLite.
 <!-- benchmark-summary:end -->
 
-Selected workloads show recursive queries, points-to analyses and table
-processing. Taller bars mean faster execution, with relic fixed at 1×;
-missing results are labeled rather than plotted as zero.
+The charts show every scale-1 workload at the parallel thread count, grouped
+by kind. Each bar is an engine's speed relative to relic, which is fixed at 1×:
+a shorter bar means relic is faster, and a bar taller than relic's means the
+rival is faster. Missing results are labeled rather than plotted as zero.
 
-![Relative speed on six recursive-query benchmarks, comparing relic with Soufflé Magic, compiled Soufflé, interpreted Soufflé and DuckDB.](docs/images/performance-recursive.svg)
+![Relative speed on transitive-closure benchmarks, comparing relic with Soufflé Magic, compiled Soufflé, interpreted Soufflé and DuckDB.](docs/images/performance-closure.svg)
 
-![Relative speed on points-to analyses and table processing.](docs/images/performance-analysis.svg)
+![Relative speed on queries with a bound argument.](docs/images/performance-bound.svg)
+
+![Relative speed on graph reachability and distance benchmarks.](docs/images/performance-graph.svg)
+
+![Relative speed on same-generation benchmarks.](docs/images/performance-samegen.svg)
+
+![Relative speed on points-to and program-analysis benchmarks.](docs/images/performance-analysis.svg)
+
+![Relative speed on table-processing and startup benchmarks.](docs/images/performance-tables.svg)
 
 Charts are generated from the recorded timings with
 [plot-performance.py](bench/compare/tools/plot-performance.py).
