@@ -67,6 +67,7 @@
 #define	SCENARIO_DRIVER		"a lookup plan keeps its indexed access"
 #define	SCENARIO_DENSE		"assigned heads retain expression scratch"
 #define	SCENARIO_DENSE_SMALL	"small rounds over a large domain stay ordinary"
+#define	SCENARIO_DENSE_WIDE	"rounds that fill their grid take dense collection"
 #define	SCENARIO_DELTA_DRIVER	"whole delta lookup plans agree with serial"
 
 /* Room for a generated program and for a context's diagnostics. */
@@ -84,6 +85,15 @@
 
 /* The nodes of the chain whose closure's rounds are small beside its grid. */
 #define	DENSE_CHAIN_NODES	300
+
+/*
+ * The nodes of the graph whose closure's rounds fill their grid, and the
+ * edges out of each: a round derives FANOUT_EDGES tuples for each tuple of
+ * its delta, so the first recursive round alone derives as many tuples as
+ * the grid has cells.
+ */
+#define	FANOUT_NODES		256
+#define	FANOUT_EDGES		16
 #define	LIMIT_STEPS		60
 
 /*
@@ -200,6 +210,7 @@ static void	 compacted_rounds_agree(size_t threads, size_t max_memory);
 static void	 computing_rounds_merge(size_t threads);
 static void	 dense_rounds_keep_expression_scratch(size_t threads);
 static void	 small_rounds_keep_the_ordinary_collector(size_t threads);
+static void	 wide_rounds_take_the_dense_collector(size_t threads);
 static void	 pending_values_resolve_once(void);
 static void	 errors_fail_as_serially(size_t threads);
 static void	 sums_overflow_as_serially(size_t threads);
@@ -2148,6 +2159,62 @@ small_rounds_keep_the_ordinary_collector(size_t threads)
 	relic_destroy(deferred);
 }
 
+/*
+ * A closure whose rounds derive FANOUT_EDGES tuples for each tuple of their
+ * delta: the first recursive round reads a delta of FANOUT_NODES *
+ * FANOUT_EDGES tuples and derives a tuple per cell of the grid, which the
+ * dense collector serves with a rank per cell instead of a candidate per
+ * derivation.  Expected from the tuples the round reads alone, that round
+ * would look sixteen times smaller than it is.  The base round derives a
+ * sixteenth of the grid and keeps the ordinary collector; each of the three
+ * recursive rounds takes the dense one.
+ */
+static void
+wide_rounds_take_the_dense_collector(size_t threads)
+{
+	diagnostics_t serial_diagnostics, deferred_diagnostics;
+	relic_t *serial, *deferred;
+	char what[64];
+	unsigned int i, j;
+	int serial_status, deferred_status;
+
+	failing.length = 0;
+	failing.bytes[0] = '\0';
+	for (i = 0; i < FANOUT_NODES; i++)
+		for (j = 0; j < FANOUT_EDGES; j++)
+			appendf(&failing, "edge(%u, %u).\n", i,
+			    (i * 31 + j * 17 + 1) % FANOUT_NODES);
+	appendf(&failing,
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n");
+	snprintf(what, sizeof(what), "a wide closure on %zu thread(s)",
+	    threads);
+	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
+	deferred = context_for(failing.bytes,
+	    RELIC_UNSTABLE_PARALLEL_ALWAYS, threads, 0, 0,
+	    &deferred_diagnostics);
+	if (serial != NULL && deferred != NULL) {
+		serial_status = relic_materialize(serial);
+		deferred_status = relic_materialize(deferred);
+		checkf(serial_status == 0 && deferred_status == 0,
+		    SCENARIO_DENSE_WIDE, "%s: both materialize", what);
+		checkf(deferred->pool != NULL &&
+		    deferred->pool->merged_rounds == 4, SCENARIO_DENSE_WIDE,
+		    "%s: the base round and three recursive rounds are "
+		    "shared", what);
+		if (RELIC_DENSE_ATOMICS && sizeof(relic_atomic_u64_t) == 8)
+			checkf(deferred->pool != NULL &&
+			    deferred->pool->dense_rounds == 3,
+			    SCENARIO_DENSE_WIDE, "%s: every recursive round "
+			    "opens a dense collector (%ju did)", what,
+			    deferred->pool != NULL ?
+			    (uintmax_t)deferred->pool->dense_rounds : 0);
+		contexts_agree(SCENARIO_DENSE_WIDE, what, serial, deferred);
+	}
+	relic_destroy(serial);
+	relic_destroy(deferred);
+}
+
 int
 main(void)
 {
@@ -2175,6 +2242,7 @@ main(void)
 		computing_rounds_merge(threads);
 		dense_rounds_keep_expression_scratch(threads);
 		small_rounds_keep_the_ordinary_collector(threads);
+		wide_rounds_take_the_dense_collector(threads);
 		errors_fail_as_serially(threads);
 		sums_overflow_as_serially(threads);
 		strings_rounds_merge(threads);

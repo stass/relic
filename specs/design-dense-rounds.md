@@ -73,10 +73,11 @@ Selection compares byte estimates. Let `R` be the target's existing tuple
 count, `P` the active worker count and `N` the round's expected derivations:
 the tuples its plans are expected to emit, each one candidate offered to the
 collector, as a screen probe and a candidate in the ordinary layout or a rank
-claim in the dense one. Each plan's history records its derivations apart
-from its reads; `N` scales what each item derived last time by how its first
-scan's view has changed, as the decision to share the round scales its work,
-and an item that has not run is expected to derive its view's size. Model the
+claim in the dense one. `N` sums each delta variant's prediction from its
+work recipe, corrected by how far the plan's last prediction was off, and
+each other item's scaled history
+([which rounds are shared](design-parallel.md#which-rounds-are-shared)).
+Model the
 ordinary collector holding `N` binary candidates in all and `N / P`, rounded
 up, per worker, using actual entry/column/stripe sizes, tagged screen sizing,
 merge references and stripe-list positions. A single tagged table for `N`

@@ -127,6 +127,7 @@ static void	 job_begin(relic_round_job_t *job, relic_t *ctx,
 static const relic_relation_t *relation_read_as_it_runs(
 		    const relic_op_t *op);
 static int	 pool_prepare(relic_pool_t *pool, const relic_round_t *round);
+static uint64_t	 predicted_derivations(const relic_round_item_t *item);
 static void	 record_task_work(const relic_pool_t *pool,
 		    relic_round_t *round);
 static void	 release_candidates(relic_t *ctx, relic_pool_t *pool);
@@ -143,6 +144,8 @@ static uint64_t	 round_estimate(const relic_round_t *round,
 		    enum round_count count);
 static uint64_t	 scaled_count(uint64_t count, uint64_t range_now,
 		    uint64_t range_then);
+static uint64_t	 scaled_estimate(uint64_t count, uint64_t actual,
+		    uint64_t predicted);
 static void	 take_worker_counters(relic_pool_t *pool,
 		    relic_counters_t *counters);
 static uint64_t	 tasks_run_by_threads(const relic_pool_t *pool);
@@ -283,6 +286,7 @@ relic_round_record(const relic_round_t *round, relic_round_item_t *item,
 		item->history->work = work;
 		item->history->derived = derived;
 		item->history->range = item_range(round, item);
+		item->history->prediction = item->prediction;
 		item->history->ran = true;
 	}
 	if (item->insertions != NULL) {
@@ -314,10 +318,13 @@ round_estimate(const relic_round_t *round, enum round_count count)
 }
 
 /*
- * The `count` an item is expected to reach: what it reached the last time
- * it ran, scaled by how its first scan's view has grown or shrunk since, or
- * the view itself for an item that has not run or keeps no history, which
- * reads its view and is guessed to derive about one tuple per tuple read.
+ * The `count` an item is expected to reach.  The derivations of a delta
+ * variant's plan, which the work estimator predicts, are
+ * predicted_derivations().  Its work, and both counts of a base plan or a
+ * seed, are what the item reached the last time it ran, scaled by how its
+ * first scan's view has grown or shrunk since, or the view itself for an
+ * item that has not run or keeps no history, which reads its view and is
+ * guessed to derive about one tuple per tuple read.
  * A recursive component's rounds change size gradually, so the round
  * before predicts the next well enough for a choice whose only cost is a
  * missed chance or time paid for nothing.  An item whose view was empty
@@ -333,6 +340,8 @@ item_estimate(const relic_round_t *round, const relic_round_item_t *item,
 	const relic_plan_history_t *history;
 	uint64_t range, then;
 
+	if (count == ROUND_DERIVATIONS && item->predicted)
+		return (predicted_derivations(item));
 	range = item_range(round, item);
 	history = item->history;
 	if (history == NULL || !history->ran)
@@ -342,6 +351,51 @@ item_estimate(const relic_round_t *round, const relic_round_item_t *item,
 		return (then > UINT64_MAX - range ? UINT64_MAX : then + range);
 
 	return (scaled_count(then, range, history->range));
+}
+
+/*
+ * The tuples an item the work estimator predicts is expected to derive:
+ * the prediction, corrected by how far the prediction was off the last
+ * time the plan ran.  The estimator reads the sizes of the views the plan
+ * reads, so it follows a delta that grows or shrinks between rounds even
+ * when the plan scans another relation first, and it predicts a plan's
+ * first run, which no history covers.  It takes each key of an index to
+ * hold an equal share of the index's tuples, so over skewed keys it errs,
+ * by much the same factor from one round of a plan to the next, which the
+ * correction removes.  A run predicted to derive nothing, or that derived
+ * nothing, gives no factor: a zero factor would expect nothing of every
+ * later run, however much its delta grew.
+ */
+static uint64_t
+predicted_derivations(const relic_round_item_t *item)
+{
+	const relic_plan_history_t *history;
+
+	history = item->history;
+	if (history == NULL || !history->ran || history->prediction == 0 ||
+	    history->derived == 0)
+		return (item->prediction);
+
+	return (scaled_estimate(item->prediction, history->derived,
+	    history->prediction));
+}
+
+/*
+ * `count` times `actual` over `predicted`, which is not zero, or
+ * UINT64_MAX when that is more than a uint64_t holds.  Every operand may
+ * reach UINT64_MAX, so the ratio is taken in floating point, whose
+ * precision is ample for an estimate that only chooses a collector.
+ */
+static uint64_t
+scaled_estimate(uint64_t count, uint64_t actual, uint64_t predicted)
+{
+	double scaled;
+
+	scaled = (double)count * ((double)actual / (double)predicted);
+	if (scaled >= 0x1p64)
+		return (UINT64_MAX);
+
+	return ((uint64_t)scaled);
 }
 
 /*

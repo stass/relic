@@ -15,19 +15,32 @@ below what a 64-worker barrier and task setup cost. Scale the sharing
 threshold, or the workers a round uses, with the round's expected work, and
 gate the fix on `-X stats` round counters rather than on wall time.
 
-**Choosing the dense collector by expected derivations slows some parallel
-closures.** [Medium, component: `dense_is_smaller()` and `ordinary_bytes()`
-in `lib/dense.c`, `item_estimate()` in `lib/round.c`] With 64 workers on the
-128-CPU FreeBSD host, the derivation-based byte model is 13 to 46% slower
-than the estimate it replaced, which assumed each worker gathers as many
-candidates as the target holds. `tc-cyclic` takes 226 ms instead of
-155 ms at scale 1, and 724 ms instead of 529 ms at scale 2. `tc-acyclic`
-and `tc-sparse-cyclic` are 14 to 17% slower at scales 1 and 2,
-`tc-nonlinear` 31% at scale 8, and `sg-cyclic` 13% at scale 8. Serial runs
-are unchanged, and `chain-closure`, `tree-sg-all` and `tc-sparse-acyclic`
-gain two- to twentyfold. Find which collector each slower round picks under
-both models (`-X stats`), and correct the model so the parallel closures
-regain their earlier collector without losing the gains.
+**A selective rule's first parallel round may open a dense collector it does
+not need.** [Medium, security residual, component: `predicted_derivations()`
+in `lib/round.c`, `relic_cost_derivations()` in `lib/cost.c`] A round expects
+a delta variant's derivations from the work walk's bindings at `EMIT`, which
+take every test, assignment and negation to pass. A rule that rejects almost
+everything is therefore predicted, on its plan's first run, to derive what
+reaches its tests, and the round may allocate a rank per pair-grid cell (at
+most 2^32 cells of 8 bytes) for a round that derives little. The arrays are
+charged to the memory account before allocation, and a refusal declines the
+round to the serial path; the plan's next round is corrected by its measured
+ratio. Bound the uncalibrated prediction, for instance by the tuples the
+plan's tests can pass, or decline the dense collector on a first run unless
+its grid is small beside the data the store holds.
+
+**The dense collector's byte model sets its crossover below the time
+crossover.** [Low, component: `dense_is_smaller()` and `ordinary_bytes()` in
+`lib/dense.c`] With 64 workers on the 128-CPU FreeBSD host, rounds deriving
+about 0.16 tuples per grid cell take the dense collector and are slower for
+it: `sg-cyclic` at scale 4 spends 213 ms instead of 126 ms in its second
+round, `tc-nonlinear` at scale 1 17 ms instead of 10 ms in its first.
+Rounds at 0.24 tuples per cell and above are faster dense. The bytes
+compared stand for time as well as memory, but the per-cell work of
+seeding, claiming and scanning ranks costs more per byte than a candidate.
+Calibrate the comparison against round times at several worker counts
+before moving it, since a higher crossover also delays dense collection in
+the rounds it serves.
 
 **Type tests read the type bits directly.** [Medium, component:
 `lib/exec.c`, `lib/rule.c`] Floats take tag 3 with the top bit of the index

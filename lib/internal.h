@@ -1417,12 +1417,12 @@ int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
  * drafts of its delta-first plan and its input-first plan, kept once when
  * the two orders are the same, or the one plan a reference configuration
  * asks for, each with the work recipe a round chooses by when there are
- * two.  `delta_literal` is the body index of the positive literal that
- * reads the delta, which must be over a relation `incomplete` marks; the
- * variant's other literals over marked relations read the old or current
- * view.  The relations the drafts read are created, and the indexes they
- * read are not built.  Otherwise arguments and failures are as for
- * relic_plan_rule().
+ * two and predicts its derivations by.  `delta_literal` is the body index
+ * of the positive literal that reads the delta, which must be over a
+ * relation `incomplete` marks; the variant's other literals over marked
+ * relations read the old or current view.  The relations the drafts read
+ * are created, and the indexes they read are not built.  Otherwise
+ * arguments and failures are as for relic_plan_rule().
  */
 int	 relic_plan_variant(relic_t *ctx, relic_arena_t *arena,
 	    const relic_rule_t *rule,

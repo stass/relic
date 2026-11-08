@@ -321,9 +321,17 @@ work count is scaled by the size of its leading scan's view. Without a
 history the view's size is the estimate; a plan without a leading scan
 has unit range and runs whole. An empty previous view leaves no range to
 scale, so its recorded work and the current range are added instead.
-The history records the plan's derivations beside its work, and the same
-scaling of them gives the round's expected derivations, which choose its
-candidate collector ([dense collection](design-dense-rounds.md)).
+The round's expected derivations, which choose its candidate collector
+([dense collection](design-dense-rounds.md)), are predicted rather than
+scaled. A delta variant's work recipe carries its estimated bindings to
+`EMIT` ([recursive planning](design-recursive-planning.md)), so it follows a
+delta that grows or shrinks between rounds even when the plan scans another
+relation first, and it predicts the plan's first run. Its equal-share
+assumption about index keys errs by a similar factor from one round of a
+plan to the next, so the history records each prediction beside the
+derivations that followed, and the next prediction is multiplied by their
+ratio. A base plan has no recipe, and its derivations are scaled like its
+work.
 
 This scheduling estimate does not influence the recursive selector's
 pure, thread-independent choice of plan. It reads frozen view sizes and

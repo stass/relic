@@ -174,8 +174,11 @@ candidate. `-X no-exists` changes liveness and operations through the
 existing planner, and the recipes reflect the emitted operations.
 Naive evaluation has no delta variants and uses ordinary plans.
 
-A one-plan family is prepared at component start, bypasses estimation and
-needs no recipe of its own. Reference modes use the ordinary strategy flags.
+A one-plan family is prepared at component start and bypasses the choice
+of plan. It still has a recipe, since a round predicts every variant's
+derivations from its recipe's bindings at `EMIT`
+([which rounds are shared](design-parallel.md#which-rounds-are-shared)).
+Reference modes use the ordinary strategy flags.
 
 ## Statistics at a round boundary
 
@@ -232,6 +235,13 @@ The estimator walks a recipe with **B**, the estimated number of bindings
 reaching the next operation, and **W**, accumulated work. Initially
 `B = 1` and `W = 0`. A unit is one probe, tuple visit, simple operation or
 emission. It is a ranking proxy, not a prediction in seconds.
+
+The bindings that reach `EMIT` are a second output: the tuples the plan is
+expected to derive, from which a parallel round chooses its candidate
+collector ([which rounds are shared](design-parallel.md#which-rounds-are-shared)).
+Because tests, assignments and selectivity an index does not represent are
+taken to pass everything, the count errs high for a selective rule; the
+round corrects it by the plan's last ratio of derivations to prediction.
 
 For a lookup, the estimated total tuples visited across its incoming
 bindings is:
@@ -306,8 +316,9 @@ not evidence that this tradeoff is beneficial.
 
 All work and binding counts are `uint64_t` with saturating addition and
 multiplication at `UINT64_MAX`. Saturation is a numeric result, not a
-plan-state sentinel. Once accumulated work saturates, the estimator can
-return that cost immediately.
+plan-state sentinel. Once accumulated work saturates it stays saturated,
+but the walk continues, since a later operation may still lower the
+bindings that reach `EMIT`.
 
 The multiply/divide operation preserves a representable quotient even
 when `B * N` would overflow. With `k = max(1, K)`:

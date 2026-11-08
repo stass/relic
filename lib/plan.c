@@ -130,13 +130,14 @@
  * guard and par go before the delta of tc however large guard is, and tc
  * is looked up on Y.  Neither policy reads a guess of the delta's size, so
  * which plans a variant has never depends on one.  Two identical orders are
- * kept once.  When two are kept, each has a recipe from which a round,
- * knowing the sizes of its views and the keys of its indexes, estimates
- * its work, and the cost of building the indexes it lacks, and runs the
- * cheaper (lib/cost.c).  Under RELIC_UNSTABLE_NO_REORDER the delta literal
- * stays where it is written and there is one order; under
- * RELIC_UNSTABLE_NO_INDEX alone, which would scan a deferred delta once per
- * binding before it, the delta goes first.
+ * kept once.  Each kept order has a recipe from which a round, knowing the
+ * sizes of its views and the keys of its indexes, estimates its work and
+ * the tuples it derives.  Of two, the round runs the one whose work, with
+ * the cost of building the indexes it lacks, is the smaller (lib/cost.c).
+ * Under RELIC_UNSTABLE_NO_REORDER the delta literal stays where it is
+ * written and there is one order; under RELIC_UNSTABLE_NO_INDEX alone,
+ * which would scan a deferred delta once per binding before it, the delta
+ * goes first.
  *
  * Every positive literal of a variant reads through a view (plan.h), and the
  * view follows from body order alone: the delta literal reads `delta`, a
@@ -2240,9 +2241,8 @@ compile_recipe(relic_arena_t *arena, const relic_plan_draft_t *draft,
 
 /*
  * Emit the drafts of the first `count` decided orders into a family, in
- * family order, each with its recipe when there are two to choose between.
- * The count is set last, so that a family whose emission failed part way
- * holds no candidate.
+ * family order, each with its recipe.  The count is set last, so that a
+ * family whose emission failed part way holds no candidate.
  */
 static int
 emit_family(relic_planner_t *planners, size_t count,
@@ -2255,8 +2255,6 @@ emit_family(relic_planner_t *planners, size_t count,
 		candidate = &family->candidates[i];
 		if (emit_draft(&planners[i], &candidate->draft) != 0)
 			return (-1);
-		if (count == 1)
-			continue;
 		if (compile_recipe(planners[i].arena, &candidate->draft,
 		    &candidate->recipe) != 0)
 			return (-1);
@@ -2441,7 +2439,7 @@ relic_plan_prepare(relic_t *ctx, relic_arena_t *arena,
 
 /*
  * Plan a semi-naive delta variant of a rule into *family: one or two
- * candidate plans, each with its recipe when there are two (plan.h).
+ * candidate plans, each with its recipe (plan.h).
  * Arguments and failures are as for relic_plan_rule(), except that no
  * index is built, so none is refused, and a request without a delta
  * literal is refused as an internal error.  A failure leaves the family

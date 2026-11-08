@@ -56,13 +56,16 @@ typedef struct relic_worker relic_worker_t;
  * What a plan did the last time it ran, from which the next run's work and
  * derivations are estimated: `work`, the tuples it read and derived,
  * `derived`, the tuples it derived alone, each one candidate offered to the
- * round's collector, and `range`, the tuples its first scan's view held
- * then, one for a plan that is not cut.  `ran` is false until it has run.
+ * round's collector, `range`, the tuples its first scan's view held then,
+ * one for a plan that is not cut, and `prediction`, the tuples the work
+ * estimator expected it to derive then, zero for a plan it does not
+ * predict.  `ran` is false until it has run.
  */
 struct relic_plan_history {
 	uint64_t	work;
 	uint64_t	derived;
 	uint64_t	range;
+	uint64_t	prediction;
 	bool		ran;
 };
 
@@ -86,9 +89,12 @@ struct relic_insert_history {
  * `insertions` the record of what the item inserted, where they are kept,
  * and NULL otherwise.  `target` is the position among the round's
  * targets of the relation the item's tuples go into, which for a plan is
- * the relation the caller names for those tuples.  `gained` is set once
- * the item's turn has inserted a tuple its target did not hold, whichever
- * way the round ran.
+ * the relation the caller names for those tuples.  `prediction` is the
+ * tuples the work estimator expects the plan to derive in this round
+ * (relic_cost_derivations()), taken before the round runs, when `predicted`
+ * is set: for the plan of a delta variant whose history is kept.  `gained`
+ * is set once the item's turn has inserted a tuple its target did not
+ * hold, whichever way the round ran.
  */
 struct relic_round_item {
 	const relic_plan_t	*plan;
@@ -96,6 +102,8 @@ struct relic_round_item {
 	relic_plan_history_t	*history;
 	relic_insert_history_t	*insertions;
 	size_t			 target;
+	uint64_t		 prediction;
+	bool			 predicted;
 	bool			 gained;
 };
 
@@ -435,7 +443,7 @@ struct relic_pool_filler {
  * relic_round_record() records in an item's history, when it has one,
  * that its turn in a round run serially did `work`, the tuples it read and
  * derived, derived `derived` tuples, and inserted `inserted` tuples its
- * target lacked.
+ * target lacked, and what the item's prediction was.
  * relic_round_first_call() gives the first item of a round whose
  * plan calls a function, or NULL when none does.
  */

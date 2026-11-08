@@ -16,16 +16,17 @@
 
 /*
  * The work estimator (lib/cost.c): how much work a delta variant's plan
- * would do in the round about to run, from the sizes of the views it reads
- * and the distinct keys of the indexes it looks up through, and what
- * building the indexes it lacks would cost.
+ * would do in the round about to run, and how many tuples it would derive,
+ * from the sizes of the views it reads and the distinct keys of the indexes
+ * it looks up through, and what building the indexes it lacks would cost.
  *
- * A round chooses between the two plans of a variant (plan.h) by this
- * estimate, before any of its items runs.  The estimate is integer
- * arithmetic over counts the store already keeps: it reads no tuple, runs
- * no expression, builds no index, allocates nothing and moves no frontier,
- * and so cannot change what any plan derives, only which of two equivalent
- * plans derives it.  It reads the store as frozen.h presents it.
+ * A round chooses between the two plans of a variant (plan.h) by the work,
+ * and expects its derivations from the tuples derived, before any of its
+ * items runs.  The estimate is integer arithmetic over counts the store
+ * already keeps: it reads no tuple, runs no expression, builds no index,
+ * allocates nothing and moves no frontier, and so cannot change what any
+ * plan derives, only which of two equivalent plans derives it, and how its
+ * round collects the tuples.  It reads the store as frozen.h presents it.
  */
 
 /*
@@ -48,6 +49,18 @@ size_t	 relic_cost_choose(const relic_plan_family_t *family,
  * time, and reads nothing but its arguments and the store they reach.
  */
 uint64_t relic_cost_estimate(const relic_plan_candidate_t *candidate,
+	    const relic_exec_env_t *env);
+
+/*
+ * The tuples a candidate is estimated to derive in the round about to run
+ * over the views `env` resolves: the bindings the work walk carries to its
+ * EMIT, each a tuple the plan emits.  Lookups are estimated from the keys
+ * of their indexes as relic_cost_estimate() estimates them, so a plan that
+ * looks up through skewed keys may derive more or fewer.  Saturates at
+ * UINT64_MAX.  A round expects a plan's derivations from it
+ * (lib/round.c).
+ */
+uint64_t relic_cost_derivations(const relic_plan_candidate_t *candidate,
 	    const relic_exec_env_t *env);
 
 /*

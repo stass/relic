@@ -613,7 +613,9 @@ static void	 begin_round(relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans,
 		    relic_round_t *round);
 static void	 add_item(const relic_evaluation_t *eval, relic_round_t *round,
-		    relic_running_plan_t *running, const relic_rule_t *rule);
+		    relic_running_plan_t *running,
+		    const relic_plan_candidate_t *candidate,
+		    const relic_rule_t *rule);
 static bool	 record_round_gains(const relic_round_t *round,
 		    relic_delta_work_t *work);
 static int	 gather_base_pass(relic_evaluation_t *eval,
@@ -1407,13 +1409,16 @@ begin_round(relic_evaluation_t *eval, const relic_component_plans_t *plans,
  * Add an item to a round of the component being evaluated: a seed of
  * `rule` when `running` is NULL, and otherwise the running plan of it,
  * with the plan's history and its record of insertions on a context whose
- * rounds may be deferred.  Its target is the member the rule's head is,
- * and a component's round targets its members in the order of their
- * positions.
+ * rounds may be deferred.  The plan of a delta variant comes with the
+ * `candidate` it was prepared from, whose recipe predicts what it derives
+ * this round; a base plan has none.  Its target is the member the rule's
+ * head is, and a component's round targets its members in the order of
+ * their positions.
  */
 static void
 add_item(const relic_evaluation_t *eval, relic_round_t *round,
-    relic_running_plan_t *running, const relic_rule_t *rule)
+    relic_running_plan_t *running, const relic_plan_candidate_t *candidate,
+    const relic_rule_t *rule)
 {
 	relic_round_item_t *item;
 
@@ -1421,19 +1426,21 @@ add_item(const relic_evaluation_t *eval, relic_round_t *round,
 	item = &round->items[round->item_count];
 	round->item_count++;
 
-	item->plan = NULL;
-	item->history = NULL;
-	item->insertions = NULL;
+	bzero(item, sizeof(*item));
 	if (running != NULL) {
 		item->plan = &running->plan;
 		if (rounds_may_be_deferred(eval->ctx)) {
 			item->history = &running->history;
 			item->insertions = running->insertions;
+			if (candidate != NULL) {
+				item->prediction = relic_cost_derivations(
+				    candidate, &eval->env);
+				item->predicted = true;
+			}
 		}
 	}
 	item->rule = rule;
 	item->target = head_member_of(eval, rule);
-	item->gained = false;
 }
 
 /*
@@ -1481,7 +1488,7 @@ gather_base_pass(relic_evaluation_t *eval,
 		rule = &eval->rules->entries[plans->rule_indexes[i]];
 
 		if (rule->body_length == 0) {
-			add_item(eval, round, NULL, rule);
+			add_item(eval, round, NULL, NULL, rule);
 			continue;
 		}
 
@@ -1490,7 +1497,7 @@ gather_base_pass(relic_evaluation_t *eval,
 		rule_plans = &plans->planned[planned];
 		planned++;
 		if (rule_plans->base != NULL)
-			add_item(eval, round, rule_plans->base, rule);
+			add_item(eval, round, rule_plans->base, NULL, rule);
 	}
 
 	assert(planned == plans->planned_count);
@@ -1651,8 +1658,10 @@ record_gain(relic_delta_work_t *work, size_t member)
  * candidate not yet prepared is prepared, in due order, which builds the
  * indexes it lacks and raises them to their members' deltas; another
  * candidate needing one of them finds it built.  Last the items are added,
- * so a
- * round never holds a plan whose indexes are missing.  A candidate once
+ * so a round never holds a plan whose indexes are missing, and each
+ * item's derivations are predicted (add_item()) from the keys of the
+ * indexes it reads as built, where the choice, made before they were,
+ * took an index not yet built to hold a key per tuple.  A candidate once
  * prepared stays so, its indexes being kept and maintained like any other.
  */
 static int
@@ -1686,6 +1695,7 @@ gather_variant_round(relic_evaluation_t *eval,
 	for (i = 0; i < due_count; i++) {
 		variant = &plans->variants[work->due[i]];
 		add_item(eval, round, variant->running[work->chosen[i]],
+		    &variant->family.candidates[work->chosen[i]],
 		    variant->rule);
 	}
 
@@ -3312,12 +3322,9 @@ gather_query_answer(relic_evaluation_t *eval,
 	relic_round_item_t item;
 	relic_round_t round;
 
+	bzero(&item, sizeof(item));
 	item.plan = &running->plan;
 	item.rule = running->rule;
-	item.history = NULL;
-	item.insertions = NULL;
-	item.target = 0;
-	item.gained = false;
 
 	round.items = &item;
 	round.targets = &running->target.destination;

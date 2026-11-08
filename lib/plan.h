@@ -535,10 +535,10 @@ struct relic_cost_recipe {
 
 /*
  * One of a delta variant's plans, as a draft, with the recipe that
- * estimates its work.  The recipe is compiled only when the variant has two
- * plans to choose between; a lone plan is never estimated and its recipe
- * is empty.  What runs a candidate is the plan relic_plan_prepare() makes
- * of its draft, which the evaluation holds.
+ * estimates its work, by which a round chooses between two plans, and the
+ * tuples it derives, from which a round expects its derivations.  What
+ * runs a candidate is the plan relic_plan_prepare() makes of its draft,
+ * which the evaluation holds.
  */
 struct relic_plan_candidate {
 	relic_plan_draft_t	draft;

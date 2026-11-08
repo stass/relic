@@ -24,8 +24,9 @@
  * The work estimator: a walk of a recipe's steps in plan order, carrying B,
  * the bindings estimated to reach the step, from one, and W, the work
  * accumulated, from zero (plan.h gives each step's rule).  The walk stops
- * once no binding reaches the next step, since nothing after it runs, or
- * once W has saturated, since nothing after it can lower W.  A candidate's
+ * once no binding reaches the next step, since nothing after it runs; a
+ * saturated W stays saturated, but the bindings still reach EMIT, which
+ * predicts the plan's derivations.  A candidate's
  * estimate adds to W the work of building the indexes its draft names and
  * its relations lack, which preparing it would do before it ran.
  *
@@ -44,7 +45,7 @@ _Static_assert((relic_tuple_id_t)-1 > 0,
 
 static uint64_t	 acquisition_work(const relic_plan_draft_t *draft);
 static uint64_t	 execution_work(const relic_cost_recipe_t *recipe,
-		    const relic_exec_env_t *env);
+		    const relic_exec_env_t *env, uint64_t *emitted);
 static relic_tuple_id_t index_keys(const relic_relation_t *relation,
 		    uint32_t key_mask);
 static relic_tuple_id_t range_length(relic_tuple_range_t range);
@@ -77,16 +78,32 @@ uint64_t
 relic_cost_estimate(const relic_plan_candidate_t *candidate,
     const relic_exec_env_t *env)
 {
-	return (saturating_add(execution_work(&candidate->recipe, env),
-	    acquisition_work(&candidate->draft)));
+	uint64_t emitted;
+
+	return (saturating_add(execution_work(&candidate->recipe, env,
+	    &emitted), acquisition_work(&candidate->draft)));
+}
+
+uint64_t
+relic_cost_derivations(const relic_plan_candidate_t *candidate,
+    const relic_exec_env_t *env)
+{
+	uint64_t emitted;
+
+	(void)execution_work(&candidate->recipe, env, &emitted);
+
+	return (emitted);
 }
 
 /*
- * The work of running a recipe's plan once, by the walk above.
+ * The work of running a recipe's plan once, by the walk above, and in
+ * *emitted the bindings estimated to reach its EMIT, each a tuple derived.
+ * The walk goes on after its work saturates, since later steps may still
+ * lower the bindings that reach EMIT.
  */
 static uint64_t
 execution_work(const relic_cost_recipe_t *recipe,
-    const relic_exec_env_t *env)
+    const relic_exec_env_t *env, uint64_t *emitted)
 {
 	const relic_cost_step_t *step;
 	const relic_op_t *op;
@@ -98,8 +115,9 @@ execution_work(const relic_cost_recipe_t *recipe,
 
 	bindings = 1;
 	work = 0;
+	*emitted = 0;
 	for (i = 0; i < recipe->step_count; i++) {
-		if (bindings == 0 || work == UINT64_MAX)
+		if (bindings == 0)
 			break;
 		step = &recipe->steps[i];
 		op = step->op;
@@ -131,8 +149,11 @@ execution_work(const relic_cost_recipe_t *recipe,
 			break;
 		case RELIC_COST_ANTI_PROBE:
 		case RELIC_COST_OPERATION:
+			work = saturating_add(work, bindings);
+			break;
 		case RELIC_COST_EMIT:
 			work = saturating_add(work, bindings);
+			*emitted = saturating_add(*emitted, bindings);
 			break;
 		case RELIC_COST_FOLD_SCAN:
 			tuples = range_length(

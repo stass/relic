@@ -1053,9 +1053,10 @@ a_textual_variant_keeps_its_written_order(void)
 	    fixture_prepare(&fixture, &family.candidates[0].draft)) {
 		check(kinds_are(&fixture.plan, recursive_kinds, 3) &&
 		    family.count == 1 &&
-		    family.candidates[0].recipe.step_count == 0,
+		    family.candidates[0].recipe.step_count ==
+		    family.candidates[0].draft.op_count,
 		    SCENARIO_WRITTEN, "the variant is one plan of two SCANs "
-		    "and an EMIT, with no recipe to choose by");
+		    "and an EMIT, with a recipe step per operation");
 
 		x = slot_named(&fixture, 1, "X");
 		y = slot_named(&fixture, 1, "Y");
@@ -1139,7 +1140,7 @@ a_textual_variant_keeps_its_written_order(void)
  * Without indexes a delta placed after other literals would be scanned
  * whole once for each binding that reaches it, where the delta-first plan
  * scans it once, so under RELIC_UNSTABLE_NO_INDEX the variant has the
- * delta-first plan alone, and no recipe.
+ * delta-first plan alone, with its recipe, which predicts its derivations.
  *
  * A fully bound delta literal outranks every other literal under both
  * policies, so both place it first as a MEMBER of the delta, and the one
@@ -1220,7 +1221,8 @@ a_variant_keeps_both_orders(void)
 	    relic_pred_count(fixture.ctx) <= 8) {
 		check(fixture_plan_variants(&fixture, 1, 2, incomplete,
 		    &family) && family.count == 1 &&
-		    family.candidates[0].recipe.step_count == 0 &&
+		    family.candidates[0].recipe.step_count ==
+		    family.candidates[0].draft.op_count &&
 		    family.candidates[0].draft.ops[0].u.atom.view ==
 		    RELIC_VIEW_DELTA,
 		    SCENARIO_FAMILY, "without indexes a delta placed later "
@@ -1261,7 +1263,8 @@ a_variant_keeps_both_orders(void)
 		    "keeps both orders too");
 		check(fixture_plan_variants(&fixture, 2, 1, incomplete,
 		    &family) && family.count == 1 &&
-		    family.candidates[0].recipe.step_count == 0 &&
+		    family.candidates[0].recipe.step_count ==
+		    family.candidates[0].draft.op_count &&
 		    family.candidates[0].draft.ops[0].kind == RELIC_OP_MEMBER &&
 		    family.candidates[0].draft.ops[0].u.atom.view ==
 		    RELIC_VIEW_DELTA,
